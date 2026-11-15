@@ -15,6 +15,6 @@ workspace = true
 fontdue = "0.9.3"
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }
 harfrust = "0.12"
-drawen-core = { version = "0.1.0", path = "../drawen-core" }
+drawen-core = { version = "0.2", path = "../drawen-core" }
 unicode-bidi = "0.3"
 unicode-segmentation = "1.12"

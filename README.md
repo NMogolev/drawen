@@ -374,6 +374,7 @@ docking, tabs, floating panels, and persisted layout data.
 - [Media pipeline and backends](https://github.com/NMogolev/drawen/blob/main/docs/MEDIA.md)
 - [Paleo media layer](https://github.com/NMogolev/drawen/blob/main/docs/PALEO.md)
 - [Background work and threading](https://github.com/NMogolev/drawen/blob/main/docs/THREADING.md)
+- [Versioning and release policy](https://github.com/NMogolev/drawen/blob/main/docs/RELEASING.md)
 - [Using an AI assistant with Drawen](https://github.com/NMogolev/drawen/blob/main/docs/AI_GUIDE.md)
 
 API documentation is published on [docs.rs/drawen](https://docs.rs/drawen).
