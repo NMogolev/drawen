@@ -182,6 +182,50 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
+const IMAGE_SHADER: &str = r"
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vertex(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = vec4(input.position, 0.0, 1.0);
+    output.uv = input.uv;
+    return output;
+}
+
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return select(
+        color / 12.92,
+        pow((color + vec3(0.055)) / 1.055, vec3(2.4)),
+        color > vec3(0.04045),
+    );
+}
+
+@fragment
+fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+    let sample = textureSample(source_texture, source_sampler, input.uv);
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4(0.0);
+    }
+    // RasterImage stores straight, unpremultiplied sRGBA. Do not divide by
+    // alpha here: the external-texture shader already handles premultiplied
+    // browser surfaces.
+    return vec4(srgb_to_linear(sample.rgb) * alpha, alpha);
+}
+";
+
 /// GPU presentation or initialization failure.
 #[derive(Debug)]
 pub enum GpuError {
@@ -273,6 +317,7 @@ pub struct GpuRenderer {
     config: wgpu::SurfaceConfiguration,
     shape_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
     texture_pipeline: wgpu::RenderPipeline,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     text_atlas: wgpu::Texture,
@@ -291,6 +336,7 @@ impl GpuRenderer {
     ///
     /// Returns an error when a surface, adapter, device, or initial surface
     /// configuration cannot be created.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
@@ -330,11 +376,21 @@ impl GpuRenderer {
             label: Some("Drawen external texture shader"),
             source: wgpu::ShaderSource::Wgsl(TEXTURE_SHADER.into()),
         });
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Drawen raster image shader"),
+            source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
+        });
         let texture_bind_group_layout = create_texture_bind_group_layout(&device);
         let shape_pipeline = create_shape_pipeline(&device, &shape_shader, config.format);
         let text_pipeline = create_text_pipeline(
             &device,
             &text_shader,
+            config.format,
+            &texture_bind_group_layout,
+        );
+        let image_pipeline = create_image_pipeline(
+            &device,
+            &image_shader,
             config.format,
             &texture_bind_group_layout,
         );
@@ -387,6 +443,7 @@ impl GpuRenderer {
             config,
             shape_pipeline,
             text_pipeline,
+            image_pipeline,
             texture_pipeline,
             texture_bind_group_layout,
             text_atlas,
@@ -600,9 +657,9 @@ impl GpuRenderer {
                             .as_ref()
                             .expect("image operation has an image vertex buffer");
                         let draw = &image_batch.draws[*index];
-                        if current_pipeline != Some(PaintPipeline::Texture) {
-                            pass.set_pipeline(&self.texture_pipeline);
-                            current_pipeline = Some(PaintPipeline::Texture);
+                        if current_pipeline != Some(PaintPipeline::Image) {
+                            pass.set_pipeline(&self.image_pipeline);
+                            current_pipeline = Some(PaintPipeline::Image);
                         }
                         if current_vertex_buffer != Some(VertexBuffer::Image) {
                             pass.set_vertex_buffer(0, buffer.slice(..));
@@ -919,6 +976,7 @@ enum PreparedOperation {
 enum PaintPipeline {
     Shape,
     Text,
+    Image,
     Texture,
 }
 
@@ -1604,6 +1662,15 @@ fn create_texture_pipeline(
     )
 }
 
+fn create_image_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    create_textured_pipeline(device, shader, format, bind_group_layout, "raster image")
+}
+
 fn create_textured_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1762,7 +1829,19 @@ mod tests {
     use drawen_core::{Color, Point, Rect, Size};
     use drawen_render::{PaintContext, RasterImage};
 
-    use super::{DisplayList, PreparedFrame, PreparedOperation, TextureId, source_over_alpha};
+    use super::{
+        DisplayList, IMAGE_SHADER, PreparedFrame, PreparedOperation, TEXTURE_SHADER, TextureId,
+        source_over_alpha,
+    };
+
+    #[test]
+    fn raster_image_shader_treats_pixels_as_straight_rgba() {
+        // RasterImage is unpremultiplied sRGBA, while browser surfaces are
+        // premultiplied. Keep the two shaders from collapsing back into one.
+        assert!(IMAGE_SHADER.contains("srgb_to_linear(sample.rgb) * alpha"));
+        assert!(!IMAGE_SHADER.contains("sample.rgb / alpha"));
+        assert!(TEXTURE_SHADER.contains("sample.rgb / alpha"));
+    }
 
     #[test]
     fn composes_overlapping_glyph_coverage_with_source_over_alpha() {
