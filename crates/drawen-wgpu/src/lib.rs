@@ -324,6 +324,10 @@ pub struct GpuRenderer {
     text_atlas_bind_group: wgpu::BindGroup,
     external_textures: HashMap<TextureId, ExternalTexture>,
     raster_images: RasterImageCache,
+    // Larger than the LRU budget but still worth retaining: a 4K video frame
+    // would otherwise be re-uploaded over PCIe on every single frame.
+    oversized_image: Option<OversizedRasterImage>,
+    max_texture_dimension_2d: u32,
 }
 
 impl GpuRenderer {
@@ -359,6 +363,7 @@ impl GpuRenderer {
             ..Default::default()
         }))
         .map_err(GpuError::Device)?;
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let config = surface
             .get_default_config(&adapter, width, height)
             .ok_or(GpuError::UnsupportedSurface)?;
@@ -450,6 +455,8 @@ impl GpuRenderer {
             text_atlas_bind_group,
             external_textures: HashMap::new(),
             raster_images: RasterImageCache::default(),
+            oversized_image: None,
+            max_texture_dimension_2d,
         })
     }
 
@@ -618,6 +625,9 @@ impl GpuRenderer {
             });
             let mut current_pipeline = None;
             let mut current_vertex_buffer = None;
+            let mut current_bind_group = None;
+            let mut current_scissor = None;
+            let mut last_text_draw = None;
             for operation in &prepared.operations {
                 match operation {
                     PreparedOperation::Shape(draw) => {
@@ -632,27 +642,47 @@ impl GpuRenderer {
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             current_vertex_buffer = Some(VertexBuffer::Shape);
                         }
-                        set_scissor(&mut pass, draw.scissor);
+                        set_scissor(&mut pass, &mut current_scissor, draw.scissor);
                         pass.draw(draw.vertices.clone(), 0..1);
                     }
                     PreparedOperation::Text(index) => {
+                        // Adjacent text commands share one draw only when a
+                        // barrier does not separate them in the operation
+                        // stream; `text_draws` maps each text index to the
+                        // merged draw that actually covers it. The same merged
+                        // draw therefore appears once per covered text and must
+                        // only be submitted once.
+                        let draw_index = text_batch.text_draws[*index];
+                        if last_text_draw == Some(draw_index) {
+                            continue;
+                        }
+                        last_text_draw = Some(draw_index);
                         let buffer = text_buffer
                             .as_ref()
                             .expect("text operation has a text vertex buffer");
-                        let draw = &text_batch.draws[*index];
+                        let draw = &text_batch.draws[draw_index];
                         if current_pipeline != Some(PaintPipeline::Text) {
                             pass.set_pipeline(&self.text_pipeline);
                             current_pipeline = Some(PaintPipeline::Text);
                         }
-                        pass.set_bind_group(0, &self.text_atlas_bind_group, &[]);
+                        if current_bind_group != Some(BindGroupId::TextAtlas) {
+                            pass.set_bind_group(0, &self.text_atlas_bind_group, &[]);
+                            current_bind_group = Some(BindGroupId::TextAtlas);
+                        }
                         if current_vertex_buffer != Some(VertexBuffer::Text) {
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             current_vertex_buffer = Some(VertexBuffer::Text);
                         }
-                        set_scissor(&mut pass, draw.scissor);
+                        set_scissor(&mut pass, &mut current_scissor, draw.scissor);
                         pass.draw(draw.vertices.clone(), 0..1);
                     }
                     PreparedOperation::Image(index) => {
+                        // Images that exceed the device texture limit are
+                        // recorded without a bind group and skipped here, so
+                        // one oversized asset cannot fail the whole frame.
+                        let Some(bind_group) = &image_batch.bind_groups[*index] else {
+                            continue;
+                        };
                         let buffer = image_buffer
                             .as_ref()
                             .expect("image operation has an image vertex buffer");
@@ -665,8 +695,12 @@ impl GpuRenderer {
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             current_vertex_buffer = Some(VertexBuffer::Image);
                         }
-                        pass.set_bind_group(0, &image_batch.bind_groups[*index], &[]);
-                        set_scissor(&mut pass, draw.scissor);
+                        let bind_group_id = BindGroupId::Image(image_batch.keys[*index]);
+                        if current_bind_group != Some(bind_group_id) {
+                            pass.set_bind_group(0, bind_group, &[]);
+                            current_bind_group = Some(bind_group_id);
+                        }
+                        set_scissor(&mut pass, &mut current_scissor, draw.scissor);
                         pass.draw(draw.vertices.clone(), 0..1);
                     }
                     PreparedOperation::Texture(index) => {
@@ -686,8 +720,12 @@ impl GpuRenderer {
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             current_vertex_buffer = Some(VertexBuffer::ExternalTexture);
                         }
-                        pass.set_bind_group(0, &texture.bind_group, &[]);
-                        set_scissor(&mut pass, draw.scissor);
+                        let bind_group_id = BindGroupId::Texture(draw.texture);
+                        if current_bind_group != Some(bind_group_id) {
+                            pass.set_bind_group(0, &texture.bind_group, &[]);
+                            current_bind_group = Some(bind_group_id);
+                        }
+                        set_scissor(&mut pass, &mut current_scissor, draw.scissor);
                         pass.draw(draw.vertices.clone(), 0..1);
                     }
                 }
@@ -701,31 +739,6 @@ impl GpuRenderer {
     fn prepare_image_batch(&mut self, images: &[PreparedImage]) -> ImageBatch {
         let mut batch = ImageBatch::default();
         for image in images {
-            let key = Arc::as_ptr(&image.image) as usize;
-            let bind_group = if let Some(bind_group) = self.raster_images.get(key) {
-                bind_group
-            } else {
-                let texture = self.create_raster_image_texture(&image.image);
-                let byte_count = image.image.pixels().len();
-                if byte_count <= RASTER_IMAGE_CACHE_BYTES {
-                    self.raster_images.evict_for(byte_count);
-                    let bind_group = texture.bind_group.clone();
-                    self.raster_images.insert(
-                        key,
-                        CachedRasterImage {
-                            _image: Arc::clone(&image.image),
-                            texture,
-                            byte_count,
-                            last_used: 0,
-                        },
-                    );
-                    bind_group
-                } else {
-                    let bind_group = texture.bind_group.clone();
-                    batch.transient_textures.push(texture);
-                    bind_group
-                }
-            };
             let start =
                 u32::try_from(batch.vertices.len()).expect("image vertex count fits in u32");
             batch.vertices.extend_from_slice(&image.vertices);
@@ -733,12 +746,74 @@ impl GpuRenderer {
                 vertices: start..start + 6,
                 scissor: image.scissor,
             });
-            batch.bind_groups.push(bind_group);
+            let key = Arc::as_ptr(&image.image) as usize;
+            batch.keys.push(key);
+            if !self.raster_image_fits(&image.image) {
+                // Keep the draw index aligned with the operation stream, but
+                // skip the draw: a texture larger than the device limit would
+                // otherwise trip a wgpu validation error and lose the frame.
+                batch.bind_groups.push(None);
+                continue;
+            }
+            let bind_group =
+                self.raster_image_bind_group(key, &image.image, &mut batch.transient_textures);
+            batch.bind_groups.push(Some(bind_group));
         }
         batch
     }
 
+    fn raster_image_bind_group(
+        &mut self,
+        key: usize,
+        image: &Arc<RasterImage>,
+        transient: &mut Vec<ExternalTexture>,
+    ) -> wgpu::BindGroup {
+        if let Some(bind_group) = self.raster_images.get(key) {
+            return bind_group;
+        }
+        let byte_count = image.pixels().len();
+        if byte_count > RASTER_IMAGE_CACHE_BYTES {
+            if let Some(cached) = &self.oversized_image
+                && Arc::ptr_eq(&cached.image, image)
+            {
+                return cached.texture.bind_group.clone();
+            }
+            let texture = self.create_raster_image_texture(image);
+            let bind_group = texture.bind_group.clone();
+            // The replaced texture may still be referenced by an operation
+            // earlier in this frame, so keep it alive until submission.
+            if let Some(previous) = self.oversized_image.replace(OversizedRasterImage {
+                image: Arc::clone(image),
+                texture,
+            }) {
+                transient.push(previous.texture);
+            }
+            return bind_group;
+        }
+        let texture = self.create_raster_image_texture(image);
+        let bind_group = texture.bind_group.clone();
+        self.raster_images.evict_for(byte_count);
+        self.raster_images.insert(
+            key,
+            CachedRasterImage {
+                _image: Arc::clone(image),
+                texture,
+                byte_count,
+                last_used: 0,
+            },
+        );
+        bind_group
+    }
+
+    fn raster_image_fits(&self, image: &RasterImage) -> bool {
+        raster_image_fits_device(image, self.max_texture_dimension_2d)
+    }
+
     fn create_raster_image_texture(&self, image: &RasterImage) -> ExternalTexture {
+        debug_assert!(
+            self.raster_image_fits(image),
+            "raster image must be checked against max_texture_dimension_2d first"
+        );
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Drawen raster image"),
             size: wgpu::Extent3d {
@@ -867,7 +942,9 @@ impl GpuRenderer {
                     uv,
                 });
             }
-            batch.push_draw(start..start + 6, text.scissor);
+            let draw_index =
+                batch.push_draw(start..start + 6, text.scissor, text.merge_with_previous);
+            batch.text_draws.push(draw_index);
             cursor_x += text.width;
             row_height = row_height.max(text.height);
         }
@@ -939,6 +1016,9 @@ struct PreparedText {
     pixels: Vec<u8>,
     vertices: [TextVertex; 6],
     scissor: Scissor,
+    // True only when the previous display-list command was also text, so the
+    // text batch never merges across a shape, image, or texture barrier.
+    merge_with_previous: bool,
 }
 
 struct PreparedTexture {
@@ -957,11 +1037,29 @@ struct PreparedImage {
 struct TextBatch {
     vertices: Vec<TextVertex>,
     draws: Vec<ShapeDraw>,
+    // Maps each PreparedText index to the merged draw that covers it. Text
+    // operations can only share a draw when they are adjacent in the ordered
+    // operation stream and use the same scissor.
+    text_draws: Vec<usize>,
 }
 
 impl TextBatch {
-    fn push_draw(&mut self, vertices: Range<u32>, scissor: Scissor) {
+    fn push_draw(
+        &mut self,
+        vertices: Range<u32>,
+        scissor: Scissor,
+        merge_with_previous: bool,
+    ) -> usize {
+        if merge_with_previous
+            && let Some(previous) = self.draws.last_mut()
+            && previous.scissor == scissor
+            && previous.vertices.end == vertices.start
+        {
+            previous.vertices.end = vertices.end;
+            return self.draws.len() - 1;
+        }
         self.draws.push(ShapeDraw { vertices, scissor });
+        self.draws.len() - 1
     }
 }
 
@@ -978,6 +1076,14 @@ enum PaintPipeline {
     Text,
     Image,
     Texture,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BindGroupId {
+    TextAtlas,
+    // `Arc<RasterImage>` pointer, matching `ImageBatch::keys`.
+    Image(usize),
+    Texture(TextureId),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1004,6 +1110,13 @@ struct CachedRasterImage {
     last_used: u64,
 }
 
+// A single out-of-budget image kept across frames. Video-sized frames exceed
+// the LRU budget, but re-uploading them every frame would saturate PCIe.
+struct OversizedRasterImage {
+    image: Arc<RasterImage>,
+    texture: ExternalTexture,
+}
+
 #[derive(Default)]
 struct RasterImageCache {
     entries: HashMap<usize, CachedRasterImage>,
@@ -1027,6 +1140,16 @@ impl RasterImageCache {
     }
 
     fn insert(&mut self, key: usize, mut image: CachedRasterImage) {
+        debug_assert!(
+            !self.entries.contains_key(&key),
+            "raster image cache key inserted twice"
+        );
+        // A duplicate key would otherwise leave the old byte count in the
+        // budget and a stale recency entry behind, so clean it up defensively.
+        if let Some(previous) = self.entries.remove(&key) {
+            self.recency.remove(&(previous.last_used, key));
+            self.bytes = self.bytes.saturating_sub(previous.byte_count);
+        }
         let access = self.record_access();
         image.last_used = access;
         self.bytes = self.bytes.saturating_add(image.byte_count);
@@ -1063,7 +1186,13 @@ impl RasterImageCache {
 struct ImageBatch {
     vertices: Vec<TextVertex>,
     draws: Vec<ShapeDraw>,
-    bind_groups: Vec<wgpu::BindGroup>,
+    // `None` marks an image that was rejected by the device texture limit.
+    // The draw and vertex range still occupy their indices so
+    // `PreparedOperation::Image` stays a direct index into this batch.
+    bind_groups: Vec<Option<wgpu::BindGroup>>,
+    // Image identity for bind-group caching. Two operations that draw the same
+    // Arc share a key and therefore share one `set_bind_group` call.
+    keys: Vec<usize>,
     // Keeps uncached large textures alive until the render pass is submitted.
     transient_textures: Vec<ExternalTexture>,
 }
@@ -1356,12 +1485,15 @@ impl PreparedFrame {
             };
         }
         let index = self.texts.len();
+        let merge_with_previous =
+            matches!(self.operations.last(), Some(PreparedOperation::Text(_)));
         self.texts.push(PreparedText {
             width,
             height,
             pixels,
             vertices,
             scissor: self.scissor(),
+            merge_with_previous,
         });
         self.operations.push(PreparedOperation::Text(index));
         Ok(())
@@ -1716,6 +1848,10 @@ fn create_textured_pipeline(
     })
 }
 
+fn raster_image_fits_device(image: &RasterImage, limit: u32) -> bool {
+    image.width() <= limit && image.height() <= limit
+}
+
 fn create_buffer<T: Pod>(device: &wgpu::Device, label: &str, values: &[T]) -> wgpu::Buffer {
     use wgpu::util::DeviceExt;
 
@@ -1726,8 +1862,12 @@ fn create_buffer<T: Pod>(device: &wgpu::Device, label: &str, values: &[T]) -> wg
     })
 }
 
-fn set_scissor(pass: &mut wgpu::RenderPass<'_>, scissor: Scissor) {
+fn set_scissor(pass: &mut wgpu::RenderPass<'_>, current: &mut Option<Scissor>, scissor: Scissor) {
+    if *current == Some(scissor) {
+        return;
+    }
     pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
+    *current = Some(scissor);
 }
 
 fn validate_rect(rect: Rect) -> Result<(), GpuRendererError> {
@@ -1827,11 +1967,11 @@ mod tests {
     use std::sync::Arc;
 
     use drawen_core::{Color, Point, Rect, Size};
-    use drawen_render::{PaintContext, RasterImage};
+    use drawen_render::{FontdueTextShaper, PaintContext, RasterImage, TextStyle};
 
     use super::{
-        DisplayList, IMAGE_SHADER, PreparedFrame, PreparedOperation, TEXTURE_SHADER, TextureId,
-        source_over_alpha,
+        DisplayList, IMAGE_SHADER, PreparedFrame, PreparedOperation, Scissor, TEXTURE_SHADER,
+        TextBatch, TextureId, raster_image_fits_device, source_over_alpha,
     };
 
     #[test]
@@ -1932,5 +2072,63 @@ mod tests {
         assert!(matches!(frame.operations[2], PreparedOperation::Shape(_)));
         assert_eq!(frame.texts.len(), 0);
         assert_eq!(frame.images.len(), 1);
+    }
+
+    #[test]
+    fn merges_text_draws_only_when_flagged_and_scissor_matches() {
+        let scissor = Scissor::full(16, 16);
+        let clipped = Scissor {
+            x: 1,
+            y: 1,
+            width: 4,
+            height: 4,
+        };
+        let mut batch = TextBatch::default();
+
+        assert_eq!(batch.push_draw(0..6, scissor, false), 0);
+        assert_eq!(batch.push_draw(6..12, scissor, true), 0);
+        assert_eq!(batch.draws.len(), 1);
+        assert_eq!(batch.draws[0].vertices, 0..12);
+        // A barrier between text commands must break the run even when the
+        // scissor is identical, because a shape now sits between them.
+        assert_eq!(batch.push_draw(12..18, scissor, false), 1);
+        // A different clip is a separate draw as well.
+        assert_eq!(batch.push_draw(18..24, clipped, true), 2);
+        assert_eq!(batch.draws.len(), 3);
+    }
+
+    #[test]
+    fn marks_only_consecutive_text_commands_for_batching() {
+        let layout = FontdueTextShaper::ubuntu_light().layout(
+            "A",
+            &TextStyle::new(12.0, Color::BLACK),
+            None,
+        );
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.draw_text(layout.clone(), Point::ZERO);
+        paint.draw_text(layout.clone(), Point::ZERO);
+        paint.fill_rect(
+            Rect::new(Point::ZERO, Size::new(8.0, 8.0).expect("valid size")),
+            Color::BLACK,
+        );
+        paint.draw_text(layout, Point::ZERO);
+        let mut frame = PreparedFrame::new(64, 64, 1.0);
+
+        frame.record(&list).expect("valid display list");
+
+        assert_eq!(frame.texts.len(), 3);
+        assert!(!frame.texts[0].merge_with_previous);
+        assert!(frame.texts[1].merge_with_previous);
+        assert!(!frame.texts[2].merge_with_previous);
+    }
+
+    #[test]
+    fn rejects_raster_images_above_the_device_texture_limit() {
+        let image = RasterImage::new(64, 32, vec![0; 64 * 32 * 4]).expect("valid image");
+
+        assert!(raster_image_fits_device(&image, 64));
+        assert!(!raster_image_fits_device(&image, 63));
+        assert!(!raster_image_fits_device(&image, 31));
     }
 }
