@@ -274,6 +274,12 @@ impl SoftwareRenderer {
         let step_local_x = inverse.xx * inv_scale;
         let step_local_y = inverse.xy * inv_scale;
         let has_clips = !state.clips.is_empty();
+        let text_color = layout.color();
+        let source_red = component(text_color.red);
+        let source_green = component(text_color.green);
+        let source_blue = component(text_color.blue);
+        let source_alpha = component(text_color.alpha);
+        let glyph_source = GlyphSource::new(source_red, source_green, source_blue, source_alpha);
 
         for run in layout.glyph_runs() {
             if !run.font_size().is_finite() || run.font_size() <= 0.0 {
@@ -314,19 +320,9 @@ impl SoftwareRenderer {
                                 bitmap_y
                                     .saturating_mul(bitmap.width())
                                     .saturating_add(bitmap_x),
-                            ) {
-                                let alpha = f32::from(coverage) / 255.0;
-                                blend_pixel(
-                                    target,
-                                    x,
-                                    y,
-                                    Color::rgba(
-                                        layout.color().red,
-                                        layout.color().green,
-                                        layout.color().blue,
-                                        layout.color().alpha * alpha,
-                                    ),
-                                );
+                            ) && coverage != 0
+                            {
+                                glyph_source.apply(target, x, y, f32::from(coverage) / 255.0);
                             }
                         }
                         point_x += inv_scale;
@@ -386,12 +382,7 @@ impl SoftwareRenderer {
                         .saturating_add(source_x)
                         .saturating_mul(4);
                     if let Some(rgba) = image.pixels().get(offset..offset.saturating_add(4)) {
-                        blend_pixel(
-                            target,
-                            x,
-                            y,
-                            Color::rgba8(rgba[0], rgba[1], rgba[2], rgba[3]),
-                        );
+                        blend_pixel_rgba8(target, x, y, [rgba[0], rgba[1], rgba[2], rgba[3]]);
                     }
                 }
                 point_x += inv_scale;
@@ -626,24 +617,109 @@ fn fill_convex_shape(
     inverse: Affine,
     (start_x, start_y, end_x, end_y): (u32, u32, u32, u32),
 ) {
-    let has_clips = !state.clips.is_empty();
     for y in start_y..end_y {
         let inside = |x: u32| {
             let point = logical_pixel_center(x, y, scale_factor);
-            if has_clips && !is_visible(point, state) {
-                return false;
-            }
             contains_rounded_rect(shape.rect, shape.radius, inverse.transform_point(point))
         };
-        let first = first_true(start_x, end_x, inside);
-        if first == end_x {
+        let Some(seed) = rounded_rect_seed(
+            shape.rect,
+            shape.radius,
+            inverse,
+            y,
+            start_x,
+            end_x,
+            scale_factor,
+        ) else {
             continue;
-        }
+        };
+        let first = first_true(start_x, seed + 1, inside);
         // Convex containment makes the true region a single interval, so the
-        // first false pixel after `first` ends the span.
-        let last = first_true(first, end_x, |x| !inside(x));
+        // first false pixel after a known inside pixel ends the span.
+        let last = first_true(seed, end_x, |x| !inside(x));
+        let (first, last) = if state.clips.is_empty() {
+            (first, last)
+        } else {
+            // Clips are convex too, so their intersection with the same row is
+            // one interval. Intersect it with the shape span analytically and
+            // trim the boundary with the exact clip test.
+            let Some((clip_first, clip_last)) = clip_row_span(state, y, first, last, scale_factor)
+            else {
+                continue;
+            };
+            let mut clipped_first = first.max(clip_first);
+            let mut clipped_last = last.min(clip_last);
+            while clipped_first < clipped_last
+                && !is_visible(logical_pixel_center(clipped_first, y, scale_factor), state)
+            {
+                clipped_first += 1;
+            }
+            while clipped_last > clipped_first
+                && !is_visible(
+                    logical_pixel_center(clipped_last - 1, y, scale_factor),
+                    state,
+                )
+            {
+                clipped_last -= 1;
+            }
+            (clipped_first, clipped_last)
+        };
         fill_row(target, y, first, last, color);
     }
+}
+
+/// Returns the integer x range on row `y` where every active clip is visible.
+///
+/// The result is a conservative superset: callers must still test the two edge
+/// pixels with [`is_visible`]. The clip rectangles are convex and their inverse
+/// transforms are affine, so each row is an interval.
+fn clip_row_span(
+    state: &RenderState,
+    y: u32,
+    start_x: u32,
+    end_x: u32,
+    scale_factor: f32,
+) -> Option<(u32, u32)> {
+    let row_y = (as_logical_coordinate(y) + 0.5) / scale_factor;
+    let x_scale = scale_factor.recip();
+    let mut low = as_logical_coordinate(start_x) - 1.0;
+    let mut high = as_logical_coordinate(end_x) + 1.0;
+    for clip in &state.clips {
+        let inverse = clip.inverse;
+        // local_x(x) = inverse.xx * (x + 0.5) / scale + inverse.yx * row_y + inverse.dx
+        let x_slope = inverse.xx * x_scale;
+        let x_offset = inverse.xx * 0.5 * x_scale + inverse.yx * row_y + inverse.dx;
+        let y_slope = inverse.xy * x_scale;
+        let y_offset = inverse.xy * 0.5 * x_scale + inverse.yy * row_y + inverse.dy;
+        for (slope, offset, from, to) in [
+            (x_slope, x_offset, clip.rect.origin.x, clip.rect.right()),
+            (y_slope, y_offset, clip.rect.origin.y, clip.rect.bottom()),
+        ] {
+            let (clip_low, clip_high) = linear_band(slope, offset, from, to)?;
+            low = low.max(clip_low);
+            high = high.min(clip_high);
+            if low >= high {
+                return None;
+            }
+        }
+    }
+    let first = floor_to_pixel(low - 0.5, end_x).max(start_x);
+    let last = ceil_to_pixel(high - 0.5 + 1.0, end_x).max(first);
+    (first < last).then_some((first, last))
+}
+
+/// Solves `low <= slope * x + offset < high` for a continuous x interval.
+fn linear_band(slope: f32, offset: f32, low: f32, high: f32) -> Option<(f32, f32)> {
+    if slope == 0.0 {
+        return (offset >= low && offset < high).then_some((f32::NEG_INFINITY, f32::INFINITY));
+    }
+    let first = (low - offset) / slope;
+    let second = (high - offset) / slope;
+    Some(if slope > 0.0 {
+        (first, second)
+    } else {
+        (second, first)
+    })
 }
 
 fn first_true(mut low: u32, mut high: u32, predicate: impl Fn(u32) -> bool) -> u32 {
@@ -656,6 +732,104 @@ fn first_true(mut low: u32, mut high: u32, predicate: impl Fn(u32) -> bool) -> u
         }
     }
     low
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rounded_rect_seed(
+    rect: Rect,
+    radius: f32,
+    inverse: Affine,
+    y: u32,
+    start_x: u32,
+    end_x: u32,
+    scale_factor: f32,
+) -> Option<u32> {
+    if start_x >= end_x {
+        return None;
+    }
+    let radius = radius.min(rect.size.width().min(rect.size.height()) * 0.5);
+    let left = rect.origin.x + radius;
+    let right = rect.right() - radius;
+    let top = rect.origin.y + radius;
+    let bottom = rect.bottom() - radius;
+    let row_y = (as_logical_coordinate(y) + 0.5) / scale_factor;
+    let x_scale = scale_factor.recip();
+    let local_x = (inverse.xx * x_scale, inverse.yx * row_y + inverse.dx);
+    let local_y = (inverse.xy * x_scale, inverse.yy * row_y + inverse.dy);
+    let lower = as_logical_coordinate(start_x) + 0.5;
+    let upper = as_logical_coordinate(end_x.saturating_sub(1)) + 0.5;
+    let mut boundaries = [lower, upper, lower, upper, lower, upper];
+    let mut boundary_count = 2;
+    for (slope, offset, first, second) in [
+        (local_x.0, local_x.1, left, right),
+        (local_y.0, local_y.1, top, bottom),
+    ] {
+        if slope != 0.0 {
+            for boundary in [first, second] {
+                let position = (boundary - offset) / slope;
+                if position > lower && position < upper {
+                    boundaries[boundary_count] = position;
+                    boundary_count += 1;
+                }
+            }
+        }
+    }
+    boundaries[..boundary_count].sort_by(f32::total_cmp);
+    let mut candidates = [lower; 11];
+    let mut candidate_count = 0;
+    for boundary in &boundaries[..boundary_count] {
+        candidates[candidate_count] = *boundary;
+        candidate_count += 1;
+    }
+    for window in boundaries[..boundary_count].windows(2) {
+        let start = window[0];
+        let end = window[1];
+        let middle = (start + end) * 0.5;
+        let (x_active, x_boundary) =
+            active_distance_term(local_x.0 * middle + local_x.1, left, right);
+        let (y_active, y_boundary) =
+            active_distance_term(local_y.0 * middle + local_y.1, top, bottom);
+        let coefficient = if x_active { local_x.0 * local_x.0 } else { 0.0 }
+            + if y_active { local_y.0 * local_y.0 } else { 0.0 };
+        let linear = if x_active {
+            local_x.0 * (local_x.1 - x_boundary)
+        } else {
+            0.0
+        } + if y_active {
+            local_y.0 * (local_y.1 - y_boundary)
+        } else {
+            0.0
+        };
+        if coefficient > 0.0 {
+            candidates[candidate_count] = (-linear / coefficient).clamp(start, end);
+            candidate_count += 1;
+        }
+    }
+    for candidate in &candidates[..candidate_count] {
+        let nearest = (candidate - 0.5).round();
+        for offset in [-1.0, 0.0, 1.0] {
+            let pixel = nearest + offset;
+            if pixel >= as_logical_coordinate(start_x) && pixel < as_logical_coordinate(end_x) {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let pixel = pixel as u32;
+                let point = logical_pixel_center(pixel, y, scale_factor);
+                if contains_rounded_rect(rect, radius, inverse.transform_point(point)) {
+                    return Some(pixel);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn active_distance_term(value: f32, low: f32, high: f32) -> (bool, f32) {
+    if value < low {
+        (true, low)
+    } else if value > high {
+        (true, high)
+    } else {
+        (false, value)
+    }
 }
 
 fn fill_row(target: &mut PixelBuffer, y: u32, start_x: u32, end_x: u32, color: Color) {
@@ -733,11 +907,26 @@ fn blend_pixel_source(target: &mut PixelBuffer, x: u32, y: u32, source: SourceOv
     }
 }
 
+fn blend_pixel_rgba8(target: &mut PixelBuffer, x: u32, y: u32, rgba: [u8; 4]) {
+    if let Some(pixel) = target.get_mut(x, y) {
+        if pixel.alpha == 255 {
+            *pixel = Pixel::rgba(
+                blend_opaque_channel(rgba[0], rgba[3], pixel.red),
+                blend_opaque_channel(rgba[1], rgba[3], pixel.green),
+                blend_opaque_channel(rgba[2], rgba[3], pixel.blue),
+                255,
+            );
+        } else {
+            *pixel = blend(*pixel, Color::rgba8(rgba[0], rgba[1], rgba[2], rgba[3]));
+        }
+    }
+}
+
 fn blend(destination: Pixel, source: Color) -> Pixel {
     SourceOver::new(source).apply(destination)
 }
 
-/// Source-over terms that stay constant for one solid-color draw.
+/// Source-over terms that stay constant for one draw color.
 #[derive(Clone, Copy)]
 struct SourceOver {
     alpha: f32,
@@ -745,41 +934,141 @@ struct SourceOver {
     red: f32,
     green: f32,
     blue: f32,
+    alpha_byte: u8,
+    red_byte: u8,
+    green_byte: u8,
+    blue_byte: u8,
 }
 
 impl SourceOver {
     fn new(source: Color) -> Self {
-        let alpha = component(source.alpha);
-        let inverse_alpha = 1.0 - alpha;
+        Self::from_components(
+            component(source.red),
+            component(source.green),
+            component(source.blue),
+            component(source.alpha),
+        )
+    }
+
+    /// Builds terms from components that are already finite and clamped.
+    fn from_components(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
         Self {
             alpha,
-            inverse_alpha,
-            red: component(source.red) * alpha,
-            green: component(source.green) * alpha,
-            blue: component(source.blue) * alpha,
+            inverse_alpha: 1.0 - alpha,
+            red: red * alpha,
+            green: green * alpha,
+            blue: blue * alpha,
+            alpha_byte: to_u8(alpha),
+            red_byte: to_u8(red),
+            green_byte: to_u8(green),
+            blue_byte: to_u8(blue),
         }
     }
 
     fn apply(self, destination: Pixel) -> Pixel {
+        // The UI framebuffer is opaque almost everywhere. With a fully opaque
+        // destination the output alpha is 1 and source-over needs no
+        // unpremultiply and no division at all.
+        if destination.alpha == 255 {
+            return Pixel::rgba(
+                blend_opaque_channel(self.red_byte, self.alpha_byte, destination.red),
+                blend_opaque_channel(self.green_byte, self.alpha_byte, destination.green),
+                blend_opaque_channel(self.blue_byte, self.alpha_byte, destination.blue),
+                255,
+            );
+        }
+
+        // Keep the reference float path bit-identical: divide rather than
+        // multiply by a reciprocal, and apply the destination scale in the
+        // same order as the original blender.
         let destination_alpha = f32::from(destination.alpha) / 255.0;
         let output_alpha = self.alpha + destination_alpha * self.inverse_alpha;
 
-        let destination_scale = destination_alpha / 255.0;
-        let destination_red = f32::from(destination.red) * destination_scale;
-        let destination_green = f32::from(destination.green) * destination_scale;
-        let destination_blue = f32::from(destination.blue) * destination_scale;
+        let destination_red = f32::from(destination.red) / 255.0 * destination_alpha;
+        let destination_green = f32::from(destination.green) / 255.0 * destination_alpha;
+        let destination_blue = f32::from(destination.blue) / 255.0 * destination_alpha;
 
         let (red, green, blue) = if output_alpha == 0.0 {
             (0.0, 0.0, 0.0)
         } else {
-            let inverse_output_alpha = output_alpha.recip();
             (
-                (self.red + destination_red * self.inverse_alpha) * inverse_output_alpha,
-                (self.green + destination_green * self.inverse_alpha) * inverse_output_alpha,
-                (self.blue + destination_blue * self.inverse_alpha) * inverse_output_alpha,
+                (self.red + destination_red * self.inverse_alpha) / output_alpha,
+                (self.green + destination_green * self.inverse_alpha) / output_alpha,
+                (self.blue + destination_blue * self.inverse_alpha) / output_alpha,
             )
         };
         Pixel::rgba(to_u8(red), to_u8(green), to_u8(blue), to_u8(output_alpha))
+    }
+}
+
+/// Source terms shared by every covered pixel in one text layout.
+#[derive(Clone, Copy)]
+struct GlyphSource {
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+    red_byte: u8,
+    green_byte: u8,
+    blue_byte: u8,
+}
+
+impl GlyphSource {
+    /// Builds terms from finite, clamped color components.
+    fn new(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+            red_byte: to_u8_clamped(red),
+            green_byte: to_u8_clamped(green),
+            blue_byte: to_u8_clamped(blue),
+        }
+    }
+
+    fn apply(self, target: &mut PixelBuffer, x: u32, y: u32, coverage: f32) {
+        let Some(destination) = target.get_mut(x, y) else {
+            return;
+        };
+        let alpha = self.alpha * coverage;
+        let alpha_byte = to_u8_clamped(alpha);
+        if destination.alpha == 255 {
+            *destination = Pixel::rgba(
+                blend_opaque_channel(self.red_byte, alpha_byte, destination.red),
+                blend_opaque_channel(self.green_byte, alpha_byte, destination.green),
+                blend_opaque_channel(self.blue_byte, alpha_byte, destination.blue),
+                255,
+            );
+            return;
+        }
+
+        let inverse_alpha = 1.0 - alpha;
+        let destination_alpha = f32::from(destination.alpha) / 255.0;
+        let output_alpha = alpha + destination_alpha * inverse_alpha;
+        let destination_red = f32::from(destination.red) / 255.0 * destination_alpha;
+        let destination_green = f32::from(destination.green) / 255.0 * destination_alpha;
+        let destination_blue = f32::from(destination.blue) / 255.0 * destination_alpha;
+        let (red, green, blue) = if output_alpha == 0.0 {
+            (0.0, 0.0, 0.0)
+        } else {
+            (
+                (self.red * alpha + destination_red * inverse_alpha) / output_alpha,
+                (self.green * alpha + destination_green * inverse_alpha) / output_alpha,
+                (self.blue * alpha + destination_blue * inverse_alpha) / output_alpha,
+            )
+        };
+        *destination = Pixel::rgba(to_u8(red), to_u8(green), to_u8(blue), to_u8(output_alpha));
+    }
+}
+
+fn blend_opaque_channel(source: u8, source_alpha: u8, destination: u8) -> u8 {
+    let source_alpha = u32::from(source_alpha);
+    let inverse_alpha = 255 - source_alpha;
+    let scaled = u32::from(source) * source_alpha + u32::from(destination) * inverse_alpha + 127;
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        (scaled / 255) as u8
     }
 }
 
@@ -797,6 +1086,14 @@ fn to_u8(value: f32) -> u8 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         (component(value) * 255.0 + 0.5) as u8
+    }
+}
+
+fn to_u8_clamped(value: f32) -> u8 {
+    // Callers have already validated that `value` is finite and within 0..=1.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        (value * 255.0 + 0.5) as u8
     }
 }
 
@@ -852,16 +1149,230 @@ fn image_coordinate(position: f32, length: u32) -> usize {
 mod tests {
     use drawen_core::{Affine, Color, DiagnosticSeverity, Point, Rect, Size};
     use drawen_render::{
-        DisplayList, FontdueTextShaper, PaintContext, RasterImage, TextStyle, TextureId,
+        DisplayCommand, DisplayList, FontdueTextShaper, PaintContext, RasterImage, TextStyle,
+        TextureId,
     };
 
     use super::{Pixel, PixelBuffer, RenderError, SoftwareRenderer};
+
+    /// Reference renderer for the randomized fill test. It evaluates every
+    /// pixel center independently instead of using the scanline binary search,
+    /// so it has no monotonicity assumption to violate.
+    fn render_reference(
+        display_list: &DisplayList,
+        target: &mut PixelBuffer,
+        scale_factor: f32,
+    ) -> Result<(), RenderError> {
+        let mut state = super::RenderState::default();
+        let mut saved_states = Vec::new();
+        for command in display_list.commands() {
+            match command {
+                DisplayCommand::Save => saved_states.push(state.clone()),
+                DisplayCommand::Restore => {
+                    state = saved_states.pop().ok_or(RenderError::UnmatchedRestore)?;
+                }
+                DisplayCommand::PopClip => {
+                    state.clips.pop().ok_or(RenderError::UnmatchedClipPop)?;
+                }
+                DisplayCommand::Transform { transform } => {
+                    state.transform = state.transform.then(*transform);
+                }
+                DisplayCommand::PushClip { rect } => state.clips.push(super::Clip {
+                    rect: *rect,
+                    inverse: state
+                        .transform
+                        .inverse()
+                        .ok_or(RenderError::SingularTransform)?,
+                }),
+                DisplayCommand::FillRect { rect, color } => {
+                    reference_fill(target, &state, scale_factor, *rect, 0.0, *color);
+                }
+                DisplayCommand::FillRoundedRect {
+                    rect,
+                    radius,
+                    color,
+                } => {
+                    reference_fill(target, &state, scale_factor, *rect, *radius, *color);
+                }
+                _ => panic!("reference renderer only supports the fill commands used by this test"),
+            }
+        }
+        if saved_states.is_empty() {
+            Ok(())
+        } else {
+            Err(RenderError::UnmatchedSave)
+        }
+    }
+
+    fn reference_fill(
+        target: &mut PixelBuffer,
+        state: &super::RenderState,
+        scale_factor: f32,
+        rect: Rect,
+        radius: f32,
+        color: Color,
+    ) {
+        let inverse = state
+            .transform
+            .inverse()
+            .expect("test transforms are invertible");
+        let (start_x, start_y, end_x, end_y) =
+            super::physical_bounds(rect, state.transform, target, scale_factor);
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                let point = super::logical_pixel_center(x, y, scale_factor);
+                if !state.clips.is_empty() && !super::is_visible(point, state) {
+                    continue;
+                }
+                if super::contains_rounded_rect(rect, radius, inverse.transform_point(point)) {
+                    super::blend_pixel(target, x, y, color);
+                }
+            }
+        }
+    }
+
+    /// Deterministic xorshift so the test is reproducible without a proptest
+    /// dependency. A single fixed seed covers all cases.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            let mut value = self.0;
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            self.0 = value;
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                (value >> 32) as u32
+            }
+        }
+
+        fn unit(&mut self) -> f32 {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                (self.next_u32() >> 16) as f32 / 65_535.0
+            }
+        }
+
+        fn range(&mut self, low: f32, high: f32) -> f32 {
+            low + (high - low) * self.unit()
+        }
+
+        fn below(&mut self, limit: u32) -> u32 {
+            self.next_u32() % limit
+        }
+
+        fn byte(&mut self) -> u8 {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                (self.next_u32() & 0xff) as u8
+            }
+        }
+
+        fn signed_scale(&mut self) -> f32 {
+            let magnitude = self.range(0.5, 2.0);
+            if self.below(2) == 0 {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
+    }
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
         Rect::new(
             Point::new(x, y),
             Size::new(width, height).expect("valid test size"),
         )
+    }
+
+    #[test]
+    fn convex_fill_fast_path_matches_reference_for_randomized_geometry() {
+        let mut random = XorShift::new(0x5EED_C0DE_D15A_1A7E);
+        for iteration in 0..500 {
+            let mut list = DisplayList::new();
+            let transform = Affine::scale(random.signed_scale(), random.signed_scale()).then(
+                Affine::translate(random.range(-12.0, 12.0), random.range(-12.0, 12.0)),
+            );
+            let outer_clip = rect(
+                random.range(-8.0, 8.0),
+                random.range(-8.0, 8.0),
+                random.range(2.0, 18.0),
+                random.range(2.0, 18.0),
+            );
+            let inner_clip = rect(
+                random.range(-8.0, 8.0),
+                random.range(-8.0, 8.0),
+                random.range(2.0, 18.0),
+                random.range(2.0, 18.0),
+            );
+            PaintContext::new(&mut list).with_transform(transform, |paint| {
+                paint.with_clip(outer_clip, |paint| {
+                    paint.with_clip(inner_clip, |paint| {
+                        for _ in 0..=random.below(6) {
+                            let width = random.range(0.1, 16.0);
+                            let height = random.range(0.1, 16.0);
+                            let shape = rect(
+                                random.range(-12.0, 12.0),
+                                random.range(-12.0, 12.0),
+                                width,
+                                height,
+                            );
+                            let color = Color::rgba8(
+                                random.byte(),
+                                random.byte(),
+                                random.byte(),
+                                random.byte(),
+                            );
+                            if random.below(2) == 0 {
+                                paint.fill_rect(shape, color);
+                            } else {
+                                paint.fill_rounded_rect(
+                                    shape,
+                                    random.range(0.0, width.min(height) * 0.5),
+                                    color,
+                                );
+                            }
+                        }
+                    });
+                });
+            });
+            let scale_factor = random.range(0.5, 2.0);
+            let mut actual = PixelBuffer::new(32, 24).expect("small test buffer");
+            let mut expected = PixelBuffer::new(32, 24).expect("small test buffer");
+
+            SoftwareRenderer
+                .render_with_scale_factor(&list, &mut actual, scale_factor)
+                .expect("randomized display list is valid");
+            render_reference(&list, &mut expected, scale_factor)
+                .expect("randomized display list is valid");
+
+            assert_eq!(
+                actual.pixels(),
+                expected.pixels(),
+                "randomized iteration {iteration}"
+            );
+        }
+    }
+
+    #[test]
+    fn blends_translucent_fill_over_opaque_destination_with_integer_lerp() {
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(rect(0.0, 0.0, 1.0, 1.0), Color::WHITE);
+        paint.fill_rect(rect(0.0, 0.0, 1.0, 1.0), Color::rgba8(32, 96, 160, 128));
+        let mut pixels = PixelBuffer::new(1, 1).expect("small test buffer");
+
+        SoftwareRenderer
+            .render(&list, &mut pixels)
+            .expect("valid display list");
+
+        assert_eq!(pixels.get(0, 0), Some(Pixel::rgba(143, 175, 207, 255)));
     }
 
     #[test]
@@ -945,6 +1456,152 @@ mod tests {
                     "pixel ({x}, {y})"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn scanline_fast_path_matches_per_pixel_reference() {
+        let mut rng = XorShift::new(0x9E37_79B9_7F4A_7C15);
+        let scale_factors = [0.5_f32, 1.0, 1.25, 2.0];
+        let alphas = [0_u8, 64, 128, 200, 255];
+
+        for case in 0..256 {
+            let width = 1 + rng.below(40);
+            let height = 1 + rng.below(40);
+            let scale_factor = scale_factors[usize::try_from(rng.below(4)).expect("small index")];
+            let logical_width = as_test_coordinate(width) / scale_factor;
+            let logical_height = as_test_coordinate(height) / scale_factor;
+
+            let transform = loop {
+                let xx = rng.signed_scale();
+                let yy = rng.signed_scale();
+                let yx = rng.range(-0.9, 0.9);
+                let xy = rng.range(-0.9, 0.9);
+                if (xx * yy - yx * xy).abs() > 0.3 {
+                    break Affine::new(
+                        xx,
+                        yx,
+                        xy,
+                        yy,
+                        logical_width * 0.5 + rng.range(-4.0, 4.0),
+                        logical_height * 0.5 + rng.range(-4.0, 4.0),
+                    );
+                }
+            };
+
+            let shape = rect(
+                rng.range(-12.0, 0.0),
+                rng.range(-12.0, 0.0),
+                rng.range(1.0, 20.0),
+                rng.range(1.0, 20.0),
+            );
+            let rounded = rng.below(2) == 0;
+            let radius = if rounded {
+                rng.range(0.0, shape.size.width().min(shape.size.height()) * 0.5)
+            } else {
+                0.0
+            };
+            let color = Color::rgba(
+                rng.unit(),
+                rng.unit(),
+                rng.unit(),
+                f32::from(alphas[usize::try_from(rng.below(5)).expect("small index")]) / 255.0,
+            );
+
+            let transform_first = rng.below(2) == 1;
+            let clip_count = rng.below(3);
+            let mut clips = Vec::new();
+            for _ in 0..clip_count {
+                let clip = if transform_first {
+                    rect(
+                        rng.range(
+                            shape.origin.x - 6.0,
+                            shape.origin.x + shape.size.width() * 0.5,
+                        ),
+                        rng.range(
+                            shape.origin.y - 6.0,
+                            shape.origin.y + shape.size.height() * 0.5,
+                        ),
+                        rng.range(1.0, shape.size.width() + 12.0),
+                        rng.range(1.0, shape.size.height() + 12.0),
+                    )
+                } else {
+                    rect(
+                        rng.range(-6.0, logical_width * 0.5),
+                        rng.range(-6.0, logical_height * 0.5),
+                        rng.range(1.0, logical_width + 12.0),
+                        rng.range(1.0, logical_height + 12.0),
+                    )
+                };
+                clips.push(clip);
+            }
+
+            let mut list = DisplayList::new();
+            let mut paint = PaintContext::new(&mut list);
+            paint.save();
+            if transform_first {
+                paint.with_transform(transform, |context| {
+                    for clip in &clips {
+                        context.push_clip(*clip);
+                    }
+                    record_fill(context, shape, radius, rounded, color);
+                    for _ in &clips {
+                        context.pop_clip();
+                    }
+                });
+            } else {
+                for clip in &clips {
+                    paint.push_clip(*clip);
+                }
+                paint.with_transform(transform, |context| {
+                    record_fill(context, shape, radius, rounded, color);
+                });
+                for _ in &clips {
+                    paint.pop_clip();
+                }
+            }
+            paint.restore();
+
+            let mut fast = PixelBuffer::new(width, height).expect("small test buffer");
+            let mut reference = PixelBuffer::new(width, height).expect("small test buffer");
+            for y in 0..height {
+                for x in 0..width {
+                    let alpha = if rng.below(4) == 0 { rng.byte() } else { 255 };
+                    let pixel = Pixel::rgba(rng.byte(), rng.byte(), rng.byte(), alpha);
+                    *fast.get_mut(x, y).expect("seed pixel is in bounds") = pixel;
+                    *reference.get_mut(x, y).expect("seed pixel is in bounds") = pixel;
+                }
+            }
+
+            SoftwareRenderer
+                .render_with_scale_factor(&list, &mut fast, scale_factor)
+                .expect("valid fast-path display list");
+            render_reference(&list, &mut reference, scale_factor)
+                .expect("valid reference display list");
+
+            assert_eq!(
+                fast.pixels(),
+                reference.pixels(),
+                "scanline fast path diverged from the per-pixel reference: \
+                 case {case}, {width}x{height}, scale {scale_factor}, \
+                 rounded {rounded}, radius {radius}, clips {clip_count}, \
+                 transform {transform:?}"
+            );
+        }
+    }
+
+    fn record_fill(
+        paint: &mut PaintContext<'_>,
+        shape: Rect,
+        radius: f32,
+        rounded: bool,
+        color: Color,
+    ) {
+        if rounded {
+            paint.fill_rounded_rect(shape, radius, color);
+        } else {
+            paint.fill_rect(shape, color);
         }
     }
 

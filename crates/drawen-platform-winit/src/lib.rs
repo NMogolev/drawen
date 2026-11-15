@@ -489,7 +489,7 @@ impl Adapter {
         let scale_factor = to_scale_factor(window.scale_factor())?;
         let display_list = self.application.redraw();
         self.renderer
-            .as_ref()
+            .as_mut()
             .expect("surface exists while rendering")
             .render(&display_list, scale_factor)
             .map_err(|_| RunError::InvalidSize)

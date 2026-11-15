@@ -5,10 +5,11 @@
 //! `frame_benchmark` example in the `drawen` facade for end-to-end frames.
 
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use drawen_core::{Color, Point, Rect, Size};
-use drawen_render::{DisplayList, PaintContext};
+use drawen_render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle};
 use drawen_software::{PixelBuffer, SoftwareRenderer};
 
 const SAMPLES: usize = 120;
@@ -37,8 +38,26 @@ fn benchmark(width: u32, height: u32) {
     let mut translucent = DisplayList::new();
     PaintContext::new(&mut translucent).fill_rect(full, Color::rgba8(32, 96, 160, 128));
 
+    let mut translucent_over_opaque = DisplayList::new();
+    PaintContext::new(&mut translucent_over_opaque).fill_rect(full, Color::WHITE);
+    PaintContext::new(&mut translucent_over_opaque).fill_rect(full, Color::rgba8(32, 96, 160, 128));
+
     let mut rounded = DisplayList::new();
     PaintContext::new(&mut rounded).fill_rounded_rect(full, 32.0, Color::rgba8(32, 96, 160, 255));
+
+    let mut text = DisplayList::new();
+    PaintContext::new(&mut text).fill_rect(full, Color::WHITE);
+    let layout = Arc::new(FontdueTextShaper::ubuntu_light().layout(
+        "The quick brown fox jumps over the lazy dog 0123456789",
+        &TextStyle::new(16.0, Color::rgba8(20, 30, 40, 255)),
+        None,
+    ));
+    for line in 0..40 {
+        PaintContext::new(&mut text).draw_text(
+            Arc::clone(&layout),
+            Point::new(16.0, 16.0 + as_f32(line) * 20.0),
+        );
+    }
 
     let mut clipped = DisplayList::new();
     PaintContext::new(&mut clipped).with_clip(
@@ -77,7 +96,9 @@ fn benchmark(width: u32, height: u32) {
     };
 
     measure("opaque fill", &opaque);
-    measure("translucent fill", &translucent);
+    measure("translucent fill (steady state)", &translucent);
+    measure("opaque + translucent over it", &translucent_over_opaque);
+    measure("40 lines of text", &text);
     measure("rounded fill r=32", &rounded);
     measure("half-clipped rounded", &clipped);
     println!();

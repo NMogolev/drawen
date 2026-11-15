@@ -4,16 +4,21 @@
 //! [`drawen_render::DisplayList`] used by Drawen's deterministic software renderer.
 //! Rectangles, rounded rectangles, borders, clipping, transforms, and rasterized
 //! text are composited by the GPU. Geometry with identical clipping state is
-//! batched, while text shares a single atlas and bind group per renderer.
+//! batched; text uses a per-renderer atlas, while raster images use cached GPU
+//! textures with linear filtering.
 
 use core::{fmt, ops::Range};
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use bytemuck::{Pod, Zeroable};
 use drawen_core::{Affine, Color, Point, Rect};
 use drawen_render::{DisplayCommand, DisplayList, RasterImage, TextLayout, TextureId};
 
 const TEXT_ATLAS_SIZE: u32 = 2048;
+const RASTER_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 const SHAPE_SHADER: &str = r"
 struct VertexInput {
@@ -273,6 +278,7 @@ pub struct GpuRenderer {
     text_atlas: wgpu::Texture,
     text_atlas_bind_group: wgpu::BindGroup,
     external_textures: HashMap<TextureId, ExternalTexture>,
+    raster_images: RasterImageCache,
 }
 
 impl GpuRenderer {
@@ -386,6 +392,7 @@ impl GpuRenderer {
             text_atlas,
             text_atlas_bind_group,
             external_textures: HashMap::new(),
+            raster_images: RasterImageCache::default(),
         })
     }
 
@@ -476,7 +483,7 @@ impl GpuRenderer {
     /// Returns [`GpuRendererError`] when the display list has invalid geometry
     /// or unbalanced paint state.
     pub fn render(
-        &self,
+        &mut self,
         display_list: &DisplayList,
         scale_factor: f32,
     ) -> Result<RenderStatus, GpuRendererError> {
@@ -501,8 +508,9 @@ impl GpuRenderer {
         Ok(RenderStatus::Presented)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_frame(
-        &self,
+        &mut self,
         display_list: &DisplayList,
         scale_factor: f32,
         frame: wgpu::SurfaceTexture,
@@ -522,6 +530,9 @@ impl GpuRenderer {
         let text_batch = self.create_text_batch(&prepared.texts)?;
         let text_buffer = (!text_batch.vertices.is_empty())
             .then(|| create_buffer(&self.device, "Drawen text vertices", &text_batch.vertices));
+        let image_batch = self.prepare_image_batch(&prepared.images);
+        let image_buffer = (!image_batch.vertices.is_empty())
+            .then(|| create_buffer(&self.device, "Drawen image vertices", &image_batch.vertices));
         let texture_buffer = (!prepared.texture_vertices.is_empty()).then(|| {
             create_buffer(
                 &self.device,
@@ -548,40 +559,197 @@ impl GpuRenderer {
                 })],
                 ..Default::default()
             });
-            if let Some(buffer) = &shape_buffer {
-                pass.set_pipeline(&self.shape_pipeline);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                for draw in &prepared.shapes {
-                    set_scissor(&mut pass, draw.scissor);
-                    pass.draw(draw.vertices.clone(), 0..1);
-                }
-            }
-            if let Some(buffer) = &text_buffer {
-                pass.set_pipeline(&self.text_pipeline);
-                pass.set_bind_group(0, &self.text_atlas_bind_group, &[]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                for draw in &text_batch.draws {
-                    set_scissor(&mut pass, draw.scissor);
-                    pass.draw(draw.vertices.clone(), 0..1);
-                }
-            }
-            if let Some(buffer) = &texture_buffer {
-                pass.set_pipeline(&self.texture_pipeline);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                for draw in &prepared.textures {
-                    set_scissor(&mut pass, draw.scissor);
-                    let texture = self
-                        .external_textures
-                        .get(&draw.texture)
-                        .ok_or(GpuRendererError::UnknownTexture)?;
-                    pass.set_bind_group(0, &texture.bind_group, &[]);
-                    pass.draw(draw.vertices.clone(), 0..1);
+            let mut current_pipeline = None;
+            let mut current_vertex_buffer = None;
+            for operation in &prepared.operations {
+                match operation {
+                    PreparedOperation::Shape(draw) => {
+                        let buffer = shape_buffer
+                            .as_ref()
+                            .expect("shape operation has a shape vertex buffer");
+                        if current_pipeline != Some(PaintPipeline::Shape) {
+                            pass.set_pipeline(&self.shape_pipeline);
+                            current_pipeline = Some(PaintPipeline::Shape);
+                        }
+                        if current_vertex_buffer != Some(VertexBuffer::Shape) {
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            current_vertex_buffer = Some(VertexBuffer::Shape);
+                        }
+                        set_scissor(&mut pass, draw.scissor);
+                        pass.draw(draw.vertices.clone(), 0..1);
+                    }
+                    PreparedOperation::Text(index) => {
+                        let buffer = text_buffer
+                            .as_ref()
+                            .expect("text operation has a text vertex buffer");
+                        let draw = &text_batch.draws[*index];
+                        if current_pipeline != Some(PaintPipeline::Text) {
+                            pass.set_pipeline(&self.text_pipeline);
+                            current_pipeline = Some(PaintPipeline::Text);
+                        }
+                        pass.set_bind_group(0, &self.text_atlas_bind_group, &[]);
+                        if current_vertex_buffer != Some(VertexBuffer::Text) {
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            current_vertex_buffer = Some(VertexBuffer::Text);
+                        }
+                        set_scissor(&mut pass, draw.scissor);
+                        pass.draw(draw.vertices.clone(), 0..1);
+                    }
+                    PreparedOperation::Image(index) => {
+                        let buffer = image_buffer
+                            .as_ref()
+                            .expect("image operation has an image vertex buffer");
+                        let draw = &image_batch.draws[*index];
+                        if current_pipeline != Some(PaintPipeline::Texture) {
+                            pass.set_pipeline(&self.texture_pipeline);
+                            current_pipeline = Some(PaintPipeline::Texture);
+                        }
+                        if current_vertex_buffer != Some(VertexBuffer::Image) {
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            current_vertex_buffer = Some(VertexBuffer::Image);
+                        }
+                        pass.set_bind_group(0, &image_batch.bind_groups[*index], &[]);
+                        set_scissor(&mut pass, draw.scissor);
+                        pass.draw(draw.vertices.clone(), 0..1);
+                    }
+                    PreparedOperation::Texture(index) => {
+                        let buffer = texture_buffer
+                            .as_ref()
+                            .expect("texture operation has a texture vertex buffer");
+                        let draw = &prepared.textures[*index];
+                        let texture = self
+                            .external_textures
+                            .get(&draw.texture)
+                            .ok_or(GpuRendererError::UnknownTexture)?;
+                        if current_pipeline != Some(PaintPipeline::Texture) {
+                            pass.set_pipeline(&self.texture_pipeline);
+                            current_pipeline = Some(PaintPipeline::Texture);
+                        }
+                        if current_vertex_buffer != Some(VertexBuffer::ExternalTexture) {
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            current_vertex_buffer = Some(VertexBuffer::ExternalTexture);
+                        }
+                        pass.set_bind_group(0, &texture.bind_group, &[]);
+                        set_scissor(&mut pass, draw.scissor);
+                        pass.draw(draw.vertices.clone(), 0..1);
+                    }
                 }
             }
         }
         self.queue.submit([encoder.finish()]);
         frame.present();
         Ok(())
+    }
+
+    fn prepare_image_batch(&mut self, images: &[PreparedImage]) -> ImageBatch {
+        let mut batch = ImageBatch::default();
+        for image in images {
+            let key = Arc::as_ptr(&image.image) as usize;
+            let bind_group = if let Some(bind_group) = self.raster_images.get(key) {
+                bind_group
+            } else {
+                let texture = self.create_raster_image_texture(&image.image);
+                let byte_count = image.image.pixels().len();
+                if byte_count <= RASTER_IMAGE_CACHE_BYTES {
+                    self.raster_images.evict_for(byte_count);
+                    let bind_group = texture.bind_group.clone();
+                    self.raster_images.insert(
+                        key,
+                        CachedRasterImage {
+                            _image: Arc::clone(&image.image),
+                            texture,
+                            byte_count,
+                            last_used: 0,
+                        },
+                    );
+                    bind_group
+                } else {
+                    let bind_group = texture.bind_group.clone();
+                    batch.transient_textures.push(texture);
+                    bind_group
+                }
+            };
+            let start =
+                u32::try_from(batch.vertices.len()).expect("image vertex count fits in u32");
+            batch.vertices.extend_from_slice(&image.vertices);
+            batch.draws.push(ShapeDraw {
+                vertices: start..start + 6,
+                scissor: image.scissor,
+            });
+            batch.bind_groups.push(bind_group);
+        }
+        batch
+    }
+
+    fn create_raster_image_texture(&self, image: &RasterImage) -> ExternalTexture {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Drawen raster image"),
+            size: wgpu::Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.pixels(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width() * 4),
+                rows_per_image: Some(image.height()),
+            },
+            wgpu::Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        self.create_external_texture(texture, "Drawen raster image sampler")
+    }
+
+    fn create_external_texture(
+        &self,
+        texture: wgpu::Texture,
+        sampler_label: &str,
+    ) -> ExternalTexture {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(sampler_label),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Drawen texture bind group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        ExternalTexture {
+            _texture: texture,
+            _view: view,
+            _sampler: sampler,
+            bind_group,
+        }
     }
 
     fn create_text_batch(&self, texts: &[PreparedText]) -> Result<TextBatch, GpuRendererError> {
@@ -722,6 +890,12 @@ struct PreparedTexture {
     scissor: Scissor,
 }
 
+struct PreparedImage {
+    image: Arc<RasterImage>,
+    vertices: [TextVertex; 6],
+    scissor: Scissor,
+}
+
 #[derive(Default)]
 struct TextBatch {
     vertices: Vec<TextVertex>,
@@ -730,15 +904,30 @@ struct TextBatch {
 
 impl TextBatch {
     fn push_draw(&mut self, vertices: Range<u32>, scissor: Scissor) {
-        if let Some(previous) = self.draws.last_mut()
-            && previous.scissor == scissor
-            && previous.vertices.end == vertices.start
-        {
-            previous.vertices.end = vertices.end;
-            return;
-        }
         self.draws.push(ShapeDraw { vertices, scissor });
     }
+}
+
+enum PreparedOperation {
+    Shape(ShapeDraw),
+    Text(usize),
+    Image(usize),
+    Texture(usize),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PaintPipeline {
+    Shape,
+    Text,
+    Texture,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum VertexBuffer {
+    Shape,
+    Text,
+    Image,
+    ExternalTexture,
 }
 
 struct ExternalTexture {
@@ -748,29 +937,104 @@ struct ExternalTexture {
     bind_group: wgpu::BindGroup,
 }
 
+struct CachedRasterImage {
+    // The pointer is the cache key. Keeping this Arc alive prevents allocator
+    // address reuse from associating a new image with this entry's GPU texture.
+    _image: Arc<RasterImage>,
+    texture: ExternalTexture,
+    byte_count: usize,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RasterImageCache {
+    entries: HashMap<usize, CachedRasterImage>,
+    recency: BTreeSet<(u64, usize)>,
+    bytes: usize,
+    next_access: u64,
+}
+
+impl RasterImageCache {
+    fn get(&mut self, key: usize) -> Option<wgpu::BindGroup> {
+        let last_used = self.entries.get(&key)?.last_used;
+        self.recency.remove(&(last_used, key));
+        let access = self.record_access();
+        let image = self
+            .entries
+            .get_mut(&key)
+            .expect("cache entry exists until its recency is updated");
+        image.last_used = access;
+        self.recency.insert((access, key));
+        Some(image.texture.bind_group.clone())
+    }
+
+    fn insert(&mut self, key: usize, mut image: CachedRasterImage) {
+        let access = self.record_access();
+        image.last_used = access;
+        self.bytes = self.bytes.saturating_add(image.byte_count);
+        self.recency.insert((access, key));
+        self.entries.insert(key, image);
+    }
+
+    fn evict_for(&mut self, incoming_bytes: usize) {
+        while self.bytes.saturating_add(incoming_bytes) > RASTER_IMAGE_CACHE_BYTES {
+            let Some(&(_, key)) = self.recency.first() else {
+                break;
+            };
+            let last_used = self
+                .entries
+                .get(&key)
+                .expect("recency index references a cache entry")
+                .last_used;
+            self.recency.remove(&(last_used, key));
+            let image = self
+                .entries
+                .remove(&key)
+                .expect("cache entry selected for eviction");
+            self.bytes = self.bytes.saturating_sub(image.byte_count);
+        }
+    }
+
+    fn record_access(&mut self) -> u64 {
+        self.next_access = self.next_access.wrapping_add(1);
+        self.next_access
+    }
+}
+
+#[derive(Default)]
+struct ImageBatch {
+    vertices: Vec<TextVertex>,
+    draws: Vec<ShapeDraw>,
+    bind_groups: Vec<wgpu::BindGroup>,
+    // Keeps uncached large textures alive until the render pass is submitted.
+    transient_textures: Vec<ExternalTexture>,
+}
+
 struct PreparedFrame {
     width: u32,
     height: u32,
     scale_factor: f32,
     shape_vertices: Vec<ShapeVertex>,
-    shapes: Vec<ShapeDraw>,
     texts: Vec<PreparedText>,
+    images: Vec<PreparedImage>,
     texture_vertices: Vec<TextVertex>,
     textures: Vec<PreparedTexture>,
+    operations: Vec<PreparedOperation>,
     state: RenderState,
     saved_states: Vec<RenderState>,
 }
 
 impl PreparedFrame {
     fn push_shape_draw(&mut self, vertices: Range<u32>, scissor: Scissor) {
-        if let Some(previous) = self.shapes.last_mut()
+        if let Some(PreparedOperation::Shape(previous)) = self.operations.last_mut()
             && previous.scissor == scissor
             && previous.vertices.end == vertices.start
         {
             previous.vertices.end = vertices.end;
             return;
         }
-        self.shapes.push(ShapeDraw { vertices, scissor });
+        self.operations
+            .push(PreparedOperation::Shape(ShapeDraw { vertices, scissor }));
     }
 }
 
@@ -781,10 +1045,11 @@ impl PreparedFrame {
             height,
             scale_factor,
             shape_vertices: Vec::new(),
-            shapes: Vec::new(),
             texts: Vec::new(),
+            images: Vec::new(),
             texture_vertices: Vec::new(),
             textures: Vec::new(),
+            operations: Vec::new(),
             state: RenderState::default(),
             saved_states: Vec::new(),
         }
@@ -852,7 +1117,7 @@ impl PreparedFrame {
                     self.add_text(layout, *origin)?;
                 }
                 DisplayCommand::DrawImage { image, destination } => {
-                    self.add_image(image, *destination)?;
+                    self.add_image(Arc::clone(image), *destination)?;
                 }
                 DisplayCommand::DrawTexture {
                     texture,
@@ -963,6 +1228,11 @@ impl PreparedFrame {
         let byte_count = usize::try_from(u64::from(width) * u64::from(height) * 4)
             .map_err(|_| GpuRendererError::NonFiniteGeometry)?;
         let mut pixels = vec![0; byte_count];
+        let color = layout.color();
+        let color_alpha = color.alpha.clamp(0.0, 1.0);
+        let color_red = component_to_u8(color.red);
+        let color_green = component_to_u8(color.green);
+        let color_blue = component_to_u8(color.blue);
         for run in layout.glyph_runs() {
             let raster_size = run.font_size() * self.scale_factor;
             if !raster_size.is_finite() || raster_size <= 0.0 {
@@ -982,20 +1252,21 @@ impl PreparedFrame {
                     let Some(y) = coordinate_to_pixel(y, height) else {
                         continue;
                     };
-                    let alpha = f32::from(coverage) / 255.0 * layout.color().alpha.clamp(0.0, 1.0);
+                    let alpha = f32::from(coverage) / 255.0 * color_alpha;
                     let offset = (usize::try_from(y)
                         .unwrap_or(usize::MAX)
                         .saturating_mul(usize::try_from(width).unwrap_or(usize::MAX))
                         .saturating_add(usize::try_from(x).unwrap_or(usize::MAX)))
                     .saturating_mul(4);
-                    if offset + 3 >= pixels.len() || alpha <= f32::from(pixels[offset + 3]) / 255.0
-                    {
+                    if offset + 3 >= pixels.len() {
                         continue;
                     }
-                    pixels[offset] = component_to_u8(layout.color().red);
-                    pixels[offset + 1] = component_to_u8(layout.color().green);
-                    pixels[offset + 2] = component_to_u8(layout.color().blue);
-                    pixels[offset + 3] = component_to_u8(alpha);
+                    let destination_alpha = f32::from(pixels[offset + 3]) / 255.0;
+                    pixels[offset] = color_red;
+                    pixels[offset + 1] = color_green;
+                    pixels[offset + 2] = color_blue;
+                    pixels[offset + 3] =
+                        component_to_u8(source_over_alpha(alpha, destination_alpha));
                 }
             }
         }
@@ -1026,6 +1297,7 @@ impl PreparedFrame {
                 uv,
             };
         }
+        let index = self.texts.len();
         self.texts.push(PreparedText {
             width,
             height,
@@ -1033,12 +1305,13 @@ impl PreparedFrame {
             vertices,
             scissor: self.scissor(),
         });
+        self.operations.push(PreparedOperation::Text(index));
         Ok(())
     }
 
     fn add_image(
         &mut self,
-        image: &RasterImage,
+        image: Arc<RasterImage>,
         destination: Rect,
     ) -> Result<(), GpuRendererError> {
         validate_rect(destination)?;
@@ -1072,13 +1345,13 @@ impl PreparedFrame {
                 uv,
             };
         }
-        self.texts.push(PreparedText {
-            width: image.width(),
-            height: image.height(),
-            pixels: image.pixels().to_vec(),
+        let index = self.images.len();
+        self.images.push(PreparedImage {
+            image,
             vertices,
             scissor: self.scissor(),
         });
+        self.operations.push(PreparedOperation::Image(index));
         Ok(())
     }
 
@@ -1120,11 +1393,13 @@ impl PreparedFrame {
         let end = start
             .checked_add(6)
             .ok_or(GpuRendererError::NonFiniteGeometry)?;
+        let index = self.textures.len();
         self.textures.push(PreparedTexture {
             vertices: start..end,
             texture,
             scissor: self.scissor(),
         });
+        self.operations.push(PreparedOperation::Texture(index));
         Ok(())
     }
 
@@ -1455,6 +1730,10 @@ fn component_to_u8(value: f32) -> u8 {
     }
 }
 
+fn source_over_alpha(source: f32, destination: f32) -> f32 {
+    source + destination * (1.0 - source)
+}
+
 fn usize_to_f32(value: usize) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     {
@@ -1478,10 +1757,19 @@ fn u32_to_f32(value: u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use drawen_core::{Color, Point, Rect, Size};
-    use drawen_render::PaintContext;
+    use std::sync::Arc;
 
-    use super::{DisplayList, PreparedFrame, TextureId};
+    use drawen_core::{Color, Point, Rect, Size};
+    use drawen_render::{PaintContext, RasterImage};
+
+    use super::{DisplayList, PreparedFrame, PreparedOperation, TextureId, source_over_alpha};
+
+    #[test]
+    fn composes_overlapping_glyph_coverage_with_source_over_alpha() {
+        let alpha = source_over_alpha(0.5, 0.5);
+
+        assert!((alpha - 0.75).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn records_external_texture_geometry() {
@@ -1521,7 +1809,49 @@ mod tests {
         frame.record(&list).expect("valid display list");
 
         assert_eq!(frame.shape_vertices.len(), 12);
-        assert_eq!(frame.shapes.len(), 1);
-        assert_eq!(frame.shapes[0].vertices, 0..12);
+        assert_eq!(frame.operations.len(), 1);
+        let PreparedOperation::Shape(draw) = &frame.operations[0] else {
+            panic!("consecutive shapes should remain one shape operation");
+        };
+        assert_eq!(draw.vertices, 0..12);
+    }
+
+    #[test]
+    fn preserves_order_across_shape_and_texture_operations() {
+        let rect = Rect::new(Point::ZERO, Size::new(10.0, 10.0).expect("valid size"));
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(rect, Color::BLACK);
+        paint.draw_texture(TextureId::new(1), rect);
+        paint.fill_rect(rect, Color::WHITE);
+        let mut frame = PreparedFrame::new(100, 100, 1.0);
+
+        frame.record(&list).expect("valid display list");
+
+        assert_eq!(frame.operations.len(), 3);
+        assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
+        assert!(matches!(frame.operations[1], PreparedOperation::Texture(0)));
+        assert!(matches!(frame.operations[2], PreparedOperation::Shape(_)));
+    }
+
+    #[test]
+    fn preserves_order_across_shape_and_raster_image_operations() {
+        let rect = Rect::new(Point::ZERO, Size::new(10.0, 10.0).expect("valid size"));
+        let image = Arc::new(RasterImage::new(1, 1, vec![255; 4]).expect("valid image"));
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(rect, Color::BLACK);
+        paint.draw_image(image, rect);
+        paint.fill_rect(rect, Color::WHITE);
+        let mut frame = PreparedFrame::new(100, 100, 1.0);
+
+        frame.record(&list).expect("valid display list");
+
+        assert_eq!(frame.operations.len(), 3);
+        assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
+        assert!(matches!(frame.operations[1], PreparedOperation::Image(0)));
+        assert!(matches!(frame.operations[2], PreparedOperation::Shape(_)));
+        assert_eq!(frame.texts.len(), 0);
+        assert_eq!(frame.images.len(), 1);
     }
 }
