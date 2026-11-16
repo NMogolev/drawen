@@ -1443,7 +1443,7 @@ mod tests {
             &TextStyle::new(18.0, Color::BLACK),
             None,
         );
-        assert!(!layout.glyph_runs().is_empty());
+        assert_ne!(layout.glyph_runs(), []);
         assert_eq!(layout.clusters().len(), 4);
     }
 }

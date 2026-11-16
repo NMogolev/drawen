@@ -1629,12 +1629,7 @@ mod tests {
 
     #[test]
     fn empty_sheet_and_universal_selectors_are_valid() {
-        assert!(
-            StyleSheet::parse("")
-                .expect("empty sheet")
-                .rules()
-                .is_empty()
-        );
+        assert_eq!(StyleSheet::parse("").expect("empty sheet").rules(), []);
         let style = resolve(
             "* { color: #010203; }",
             &StyleTarget::empty().with_class("anything"),

@@ -322,7 +322,7 @@ mod tests {
             .expect("frame layout succeeds");
 
         let _ = runtime.dispatch_event(&pointer(Point::new(200.0, 100.0)));
-        assert!(runtime.take_window_commands().is_empty());
+        assert_eq!(runtime.take_window_commands(), []);
     }
 
     fn pointer(position: Point) -> InputEvent {

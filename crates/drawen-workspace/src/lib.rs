@@ -1472,8 +1472,8 @@ mod tests {
         assert!(
             matches!(layout.root(), LayoutNode::Tabs { items, active: Some(active) } if items == &vec![left, right.clone()] && active == &right)
         );
-        assert!(layout.floating().is_empty());
-        assert!(layout.hidden().is_empty());
+        assert_eq!(layout.floating(), []);
+        assert_eq!(layout.hidden(), []);
         assert!(layout.validate().is_ok());
     }
 
@@ -1788,8 +1788,8 @@ mod tests {
             .expect("can remove a hidden panel");
 
         assert_eq!(layout.root(), &LayoutNode::Empty);
-        assert!(layout.floating().is_empty());
-        assert!(layout.hidden().is_empty());
+        assert_eq!(layout.floating(), []);
+        assert_eq!(layout.hidden(), []);
         assert!(layout.validate().is_ok());
     }
 
@@ -1841,7 +1841,7 @@ mod tests {
         layout
             .close_document(&freeform)
             .expect("can close a free-form document");
-        assert!(layout.freeform_documents().is_empty());
+        assert_eq!(layout.freeform_documents(), []);
         assert!(
             matches!(layout.root(), LayoutNode::Documents { items, active: None, .. } if items.is_empty())
         );

@@ -148,7 +148,7 @@ mod tests {
         let mut out = Vec::new();
         convert(&frame(4, 2, 126, 128, 128), ColorMatrix::Bt601, &mut out);
         assert_eq!(out.len(), 4 * 2 * 4);
-        for pixel in out.chunks_exact(4) {
+        for pixel in out.as_chunks::<4>().0 {
             assert!(pixel[0].abs_diff(128) <= 1, "{pixel:?}");
             assert_eq!(pixel[0], pixel[1]);
             assert_eq!(pixel[1], pixel[2]);
@@ -161,7 +161,7 @@ mod tests {
         let mut out = Vec::new();
         // Maximum luma with no blue and maximum red.
         convert(&frame(2, 2, 255, 0, 255), ColorMatrix::Bt709, &mut out);
-        for pixel in out.chunks_exact(4) {
+        for pixel in out.as_chunks::<4>().0 {
             assert_eq!(pixel[0], 255);
             assert_eq!(pixel[1], 238);
             assert_eq!(pixel[2], 8);
@@ -170,7 +170,7 @@ mod tests {
 
         // Blue pushes red below zero and blue above 255.
         convert(&frame(2, 2, 16, 255, 0), ColorMatrix::Bt709, &mut out);
-        for pixel in out.chunks_exact(4) {
+        for pixel in out.as_chunks::<4>().0 {
             assert_eq!(pixel[0], 0);
             assert_eq!(pixel[2], 255);
         }
@@ -180,6 +180,6 @@ mod tests {
     fn ignores_degenerate_frames() {
         let mut out = vec![7; 8];
         convert(&frame(0, 0, 16, 128, 128), ColorMatrix::Auto, &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 }

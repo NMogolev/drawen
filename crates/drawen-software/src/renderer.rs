@@ -790,7 +790,7 @@ fn rounded_rect_seed(
     for window in boundaries[..boundary_count].windows(2) {
         let start = window[0];
         let end = window[1];
-        let middle = (start + end) * 0.5;
+        let middle = start.midpoint(end);
         let (x_active, x_boundary) =
             active_distance_term(local_x.0 * middle + local_x.1, left, right);
         let (y_active, y_boundary) =
@@ -1785,7 +1785,7 @@ mod tests {
             .expect("valid text display list");
 
         assert!(pixels.pixels().iter().any(|pixel| pixel.alpha > 0));
-        assert!(pixels.pixels().chunks_exact(24).all(|row| {
+        assert!(pixels.pixels().as_chunks::<24>().0.iter().all(|row| {
             row[..5].iter().all(|pixel| pixel.alpha == 0)
                 && row[10..].iter().all(|pixel| pixel.alpha == 0)
         }));
