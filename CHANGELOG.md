@@ -36,6 +36,10 @@ in the headings because the version itself must stay valid semver; see
 - Deterministic randomized differential tests compare the fast path against a
   per-pixel reference across 500 scenes; they caught a non-monotonic binary
   search that is now fixed.
+- Fills now resolve the clip row interval before looking for the shape edges,
+  and a row that the shape covers from clip edge to clip edge is filled without
+  any search. A clipped row no longer runs the seed and both binary searches
+  across the full shape bounds, so the search cost follows the visible span.
 - Added `examples/fill_benchmark.rs` and `BASELINE.md` with the benchmark
   machine, method, median, and p99.
 
@@ -61,6 +65,15 @@ in the headings because the version itself must stay valid semver; see
 - `drawen` re-exports its `wgpu` version as `drawen::gpu::wgpu` and
   `drawen::browser::wgpu` so applications can name device and texture types
   without a mismatched direct dependency.
+- Continuous integration (`.github/workflows/ci.yml`) now builds every feature
+  combination of the facade with `cargo hack --feature-powerset`, checks that
+  the examples still compile without default features, and runs the test suite
+  on Linux, Windows, and macOS.
+- `crates/drawen/tests/feature_gates.rs` turns the packaging rules into tests:
+  `--no-default-features` may not pull `wgpu`, Servo, Symphonia, Paleo, `image`,
+  or `cpal`; the defaults must enable the renderers and media while leaving
+  audio and the director opt-in; the GPU and media stacks stay independent; and
+  the workspace must resolve a single `wgpu` version.
 
 ### Dependencies
 

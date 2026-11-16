@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install audio headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install audio headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the default feature set
+        run: cargo test --workspace
+      - name: Test every feature
+        run: cargo test --workspace --all-features
+
+  features:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install audio headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Facade features one at a time and in pairs
+        run: cargo hack check -p drawen --no-dev-deps --no-default-features --feature-powerset --depth 2
+      - name: Facade without features and with all of them
+        run: |
+          cargo check -p drawen --no-default-features
+          cargo check -p drawen --all-features
+      - name: Facade examples without default features
+        run: cargo check -p drawen --no-default-features --all-targets
+      - name: Widgets features one at a time
+        run: cargo hack check -p drawen-widgets --no-dev-deps --no-default-features --each-feature
+      - name: Widgets tests without the media feature
+        run: cargo test -p drawen-widgets --no-default-features

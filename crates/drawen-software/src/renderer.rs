@@ -617,53 +617,59 @@ fn fill_convex_shape(
     inverse: Affine,
     (start_x, start_y, end_x, end_y): (u32, u32, u32, u32),
 ) {
+    let clipped = !state.clips.is_empty();
     for y in start_y..end_y {
+        // Clips are convex, so their intersection with this row is one
+        // interval. Resolve it before looking for the shape edges: a clipped
+        // row then searches the visible span instead of the whole shape
+        // bounds, and a row the shape covers end to end needs no search at all.
+        let (row_start, row_end) = if clipped {
+            let Some(span) = clip_row_span(state, y, start_x, end_x, scale_factor) else {
+                continue;
+            };
+            span
+        } else {
+            (start_x, end_x)
+        };
         let inside = |x: u32| {
             let point = logical_pixel_center(x, y, scale_factor);
             contains_rounded_rect(shape.rect, shape.radius, inverse.transform_point(point))
         };
-        let Some(seed) = rounded_rect_seed(
-            shape.rect,
-            shape.radius,
-            inverse,
-            y,
-            start_x,
-            end_x,
-            scale_factor,
-        ) else {
-            continue;
-        };
-        let first = first_true(start_x, seed + 1, inside);
-        // Convex containment makes the true region a single interval, so the
-        // first false pixel after a known inside pixel ends the span.
-        let last = first_true(seed, end_x, |x| !inside(x));
-        let (first, last) = if state.clips.is_empty() {
-            (first, last)
+        let (first, last) = if row_start < row_end && inside(row_start) && inside(row_end - 1) {
+            // A convex shape contains every pixel between two inside pixels, so
+            // the row is covered from the clip edge to the clip edge.
+            (row_start, row_end)
         } else {
-            // Clips are convex too, so their intersection with the same row is
-            // one interval. Intersect it with the shape span analytically and
-            // trim the boundary with the exact clip test.
-            let Some((clip_first, clip_last)) = clip_row_span(state, y, first, last, scale_factor)
-            else {
+            let Some(seed) = rounded_rect_seed(
+                shape.rect,
+                shape.radius,
+                inverse,
+                y,
+                row_start,
+                row_end,
+                scale_factor,
+            ) else {
                 continue;
             };
-            let mut clipped_first = first.max(clip_first);
-            let mut clipped_last = last.min(clip_last);
-            while clipped_first < clipped_last
-                && !is_visible(logical_pixel_center(clipped_first, y, scale_factor), state)
-            {
-                clipped_first += 1;
-            }
-            while clipped_last > clipped_first
-                && !is_visible(
-                    logical_pixel_center(clipped_last - 1, y, scale_factor),
-                    state,
-                )
-            {
-                clipped_last -= 1;
-            }
-            (clipped_first, clipped_last)
+            let first = first_true(row_start, seed + 1, inside);
+            // Convex containment makes the true region a single interval, so the
+            // first false pixel after a known inside pixel ends the span.
+            let last = first_true(seed, row_end, |x| !inside(x));
+            (first, last)
         };
+        if !clipped {
+            fill_row(target, y, first, last, color);
+            continue;
+        }
+        // The clip span is a conservative superset of the visible pixels, so
+        // trim the boundary with the exact clip test.
+        let (mut first, mut last) = (first, last);
+        while first < last && !is_visible(logical_pixel_center(first, y, scale_factor), state) {
+            first += 1;
+        }
+        while last > first && !is_visible(logical_pixel_center(last - 1, y, scale_factor), state) {
+            last -= 1;
+        }
         fill_row(target, y, first, last, color);
     }
 }
@@ -1392,6 +1398,62 @@ mod tests {
         assert_eq!(pixels.get(0, 0), Some(Pixel::rgba(255, 0, 0, 255)));
         assert_eq!(pixels.get(1, 1), Some(Pixel::rgba(0, 0, 255, 255)));
         assert_eq!(pixels.get(3, 3), Some(Pixel::rgba(255, 0, 0, 255)));
+    }
+
+    #[test]
+    fn clip_that_covers_the_row_still_respects_rounded_corners() {
+        // The clip covers the whole shape, so every row is filled end to end by
+        // the coverage shortcut except at the rounded corners, which must stay
+        // transparent.
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list).with_clip(rect(0.0, 0.0, 8.0, 8.0), |context| {
+            context.fill_rounded_rect(rect(0.0, 0.0, 8.0, 8.0), 2.0, Color::BLACK);
+        });
+        let mut pixels = PixelBuffer::new(8, 8).expect("small test buffer");
+
+        SoftwareRenderer
+            .render(&list, &mut pixels)
+            .expect("valid display list");
+
+        assert_eq!(pixels.get(0, 0), Some(Pixel::TRANSPARENT));
+        assert_eq!(pixels.get(7, 7), Some(Pixel::TRANSPARENT));
+        assert_eq!(pixels.get(7, 0), Some(Pixel::TRANSPARENT));
+        assert_eq!(pixels.get(3, 3), Some(Pixel::rgba(0, 0, 0, 255)));
+        assert_eq!(pixels.get(0, 3), Some(Pixel::rgba(0, 0, 0, 255)));
+    }
+
+    #[test]
+    fn clip_that_cuts_the_shape_limits_both_edges() {
+        // The clip is inside the shape, so the fill starts and ends at the clip
+        // boundary. A clip larger than the shape must still stop at the shape
+        // and leave the corners transparent.
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list).with_clip(rect(2.6, 3.0, 2.8, 2.0), |context| {
+            context.fill_rounded_rect(rect(0.0, 0.0, 8.0, 8.0), 2.0, Color::BLACK);
+        });
+        let mut clipped = PixelBuffer::new(8, 8).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut clipped)
+            .expect("valid display list");
+
+        assert_eq!(clipped.get(2, 4), Some(Pixel::TRANSPARENT));
+        assert_eq!(clipped.get(3, 4), Some(Pixel::rgba(0, 0, 0, 255)));
+        assert_eq!(clipped.get(4, 4), Some(Pixel::rgba(0, 0, 0, 255)));
+        assert_eq!(clipped.get(5, 4), Some(Pixel::TRANSPARENT));
+        assert_eq!(clipped.get(6, 4), Some(Pixel::TRANSPARENT));
+
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list).with_clip(rect(-4.0, -4.0, 16.0, 16.0), |context| {
+            context.fill_rounded_rect(rect(0.0, 0.0, 8.0, 8.0), 2.0, Color::BLACK);
+        });
+        let mut widened = PixelBuffer::new(8, 8).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut widened)
+            .expect("valid display list");
+
+        assert_eq!(widened.get(0, 0), Some(Pixel::TRANSPARENT));
+        assert_eq!(widened.get(7, 7), Some(Pixel::TRANSPARENT));
+        assert_eq!(widened.get(4, 4), Some(Pixel::rgba(0, 0, 0, 255)));
     }
 
     #[test]

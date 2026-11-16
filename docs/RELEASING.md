@@ -56,32 +56,32 @@ optional feature is a patch release.
 
 ## Release checklist
 
+Continuous integration runs this list on every push to `main` and every pull
+request; see [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). The jobs
+to watch are `rustfmt`, `clippy`, `test` (Ubuntu, Windows, and macOS), and
+`feature matrix`. Do not tag a release while one of them is red, and do not
+treat the commands below as the gate: they exist to reproduce a CI failure on a
+local machine.
+
 1. `cargo fmt --all -- --check`
-2. `cargo clippy --workspace --all-targets`
-3. `cargo test --workspace`
+2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+3. `cargo test --workspace` and `cargo test --workspace --all-features`
 
-   Run both with `--all-features` on a machine that has the audio system
-   libraries installed, so the optional `audio` and `director` paths are built
-   too.
+   Run the second one on a machine that has the audio system libraries
+   installed, so the optional `audio` and `director` paths are built too.
 
-   Also check the feature matrix. A dependency that leaks through a default
-   feature is invisible to a normal build, so the headless configuration is the
-   only one that catches it:
+4. `cargo hack check -p drawen --no-dev-deps --no-default-features
+   --feature-powerset --depth 2`
 
-   ```text
-   cargo check -p drawen --no-default-features
-   cargo check -p drawen --no-default-features --features gpu
-   cargo check -p drawen --no-default-features --features media
-   cargo check -p drawen --no-default-features --features browser
-   cargo check -p drawen --no-default-features --features audio
-   cargo check -p drawen --no-default-features --features director
-   cargo check -p drawen --no-default-features --features browser,audio,director
-   cargo test -p drawen-widgets --no-default-features
-   ```
+   CI installs `cargo-hack` for this. The command grows with the feature set, so
+   a new feature is gated without editing the workflow.
 
-   `cargo tree -e normal -p drawen --no-default-features` must not name `wgpu`,
-   Servo, Symphonia, Paleo, or `image`.
-4. Run semver checks for every published crate against the previous release:
+   The dependency graphs are asserted, not inspected. Two tests in
+   `crates/drawen/tests/feature_gates.rs` run as part of `cargo test` and fail
+   when `drawen --no-default-features` pulls `wgpu`, Servo, Symphonia, Paleo,
+   `image`, or `cpal`; when the defaults stop enabling the renderers or media;
+   or when the workspace resolves two `wgpu` versions.
+5. Run semver checks for every published crate against the previous release:
 
    ```text
    cargo install cargo-semver-checks --locked
@@ -108,16 +108,16 @@ optional feature is a patch release.
    tag of the release being superseded. If no baseline tag exists yet, use
    `--baseline-root` against an unpacked previous release instead.
 
-5. Update `CHANGELOG.md` under the new version with the release date.
-6. `cargo update --workspace` to refresh `Cargo.lock`.
-7. Commit `Release X.Y.Z`, then create an annotated tag whose message repeats
+6. Update `CHANGELOG.md` under the new version with the release date.
+7. `cargo update --workspace` to refresh `Cargo.lock`.
+8. Commit `Release X.Y.Z`, then create an annotated tag whose message repeats
    the date and the changelog summary:
 
    ```text
    git tag -a v0.2.0 -m "Drawen 0.2.0 (2026-11-15)"
    ```
 
-8. Publish in dependency order (core and render first, the facade last):
+9. Publish in dependency order (core and render first, the facade last):
 
    ```text
    cargo publish -p drawen-core
