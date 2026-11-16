@@ -15,11 +15,20 @@ impl QueueDepth {
     }
 
     fn decrease(&self, amount: usize) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_sub(amount))
-            });
+        // `AtomicUsize::try_update` replaced `fetch_update` in newer Rust, but
+        // the workspace still supports 1.88, so keep the compare-exchange loop
+        // instead of the deprecated method.
+        let mut current = self.0.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(amount);
+            match self
+                .0
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     fn get(&self) -> usize {

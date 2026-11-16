@@ -78,6 +78,6 @@ jobs:
       - name: Facade examples without default features
         run: cargo check -p drawen --no-default-features --all-targets
       - name: Widgets features one at a time
-        run: cargo hack check -p drawen-widgets --no-dev-deps --no-default-features --each-feature
+        run: cargo hack check -p drawen-widgets --no-dev-deps --each-feature
       - name: Widgets tests without the media feature
         run: cargo test -p drawen-widgets --no-default-features
