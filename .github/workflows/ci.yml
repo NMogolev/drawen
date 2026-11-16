@@ -70,7 +70,7 @@ jobs:
         with:
           tool: cargo-hack
       - name: Facade features one at a time and in pairs
-        run: cargo hack check -p drawen --no-dev-deps --no-default-features --feature-powerset --depth 2
+        run: cargo hack check -p drawen --no-dev-deps --feature-powerset --depth 2
       - name: Facade without features and with all of them
         run: |
           cargo check -p drawen --no-default-features

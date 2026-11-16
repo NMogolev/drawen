@@ -441,6 +441,8 @@ fn import_texture(
         // SAFETY: the texture was created by this exact Metal device from the
         // IOSurface below; its extent, format, mip count, and sample count match
         // `descriptor`. Wgpu tracks the imported image from UNINITIALIZED.
+        // The retained Metal texture is owned by the hal texture, so no extra
+        // drop callback is needed.
         device.create_texture_from_hal::<Api>(
             wgpu::hal::metal::Device::texture_from_raw(
                 raw_texture,
@@ -453,6 +455,7 @@ fn import_texture(
                     height,
                     depth: 1,
                 },
+                None,
             ),
             &descriptor,
             wgpu::TextureUses::UNINITIALIZED,

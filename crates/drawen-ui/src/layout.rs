@@ -36,6 +36,7 @@ impl LayoutResult {
     /// Direct children omitted from this list remain retained but are excluded
     /// from painting, hit testing, and focus traversal until a later layout
     /// includes them again.
+    #[must_use = "read the child layouts to position the child widgets"]
     pub fn children(&self) -> &[ChildLayout] {
         &self.children
     }

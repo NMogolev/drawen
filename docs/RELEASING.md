@@ -70,11 +70,12 @@ local machine.
    Run the second one on a machine that has the audio system libraries
    installed, so the optional `audio` and `director` paths are built too.
 
-4. `cargo hack check -p drawen --no-dev-deps --no-default-features
-   --feature-powerset --depth 2`
+4. `cargo hack check -p drawen --no-dev-deps --feature-powerset --depth 2`
 
    CI installs `cargo-hack` for this. The command grows with the feature set, so
-   a new feature is gated without editing the workflow.
+   a new feature is gated without editing the workflow. `--feature-powerset`
+   already includes the no-default-features and default-features runs, so
+   `--no-default-features` cannot be combined with it.
 
    The dependency graphs are asserted, not inspected. Two tests in
    `crates/drawen/tests/feature_gates.rs` run as part of `cargo test` and fail
