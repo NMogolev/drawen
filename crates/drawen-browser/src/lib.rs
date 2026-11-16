@@ -14,6 +14,12 @@ mod view;
 
 pub use view::BrowserView;
 
+/// The `wgpu` version Drawen is built against.
+///
+/// Browser surfaces expose `wgpu` textures and accept `wgpu` devices, so
+/// applications can use this re-export to stay on the same version.
+pub use wgpu;
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod surface;
 

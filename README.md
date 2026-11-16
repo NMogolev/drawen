@@ -228,20 +228,35 @@ remain available for headless tests, custom backends, and smaller binaries.
 
 ## Optional features
 
-The facade exposes two optional features:
+The facade separates the headless core from the GPU, browser, and media stacks:
+
+| Feature | Default | Enables |
+| --- | --- | --- |
+| `gpu` | yes | `drawen::gpu` and the `wgpu` renderer |
+| `browser` | yes | `drawen::browser` and Servo shared-texture surfaces; implies `gpu` |
+| `media` | yes | `Video`, `AnimatedImage`, `PaleoSession`, and the media contracts |
+| `audio` | no | `AudioPaleoSession` and the `cpal` output device; implies `media` |
+| `director` | no | `MediaDirector` playback policy; implies `media` |
+
+A headless application can drop the GPU, Servo, and Paleo dependency graphs:
+
+```text
+cargo add drawen --no-default-features
+```
+
+Add opt-in playback policy and audio on top of the defaults:
 
 ```text
 cargo add drawen --features audio,director
 ```
 
-- `audio` enables `AudioPaleoSession`, audio-mastered playback, and the platform
-  output device through `cpal`.
-- `director` enables `MediaDirector`, which maps window lifecycle events to
-  playback policy.
+The FFmpeg command-line backend is available through `Video::open` whenever
+`media` is enabled; it does not add a separate build feature. It does require
+external `ffmpeg` and `ffprobe` executables at run time.
 
-The FFmpeg command-line backend is always available through `Video::open`; it
-does not add a build feature. It does require external `ffmpeg` and `ffprobe`
-executables at run time.
+GPU and browser APIs expose `wgpu` device and texture types. Use the re-export
+`drawen::gpu::wgpu` (also available as `drawen::browser::wgpu`) instead of adding
+a direct `wgpu` dependency, so the types always match the version Drawen uses.
 
 ## Media capabilities
 
@@ -250,9 +265,9 @@ the platform, and whether audio must be real.
 
 | Entry point | Feature | Video | Audio | External requirements | Important limits |
 | --- | --- | --- | --- | --- | --- |
-| `Video::open_paleo` | none | H.264, 4:2:0 frame pictures | none | None; pure Rust and in-process | H.264 only; bounded synchronous decode on the calling thread |
+| `Video::open_paleo` | `media` | H.264, 4:2:0 frame pictures | none | None; pure Rust and in-process | H.264 only; bounded synchronous decode on the calling thread |
 | `Video::open_paleo_audio` | `audio` | H.264 when present | AAC-LC, ALAC, FLAC, MP1/MP2/MP3, Vorbis, PCM, ADPCM | A default output device through `cpal` | Audio is the master clock; playback is fixed at `1x`; no hot-plug failover |
-| `Video::open` | none | Whatever the local `ffmpeg` decodes | none | `ffmpeg` and `ffprobe` on `PATH` or in `FfmpegConfig` | Out-of-process, raw RGBA frames, 1280 px default cap, CFR timestamps, no audio |
+| `Video::open` | `media` | Whatever the local `ffmpeg` decodes | none | `ffmpeg` and `ffprobe` on `PATH` or in `FfmpegConfig` | Out-of-process, raw RGBA frames, 1280 px default cap, CFR timestamps, no audio |
 | `Video::with_session` | depends on session | Custom `MediaSession` | depends on session | Application-supplied | The widget only presents frames and forwards transport intent |
 
 Paleo demuxes more codecs than it decodes: HEVC, AV1, VP8/VP9, and MPEG-4 Part 2

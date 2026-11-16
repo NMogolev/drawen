@@ -82,9 +82,18 @@ in modules:
 - `drawen::render` — `DisplayList`, `PaintContext`, `TextLayout`, `TextShaper`,
   and fonts;
 - `drawen::software` — `SoftwareRenderer`, `PixelBuffer`, and PNG export;
-- `drawen::gpu` — the `wgpu` display-list renderer;
+- `drawen::gpu` — the `wgpu` display-list renderer (`gpu` feature, default);
 - `drawen::platform` — native-window contracts and intent translation;
-- `drawen::browser` — Servo shared-texture surfaces, where supported.
+- `drawen::browser` — Servo shared-texture surfaces, where supported (`browser`
+  feature, default; implies `gpu`).
+
+Both GPU-facing modules re-export the matching `wgpu` crate as
+`drawen::gpu::wgpu` and `drawen::browser::wgpu`; prefer those paths over a
+separate `wgpu` dependency.
+
+The media types (`Video`, `MediaSession`, `AnimatedImage`) require the `media`
+feature, which is also enabled by default. Use `--no-default-features` to build
+a headless application without `wgpu`, Servo interop, or Paleo.
 
 ## 2. Text
 

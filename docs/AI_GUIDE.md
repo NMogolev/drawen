@@ -44,6 +44,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `Video` + `MediaSession`; audio is part of the media session |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
+| `Video` after `--no-default-features` | Enable `media`; `drawen-widgets` also gates media widgets behind `media` |
 
 ## Q&A
 
@@ -105,9 +106,9 @@ variables, `calc()`, media queries, keyframes, or animations. See
 Choose the backend explicitly:
 
 ```rust
-let video = Video::open_paleo("clip.mp4")?;        // pure Rust, H.264, no audio
-let video = Video::open_paleo_audio("clip.mp4")?;  // requires feature "audio"
-let video = Video::open("clip.mp4")?;              // external ffmpeg/ffprobe, no audio
+let video = Video::open_paleo("clip.mp4")?;        // "media"; pure Rust, H.264, no audio
+let video = Video::open_paleo_audio("clip.mp4")?;  // "audio" (implies "media")
+let video = Video::open("clip.mp4")?;              // "media"; external ffmpeg/ffprobe, no audio
 ```
 
 Only `open_paleo_audio` has an audio-mastered clock. Audio continues only while

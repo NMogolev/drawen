@@ -13,4 +13,4 @@ workspace = true
 
 [dependencies]
 drawen-platform = { version = "0.2", path = "../drawen-platform" }
-drawen-widgets = { version = "0.2", path = "../drawen-widgets" }
+drawen-widgets = { version = "0.2", path = "../drawen-widgets", features = ["media"] }

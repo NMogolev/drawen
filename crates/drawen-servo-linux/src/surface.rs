@@ -434,7 +434,11 @@ impl SharedTexture {
         let texture = unsafe {
             // SAFETY: the hal texture was created by this exact device and its
             // extent, format, mip count, and sample count match `descriptor`.
-            wgpu_device.create_texture_from_hal::<wgpu::hal::vulkan::Api>(hal_texture, &descriptor)
+            wgpu_device.create_texture_from_hal::<wgpu::hal::vulkan::Api>(
+                hal_texture,
+                &descriptor,
+                wgpu::TextureUses::UNINITIALIZED,
+            )
         };
 
         let shared = Self {

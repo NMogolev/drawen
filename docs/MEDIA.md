@@ -168,9 +168,9 @@ These are backend limits, not contract limits. A new backend implements
 
 ## Paleo backend
 
-`PaleoSession` (in `drawen-widgets`) is the in-process backend. It opens a file
-with `paleo::Media`, demuxes video packets with Symphonia, and decodes H.264
-with `paleo_h264::H264Decoder`:
+`PaleoSession` (in `drawen-widgets`, behind the `media` feature) is the
+in-process backend. It opens a file with `paleo::Media`, demuxes video packets
+with Symphonia, and decodes H.264 with `paleo_h264::H264Decoder`:
 
 - `Video::open_paleo(path)` is the convenience entry point; `Video::with_session`
   attaches any other `MediaSession` implementation.
@@ -304,8 +304,9 @@ repaints immediately.
 
 ### Wiring background playback
 
-The snippet below requires the `audio` and `director` facade features. Enable
-the features that provide the session and the policy:
+The snippet below requires the `audio` and `director` facade features. Both
+imply `media`, which provides `Video` and the session contracts. Enable the
+features that provide the session and the policy:
 
 ```text
 cargo add drawen --features audio,director

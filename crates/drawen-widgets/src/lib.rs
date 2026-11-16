@@ -10,11 +10,13 @@
 //! returns a `Signal<()>` whose subscription fires after a completed click or
 //! keyboard activation.
 //!
-//! The `audio` feature enables `AudioPaleoSession` and links the `cpal` output
-//! backend.
+//! The `media` feature enables `Video`, `AnimatedImage`, `PaleoSession`, and the
+//! shared media contracts. The `audio` feature additionally enables
+//! `AudioPaleoSession` and links the `cpal` output backend.
 
 mod alert;
 mod align;
+#[cfg(feature = "media")]
 mod animated_image;
 #[cfg(feature = "audio")]
 mod audio_session;
@@ -31,9 +33,11 @@ mod expander;
 mod image;
 mod image_viewer;
 mod list_view;
+#[cfg(feature = "media")]
 mod media;
 mod menu_bar;
 mod padding;
+#[cfg(feature = "media")]
 mod paleo_session;
 mod progress_bar;
 mod radio_button;
@@ -53,13 +57,16 @@ mod text_editor;
 mod text_field;
 mod title_bar;
 mod toolbar;
+#[cfg(feature = "media")]
 mod video;
+#[cfg(feature = "media")]
 mod video_ffmpeg;
 mod virtual_list;
 mod window_frame;
 
 pub use alert::{Alert, AlertTone};
 pub use align::{Align, Alignment};
+#[cfg(feature = "media")]
 pub use animated_image::{AnimatedImage, AnimationFrame, GifDecodeError};
 #[cfg(feature = "audio")]
 pub use audio_session::AudioPaleoSession;
@@ -76,12 +83,14 @@ pub use expander::Expander;
 pub use image::{Image, ImageFit};
 pub use image_viewer::ImageViewer;
 pub use list_view::ListView;
+#[cfg(feature = "media")]
 pub use media::{
     MediaClock, MediaError, MediaFrame, MediaFrameScheduler, MediaMetadata, MediaSession,
     MediaState, MediaUpdate, VideoMetadata,
 };
 pub use menu_bar::MenuBar;
 pub use padding::Padding;
+#[cfg(feature = "media")]
 pub use paleo_session::PaleoSession;
 pub use progress_bar::ProgressBar;
 pub use radio_button::{RadioButton, RadioGroup};
@@ -100,7 +109,9 @@ pub use text_edit::TextEdit;
 pub use text_field::TextField;
 pub use title_bar::{TitleBar, TitleBarStyle, WindowChromeState, WindowControl};
 pub use toolbar::Toolbar;
+#[cfg(feature = "media")]
 pub use video::Video;
+#[cfg(feature = "media")]
 pub use video_ffmpeg::{FfmpegConfig, VideoError};
 pub use virtual_list::{
     Column, SelectionMode, SelectionModel, VirtualDataSource, VirtualList, VirtualTable,

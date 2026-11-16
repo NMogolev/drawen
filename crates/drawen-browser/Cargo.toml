@@ -17,4 +17,4 @@ drawen-render = { version = "0.2", path = "../drawen-render" }
 drawen-servo = { version = "0.2", path = "../drawen-servo" }
 drawen-ui = { version = "0.2", path = "../drawen-ui" }
 drawen-wgpu = { version = "0.2", path = "../drawen-wgpu" }
-wgpu = "=29.0.4"
+wgpu = "30.0.2"

@@ -63,6 +63,24 @@ optional feature is a patch release.
    Run both with `--all-features` on a machine that has the audio system
    libraries installed, so the optional `audio` and `director` paths are built
    too.
+
+   Also check the feature matrix. A dependency that leaks through a default
+   feature is invisible to a normal build, so the headless configuration is the
+   only one that catches it:
+
+   ```text
+   cargo check -p drawen --no-default-features
+   cargo check -p drawen --no-default-features --features gpu
+   cargo check -p drawen --no-default-features --features media
+   cargo check -p drawen --no-default-features --features browser
+   cargo check -p drawen --no-default-features --features audio
+   cargo check -p drawen --no-default-features --features director
+   cargo check -p drawen --no-default-features --features browser,audio,director
+   cargo test -p drawen-widgets --no-default-features
+   ```
+
+   `cargo tree -e normal -p drawen --no-default-features` must not name `wgpu`,
+   Servo, Symphonia, Paleo, or `image`.
 4. Run semver checks for every published crate against the previous release:
 
    ```text

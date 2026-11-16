@@ -12,17 +12,34 @@ readme.workspace = true
 workspace = true
 
 [features]
+# A direct dependency stays lean by default. The `drawen` facade enables
+# `media` from its own default feature set so applications keep Video available.
 default = []
+# Enables Video, AnimatedImage, PaleoSession, and the shared media contracts,
+# linking Paleo, its H.264 decoder, and the GIF decoder.
+media = ["dep:image", "dep:paleo", "dep:paleo-h264"]
 # Enables AudioPaleoSession and links the cpal audio output backend.
-audio = ["dep:paleo-audio"]
+audio = ["media", "dep:paleo-audio"]
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["gif"] }
-paleo = { version = "0.2", path = "../paleo" }
+image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
+paleo = { version = "0.2", path = "../paleo", optional = true }
 paleo-audio = { version = "0.2", path = "../paleo-audio", optional = true }
-paleo-h264 = { version = "0.2", path = "../paleo-h264" }
+paleo-h264 = { version = "0.2", path = "../paleo-h264", optional = true }
 drawen-core = { version = "0.2", path = "../drawen-core" }
 drawen-render = { version = "0.2", path = "../drawen-render" }
 drawen-ui = { version = "0.2", path = "../drawen-ui" }
 drawen-workspace = { version = "0.2", path = "../drawen-workspace" }
 unicode-segmentation = "1.12"
+
+[[test]]
+name = "ffmpeg_decoder"
+required-features = ["media"]
+
+[[test]]
+name = "paleo_session"
+required-features = ["media"]
+
+[[test]]
+name = "paleo_audio_session"
+required-features = ["audio"]

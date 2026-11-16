@@ -455,6 +455,7 @@ fn import_texture(
                 },
             ),
             &descriptor,
+            wgpu::TextureUses::UNINITIALIZED,
         )
     }
 }

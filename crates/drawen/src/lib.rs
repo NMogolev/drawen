@@ -47,10 +47,19 @@
 //!
 //! # Features
 //!
+//! - `gpu` enables the `wgpu` display-list renderer and [`gpu`].
+//! - `browser` enables Servo shared-texture surfaces and [`browser`]. It implies
+//!   `gpu`.
+//! - `media` enables `Video`, `AnimatedImage`, `PaleoSession`, and the media
+//!   contracts.
 //! - `audio` enables audio-mastered Paleo playback through the platform output
-//!   device.
+//!   device. It implies `media`.
 //! - `director` enables `MediaDirector`, which maps window lifecycle events to
-//!   playback policy.
+//!   playback policy. It implies `media`.
+//!
+//! `gpu`, `browser`, and `media` are enabled by default; `audio` and
+//! `director` are opt-in. Use `--no-default-features` for a headless build that
+//! omits `wgpu`, Servo interop, and the Paleo media stack.
 
 pub use drawen_core::{
     Affine, Clipboard, Color, ConstraintError, Constraints, Diagnostic, DiagnosticReporter,
@@ -75,16 +84,20 @@ pub use drawen_ui::{
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
 pub use drawen_widgets::{
-    Alert, AlertTone, Align, Alignment, AnimatedImage, AnimationFrame, Avatar, AvatarStatus, Badge,
-    BadgeTone, Box, Button, ButtonStyle, Card, CardStyle, Checkbox, ComboBox, Container, Divider,
-    DividerAxis, DockArea, DockAreaError, DockItem, Dropdown, Expander, FfmpegConfig,
-    GifDecodeError, Image, ImageFit, ImageViewer, ListView, MediaClock, MediaError, MediaFrame,
-    MediaFrameScheduler, MediaMetadata, MediaSession, MediaState, MediaUpdate, MenuBar, Padding,
-    ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView, SegmentedControl, SelectionMode,
-    SelectionModel, SizedBox, Skeleton, Slider, Spinner, SplitAxis, Splitter, Stack, Switch,
-    TabBar, Text, TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toolbar, Video,
-    VideoError, VideoMetadata, VirtualDataSource, VirtualList, VirtualTable, VirtualTableSource,
-    WindowChromeState, WindowControl, WindowFrame,
+    Alert, AlertTone, Align, Alignment, Avatar, AvatarStatus, Badge, BadgeTone, Box, Button,
+    ButtonStyle, Card, CardStyle, Checkbox, ComboBox, Container, Divider, DividerAxis, DockArea,
+    DockAreaError, DockItem, Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, MenuBar,
+    Padding, ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView, SegmentedControl,
+    SelectionMode, SelectionModel, SizedBox, Skeleton, Slider, Spinner, SplitAxis, Splitter, Stack,
+    Switch, TabBar, Text, TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toolbar,
+    VirtualDataSource, VirtualList, VirtualTable, VirtualTableSource, WindowChromeState,
+    WindowControl, WindowFrame,
+};
+#[cfg(feature = "media")]
+pub use drawen_widgets::{
+    AnimatedImage, AnimationFrame, FfmpegConfig, GifDecodeError, MediaClock, MediaError,
+    MediaFrame, MediaFrameScheduler, MediaMetadata, MediaSession, MediaState, MediaUpdate, Video,
+    VideoError, VideoMetadata,
 };
 pub use drawen_workspace::{
     DockAxis, DocumentId, DocumentPresentation, FloatingDocument, FloatingPanel, LayoutNode,
@@ -159,13 +172,24 @@ pub mod software {
 }
 
 /// GPU display-list rendering powered by `wgpu`.
+#[cfg(feature = "gpu")]
 pub mod gpu {
+    /// The `wgpu` version Drawen is built against.
+    ///
+    /// Applications can use this re-export instead of adding a direct
+    /// dependency, which keeps texture and device types compatible.
+    pub use drawen_wgpu::wgpu;
     pub use drawen_wgpu::{GpuError, GpuRenderer, GpuRendererError, RenderStatus};
 }
 
 /// Servo browser surfaces and their Drawen widget.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[cfg(all(
+    feature = "browser",
+    any(windows, target_os = "linux", target_os = "macos")
+))]
 pub mod browser {
+    /// The `wgpu` version used by browser surfaces.
+    pub use drawen_browser::wgpu;
     pub use drawen_browser::{
         BrowserError, BrowserSurface, BrowserView, Context, InteropError, SharedTexture,
     };

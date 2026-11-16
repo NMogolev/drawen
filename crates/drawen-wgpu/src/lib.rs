@@ -17,6 +17,12 @@ use bytemuck::{Pod, Zeroable};
 use drawen_core::{Affine, Color, Point, Rect};
 use drawen_render::{DisplayCommand, DisplayList, RasterImage, TextLayout, TextureId};
 
+/// The `wgpu` version Drawen is built against.
+///
+/// Re-exported so applications can name texture and device types without adding
+/// a separate dependency whose version might not match.
+pub use wgpu;
+
 const TEXT_ATLAS_SIZE: u32 = 2048;
 const RASTER_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -732,7 +738,7 @@ impl GpuRenderer {
             }
         }
         self.queue.submit([encoder.finish()]);
-        frame.present();
+        self.queue.present(frame);
         Ok(())
     }
 
@@ -1714,7 +1720,7 @@ fn create_shape_pipeline(
             module: shader,
             entry_point: Some("vertex"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<ShapeVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
@@ -1726,7 +1732,7 @@ fn create_shape_pipeline(
                     5 => Float32x4,
                     6 => Float32,
                 ],
-            }],
+            })],
         },
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
@@ -1824,11 +1830,11 @@ fn create_textured_pipeline(
             module: shader,
             entry_point: Some("vertex"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<TextVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
-            }],
+            })],
         },
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
