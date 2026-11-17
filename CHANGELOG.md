@@ -4,7 +4,7 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
-## 0.2.0 - 2026-11-15
+## 0.2.0 - 2026-11-17
 
 ### GPU renderer
 
@@ -51,6 +51,23 @@ in the headings because the version itself must stay valid semver; see
   assistive-technology actions, tab order, or animation scheduling.
 - Added `styled_forwards_every_widget_hook` to prevent regressions in the
   wrapper's transparent forwarding.
+
+### Tasks
+
+- Added the `drawen-tasks` crate with the sanctioned boundary for off-thread
+  work: a fixed-size `TaskPool`, cancellable `TaskHandle`s, `TaskContext`
+  progress reporting and cooperative cancellation, and a `UiDispatcher` that
+  moves owned results back to the UI thread and wakes the event loop.
+- `drawen::tasks` re-exports the pool, handles, cancellation token, dispatcher,
+  and error types, so applications do not depend on the crate directly.
+
+### Documentation
+
+- Added the onboarding path in `docs/AI_GUIDE.md`, `docs/TUTORIAL.md`,
+  `docs/RECIPES.md`, and `docs/THREADING.md`, with canonical
+  `minimal_window` and `stateful_app` examples.
+- Expanded `README.md` with the crate map, application boundaries, and the
+  threading rules.
 
 ### Packaging
 

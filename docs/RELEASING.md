@@ -87,25 +87,25 @@ local machine.
    ```text
    cargo install cargo-semver-checks --locked
    git fetch --tags
-   cargo semver-checks check-release --package drawen-core --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-render --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-ui --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-widgets --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-software --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-tasks --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-platform --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-platform-winit --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-workspace --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen-director --baseline-rev v0.1.0
-   cargo semver-checks check-release --package drawen --baseline-rev v0.1.0
-   cargo semver-checks check-release --package paleo --baseline-rev v0.1.0
-   cargo semver-checks check-release --package paleo-h264 --baseline-rev v0.1.0
-   cargo semver-checks check-release --package paleo-audio --baseline-rev v0.1.0
+   cargo semver-checks check-release --package drawen-core --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-render --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-ui --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-widgets --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-software --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-tasks --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-platform --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-platform-winit --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-workspace --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen-director --baseline-rev v0.2.0
+   cargo semver-checks check-release --package drawen --baseline-rev v0.2.0
+   cargo semver-checks check-release --package paleo --baseline-rev v0.2.0
+   cargo semver-checks check-release --package paleo-h264 --baseline-rev v0.2.0
+   cargo semver-checks check-release --package paleo-audio --baseline-rev v0.2.0
    ```
 
    The browser and Servo crates are checked on their native target. The
-   commands use `v0.1.0` as the baseline for the 0.2.0 release; substitute the
+   commands use `v0.2.0` as the baseline for the 0.2.1 release; substitute the
    tag of the release being superseded. If no baseline tag exists yet, use
    `--baseline-root` against an unpacked previous release instead.
 
@@ -115,7 +115,7 @@ local machine.
    the date and the changelog summary:
 
    ```text
-   git tag -a v0.2.0 -m "Drawen 0.2.0 (2026-11-15)"
+   git tag -a v0.2.0 -m "Drawen 0.2.0 (2026-11-17)"
    ```
 
 9. Publish in dependency order (core and render first, the facade last):
@@ -135,4 +135,4 @@ unexpected, fix the API or bump the minor version; do not silence the check.
 | Version | Date | Summary |
 | --- | --- | --- |
 | 0.1.0 | 2026-11-14 | Initial published crate set |
-| 0.2.0 | 2026-11-15 | GPU paint-order correctness, raster image pipelines, software fill rewrite |
+| 0.2.0 | 2026-11-17 | GPU paint-order correctness, raster image pipelines, software fill rewrite, worker task boundary |
