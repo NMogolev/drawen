@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn the_default_build_has_backends() {
-        assert!(!codecs().is_empty());
+        assert_ne!(codecs(), []);
         assert!(codecs().windows(2).all(|pair| pair[0] != pair[1]));
     }
 

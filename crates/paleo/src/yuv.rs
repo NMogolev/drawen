@@ -462,7 +462,7 @@ mod tests {
             YuvRange::Limited,
             &mut pixels,
         ));
-        for pixel in pixels.chunks_exact(4) {
+        for pixel in pixels.as_chunks::<4>().0 {
             assert!(pixel[0].abs_diff(pixel[1]) <= 1);
             assert!(pixel[1].abs_diff(pixel[2]) <= 1);
             assert!((120..=140).contains(&pixel[1]));
@@ -511,6 +511,6 @@ mod tests {
             YuvRange::Limited,
             &mut pixels,
         ));
-        assert!(pixels.is_empty());
+        assert_eq!(pixels, []);
     }
 }
