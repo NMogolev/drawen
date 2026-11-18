@@ -1,0 +1,18 @@
+[package]
+name = "paleo-hevc"
+description = "Pure-Rust HEVC/H.265 decoding backend for Paleo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+paleo = { version = "0.2", path = "../paleo" }
+# Pin the decoder exactly: its streaming API is young and the packet bridge in
+# this crate is written against this release.
+rusty_h265 = "=0.7.1"

@@ -1,47 +1,37 @@
-//! Pure-Rust H.264 video playback for [`crate::Video`].
+//! Pure-Rust Paleo playback for [`crate::Video`].
 //!
-//! [`PaleoSession`] adapts a streaming [`paleo::Media`] and a
-//! [`paleo_h264::H264Decoder`] to the backend-neutral [`MediaSession`]
-//! contract. It decodes on the calling thread in bounded steps: each
-//! [`MediaSession::update`] advances the clock and decodes only enough packets
-//! to keep a couple of pictures ahead of the playhead, so the session never
-//! builds an unbounded frame queue.
+//! [`PaleoSession`] adapts a [`paleo_player::Player`] to the backend-neutral
+//! [`MediaSession`] contract. The player demuxes, decodes, and keeps its own
+//! picture queue on the calling thread; this session mirrors the player's
+//! timeline into a [`MediaClock`] so widgets can draw progress and controls,
+//! and converts the current picture into a [`MediaFrame`].
+//!
+//! Every video codec with a backend in the Paleo stack is available here: the
+//! default build decodes H.264, HEVC, VP9, and AV1 in pure Rust.
 
-use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Duration;
 
 use drawen_render::RasterImage;
-use paleo::{Event, Media, MediaSelection, VideoCodec};
-use paleo_h264::{H264Decoder, VideoFrame};
+use paleo_player::{Player, PlayerOptions, PlayerState};
 
 use crate::media::{MediaClock, MediaError, MediaFrame, MediaMetadata, MediaSession, MediaUpdate};
 
 /// Frame rate assumed when the container does not report one.
 const DEFAULT_FRAME_RATE: f64 = 30.0;
-/// How many decoded pictures to keep buffered ahead of the playhead.
-const TARGET_QUEUE: usize = 2;
-/// Packet budget for one playback update.
-const MAX_PACKETS_PER_UPDATE: usize = 16;
-/// Packet budget for a seek preview, which may walk a whole GOP.
-const MAX_PACKETS_PER_SEEK: usize = 2_000;
-/// How far before a seek target to look for the preceding keyframe.
-const KEYFRAME_LOOKBACK: Duration = Duration::from_secs(10);
 
-/// A [`MediaSession`] backed by Paleo's demuxer and the pure-Rust H.264
-/// decoder.
+/// A [`MediaSession`] backed by Paleo and pure-Rust decoders.
 ///
-/// Only H.264 in a container understood by Symphonia is supported for now.
-/// Files are opened video-only, so an unsupported audio track does not prevent
-/// playback and no audio is decoded before an output device exists.
+/// The session decodes on the calling thread in bounded steps: each
+/// [`MediaSession::update`] advances the player and returns at most one new
+/// picture, so the view never builds an unbounded frame queue.
 pub struct PaleoSession {
-    media: Media,
-    decoder: H264Decoder,
+    player: Player,
     clock: MediaClock,
     metadata: MediaMetadata,
     frame_duration: Duration,
-    queue: VecDeque<MediaFrame>,
-    ended: bool,
+    now: Duration,
+    pending_error: Option<MediaError>,
 }
 
 impl PaleoSession {
@@ -50,108 +40,80 @@ impl PaleoSession {
     /// # Errors
     ///
     /// Returns [`MediaError`] when the file cannot be opened, has no video
-    /// track, uses a codec other than H.264, carries no usable `avcC` record,
-    /// or fails to decode.
+    /// track, uses a codec this build cannot decode, or fails to decode.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MediaError> {
-        let media = Media::open_with(path.as_ref(), MediaSelection::VideoOnly)
+        Self::open_player(path.as_ref(), &PlayerOptions::new().with_audio(false))
+    }
+
+    /// Opens `path` with audio output and follows video to the audio clock.
+    ///
+    /// If the file has no audio track, or no output device can be opened, the
+    /// session falls back to wall-clock playback of the video alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError`] when the file cannot be opened or fails to decode.
+    #[cfg(feature = "audio")]
+    pub fn open_audio(path: impl AsRef<Path>) -> Result<Self, MediaError> {
+        Self::open_player(path.as_ref(), &PlayerOptions::new())
+    }
+
+    /// Opens `path` with explicit player options.
+    fn open_player(path: &Path, options: &PlayerOptions) -> Result<Self, MediaError> {
+        let player = Player::open_with(path, options)
             .map_err(|error| MediaError::new(format!("could not open media: {error}")))?;
-        let video = media
-            .info()
-            .video()
-            .cloned()
-            .ok_or_else(|| MediaError::new("the file has no video track"))?;
-        if video.codec() != VideoCodec::H264 {
-            return Err(MediaError::new(format!(
-                "unsupported video codec {}; the Paleo backend decodes H.264 only",
-                video.codec()
-            )));
-        }
 
-        let mut decoder = H264Decoder::new();
-        decoder
-            .configure(video.extra_data())
-            .map_err(|error| MediaError::new(format!("could not configure H.264: {error}")))?;
-
-        let duration = media.info().duration().unwrap_or_default();
-        let frame_duration = video
+        let info = player.info();
+        let duration = player.duration().unwrap_or_default();
+        let frame_duration = info
             .frame_rate()
             .filter(|rate| rate.is_finite() && *rate > 0.0)
             .map_or_else(
                 || Duration::from_secs_f64(1.0 / DEFAULT_FRAME_RATE),
                 |rate| Duration::from_secs_f64(1.0 / rate),
             );
+        let metadata = MediaMetadata::new(info.width(), info.height(), duration);
 
         let mut clock = MediaClock::new();
         clock.set_duration(Some(duration));
         clock.seek(Duration::ZERO);
 
-        let mut session = Self {
-            media,
-            decoder,
+        Ok(Self {
+            player,
             clock,
-            metadata: MediaMetadata::new(video.width(), video.height(), duration),
+            metadata,
             frame_duration,
-            queue: VecDeque::new(),
-            ended: false,
+            now: Duration::ZERO,
+            pending_error: None,
+        })
+    }
+
+    /// Returns the text of a recoverable playback problem, if one occurred.
+    #[must_use]
+    pub fn warning(&self) -> Option<&str> {
+        self.player
+            .info()
+            .audio_error()
+            .or_else(|| self.player.info().video_error())
+    }
+
+    /// Copies the current picture into a presentable frame.
+    fn current_frame(&self) -> Option<MediaFrame> {
+        let frame = self.player.frame()?;
+        let image =
+            RasterImage::new(frame.width(), frame.height(), frame.pixels().to_vec()).ok()?;
+        Some(MediaFrame::new(image, frame.pts(), self.frame_duration))
+    }
+
+    /// Mirrors the player's state into the widget-facing clock.
+    fn synchronize_clock(&mut self, position: Duration, state: PlayerState) -> bool {
+        let mut changed = self.clock.synchronize(position);
+        changed |= match state {
+            PlayerState::Playing => self.clock.play(),
+            PlayerState::Paused => self.clock.pause(),
+            PlayerState::Ended => self.clock.finish(),
         };
-        session.fill(Duration::ZERO, MAX_PACKETS_PER_SEEK)?;
-        Ok(session)
-    }
-
-    /// Decodes until the queue holds [`TARGET_QUEUE`] pictures at or after
-    /// `position`, the stream ends, or `max_packets` packets were read.
-    fn fill(&mut self, position: Duration, max_packets: usize) -> Result<(), MediaError> {
-        let mut packets = 0;
-        while !self.ended && self.queue.len() < TARGET_QUEUE && packets < max_packets {
-            match self.media.next_event() {
-                Ok(Event::Video(packet)) => {
-                    packets += 1;
-                    let frames = self.decoder.decode(&packet).map_err(|error| {
-                        MediaError::new(format!("H.264 decoding failed: {error}"))
-                    })?;
-                    self.push_frames(frames)?;
-                    self.drop_expired(position);
-                }
-                // Video-only sessions request no audio track; tolerate the
-                // event anyway so the session stays usable if that changes.
-                Ok(Event::Audio(_)) => {}
-                Ok(Event::EndOfStream) => {
-                    self.ended = true;
-                    let frames = self.decoder.flush();
-                    self.push_frames(frames)?;
-                    self.drop_expired(position);
-                }
-                Err(error) => {
-                    self.ended = true;
-                    return Err(MediaError::new(format!("demuxing failed: {error}")));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn push_frames(&mut self, frames: Vec<VideoFrame>) -> Result<(), MediaError> {
-        for frame in frames {
-            let pts = frame.pts();
-            let width = frame.width();
-            let height = frame.height();
-            let image = RasterImage::new(width, height, frame.into_pixels())
-                .map_err(|error| MediaError::new(format!("decoded frame is invalid: {error}")))?;
-            self.queue
-                .push_back(MediaFrame::new(image, pts, self.frame_duration));
-        }
-        Ok(())
-    }
-
-    /// Drops pictures that can no longer be visible at `position`.
-    fn drop_expired(&mut self, position: Duration) {
-        while self
-            .queue
-            .front()
-            .is_some_and(|frame| frame.end() <= position)
-        {
-            self.queue.pop_front();
-        }
+        changed
     }
 }
 
@@ -169,94 +131,88 @@ impl MediaSession for PaleoSession {
     }
 
     fn play(&mut self) -> Result<(), MediaError> {
-        if self.clock.is_ended() || (self.ended && self.queue.is_empty()) {
-            self.seek(Duration::ZERO)?;
-        }
+        self.player
+            .play()
+            .map_err(|error| MediaError::new(format!("could not play: {error}")))?;
+        self.clock.synchronize(self.player.position());
         self.clock.play();
         Ok(())
     }
 
     fn pause(&mut self) {
+        self.player.pause();
         self.clock.pause();
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), MediaError> {
-        self.clock.seek(position);
-        let target = self.clock.position();
-        let decoder = &self.decoder;
-        // The container seek lands inside a GOP, where H.264 cannot start.
-        // Seek back to the preceding IDR so the preview is at or before the
-        // target instead of skipping to the next keyframe.
-        self.media
-            .seek_keyframe(target, KEYFRAME_LOOKBACK, |data| {
-                decoder.is_keyframe_data(data)
-            })
+        self.player
+            .seek(position)
             .map_err(|error| MediaError::new(format!("seek failed: {error}")))?;
-        self.decoder.reset();
-        self.queue.clear();
-        self.ended = false;
-        // Decode a preview even while paused, so the view can repaint before
-        // playback resumes.
-        self.fill(target, MAX_PACKETS_PER_SEEK)
+        self.clock.seek(self.player.position());
+        Ok(())
     }
 
     fn set_rate(&mut self, rate: f64) {
-        self.clock.set_rate(rate);
+        if let Err(error) = self.player.set_rate(rate) {
+            self.pending_error = Some(MediaError::new(format!("could not change rate: {error}")));
+        }
+        self.clock.set_rate(self.player.rate());
+    }
+
+    fn supports_video_pause(&self) -> bool {
+        // Only a session with an independent audio path can keep playing while
+        // video stops; without audio, "pause video" would stop the media.
+        self.player.info().has_audio()
+    }
+
+    fn set_video_enabled(&mut self, enabled: bool) -> Result<bool, MediaError> {
+        let before = self.player.info().has_video();
+        self.player.set_video_enabled(enabled).map_err(|error| {
+            MediaError::new(format!("could not change video decoding: {error}"))
+        })?;
+        Ok(before != self.player.info().has_video())
     }
 
     fn update(&mut self, delta: Duration) -> MediaUpdate {
-        let mut state_changed = self.clock.advance(delta);
-        let position = self.clock.position();
-
-        let mut error = None;
-        if self.clock.is_playing()
-            && !self.ended
-            && let Err(failure) = self.fill(position, MAX_PACKETS_PER_UPDATE)
-        {
-            error = Some(failure);
-        }
-
-        if self.ended && self.queue.is_empty() && !self.clock.is_ended() {
-            state_changed |= self.clock.finish();
-        }
-        if error.is_some() {
+        if let Some(error) = self.pending_error.take() {
             self.clock.fail();
-            self.ended = true;
-            state_changed = true;
+            return MediaUpdate {
+                frame: None,
+                error: Some(error),
+                state_changed: true,
+            };
         }
 
-        self.drop_expired(position);
-        let frame = if error.is_some() {
-            None
-        } else {
-            // Release a picture only once the clock reaches it. Draining one
-            // picture per update would run ahead of the wall clock whenever the
-            // update rate exceeds the frame rate.
-            let due = self
-                .queue
-                .front()
-                .is_some_and(|frame| frame.pts() <= position);
-            // A paused seek should still preview the frame that contains the
-            // target even if no timestamp lands exactly on it.
-            let preview = !self.clock.is_playing()
-                && self.queue.front().is_some_and(|frame| {
-                    frame.pts() <= position.saturating_add(self.frame_duration)
-                });
-            if due || preview {
-                self.queue.pop_front()
-            } else {
-                None
+        self.now = self.now.saturating_add(delta);
+        match self.player.update(self.now) {
+            Ok(update) => {
+                let state_changed = self.synchronize_clock(update.position(), update.state());
+                let frame = if update.frame_changed() {
+                    self.current_frame()
+                } else {
+                    None
+                };
+                MediaUpdate {
+                    frame,
+                    error: update
+                        .error()
+                        .map(|detail| MediaError::new(detail.to_owned())),
+                    state_changed,
+                }
             }
-        };
-        MediaUpdate {
-            frame,
-            error,
-            state_changed,
+            Err(error) => {
+                self.clock.fail();
+                MediaUpdate {
+                    frame: None,
+                    error: Some(MediaError::new(error.to_string())),
+                    state_changed: true,
+                }
+            }
         }
     }
 
     fn is_active(&self) -> bool {
-        self.clock.is_playing() || !self.queue.is_empty()
+        self.player.state() == PlayerState::Playing
     }
 }
 

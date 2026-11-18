@@ -114,17 +114,18 @@ impl Video {
         Ok(video)
     }
 
-    /// Opens `path` with the pure-Rust Paleo H.264 backend.
+    /// Opens `path` with the pure-Rust Paleo backend.
     ///
-    /// Unlike [`Self::open`], this needs no external executable. It currently
-    /// decodes H.264 only; use [`Self::open`] for containers or codecs that
-    /// Paleo cannot handle yet. Decoding happens on the calling thread in
-    /// bounded steps, and the first picture is ready when this returns.
+    /// Unlike [`Self::open`], this needs no external executable. The default
+    /// build decodes H.264, HEVC, VP9, and AV1; use [`Self::open`] for codecs
+    /// and containers Paleo cannot handle yet. Decoding happens on the calling
+    /// thread in bounded steps, and the first picture is ready when this
+    /// returns.
     ///
     /// # Errors
     ///
     /// Returns [`MediaError`] when the file cannot be opened, has no video
-    /// track, uses a codec other than H.264, or fails to decode.
+    /// track, uses a codec this build has no backend for, or fails to decode.
     pub fn open_paleo(path: impl AsRef<Path>) -> Result<Self, MediaError> {
         let session = PaleoSession::open(path.as_ref())?;
         Ok(Self::new().with_session(session))
@@ -134,14 +135,15 @@ impl Video {
     ///
     /// Requires the `audio` feature. Audio is decoded by Paleo and played by
     /// `paleo-audio`; the device position is the master clock. If the file has
-    /// no audio track, the session falls back to the wall-clock behavior of
-    /// [`Self::open_paleo`]. A video track is shown only when it is H.264.
+    /// no audio track or no output device is available, the session falls back
+    /// to the wall-clock behavior of [`Self::open_paleo`]. Video is shown for
+    /// every codec this build has a backend for; an unsupported video codec is
+    /// skipped so the audio still plays.
     ///
     /// # Errors
     ///
-    /// Returns [`MediaError`] when the file cannot be opened, the audio codec is
-    /// unsupported, no output device is available, or the video stream is
-    /// malformed.
+    /// Returns [`MediaError`] when the file cannot be opened, no track can be
+    /// played at all, or a stream is malformed.
     #[cfg(feature = "audio")]
     pub fn open_paleo_audio(path: impl AsRef<Path>) -> Result<Self, MediaError> {
         let session = crate::AudioPaleoSession::open(path.as_ref())?;

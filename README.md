@@ -165,8 +165,9 @@ timing; `stateful_app` adds application state.
 - **Docking and workspaces.** A serializable layout model with split panels,
   tabs, floating windows, MDI documents, and versioned JSON persistence.
 - **Accessibility.** Semantic roles, states, actions, and an AccessKit bridge.
-- **Media and browser surfaces.** In-process Paleo playback for H.264 and audio,
-  an optional FFmpeg command-line backend, and Servo shared-texture embedding.
+- **Media and browser surfaces.** In-process Paleo playback for H.264, HEVC, VP9,
+  AV1, and audio, an optional FFmpeg command-line backend, and Servo
+  shared-texture embedding.
 
 ## Common recipes
 
@@ -224,8 +225,13 @@ remain available for headless tests, custom backends, and smaller binaries.
 | [`drawen-servo-windows`](https://crates.io/crates/drawen-servo-windows) | Windows DXGI shared-texture interop |
 | [`drawen-servo-linux`](https://crates.io/crates/drawen-servo-linux) | Linux Vulkan dmabuf/EGL shared-texture interop |
 | [`drawen-servo-macos`](https://crates.io/crates/drawen-servo-macos) | macOS IOSurface shared-texture interop |
-| [`paleo`](https://crates.io/crates/paleo) | Pure-Rust container demuxing and audio decoding |
+| [`paleo`](https://crates.io/crates/paleo) | Pure-Rust container demuxing, audio decoding, and the video decoder contract |
 | [`paleo-h264`](https://crates.io/crates/paleo-h264) | Pure-Rust H.264 decoding backend |
+| [`paleo-hevc`](https://crates.io/crates/paleo-hevc) | Pure-Rust HEVC decoding backend |
+| [`paleo-vp9`](https://crates.io/crates/paleo-vp9) | Pure-Rust VP9 decoding backend |
+| [`paleo-av1`](https://crates.io/crates/paleo-av1) | Pure-Rust AV1 decoding backend |
+| [`paleo-video`](https://crates.io/crates/paleo-video) | Codec selection across the video backends |
+| [`paleo-player`](https://crates.io/crates/paleo-player) | One-object player: demux, decode, audio output, and clock |
 | [`paleo-audio`](https://crates.io/crates/paleo-audio) | Audio output, PCM conversion, and playback clock |
 
 ## Optional features
@@ -267,14 +273,15 @@ the platform, and whether audio must be real.
 
 | Entry point | Feature | Video | Audio | External requirements | Important limits |
 | --- | --- | --- | --- | --- | --- |
-| `Video::open_paleo` | `media` | H.264, 4:2:0 frame pictures | none | None; pure Rust and in-process | H.264 only; bounded synchronous decode on the calling thread |
-| `Video::open_paleo_audio` | `audio` | H.264 when present | AAC-LC, ALAC, FLAC, MP1/MP2/MP3, Vorbis, PCM, ADPCM | A default output device through `cpal` | Audio is the master clock; playback is fixed at `1x`; no hot-plug failover |
+| `Video::open_paleo` | `media` | H.264, HEVC, VP9, AV1 | none | None; pure Rust and in-process | Bounded synchronous decode on the calling thread |
+| `Video::open_paleo_audio` | `audio` | H.264, HEVC, VP9, AV1 when present | AAC-LC, ALAC, FLAC, MP1/MP2/MP3, Vorbis, Opus, PCM, ADPCM | A default output device through `cpal` | Audio is the master clock; rates other than 1x suspend audio; no hot-plug failover |
 | `Video::open` | `media` | Whatever the local `ffmpeg` decodes | none | `ffmpeg` and `ffprobe` on `PATH` or in `FfmpegConfig` | Out-of-process, raw RGBA frames, 1280 px default cap, CFR timestamps, no audio |
 | `Video::with_session` | depends on session | Custom `MediaSession` | depends on session | Application-supplied | The widget only presents frames and forwards transport intent |
 
-Paleo demuxes more codecs than it decodes: HEVC, AV1, VP8/VP9, and MPEG-4 Part 2
-packets are recognized, but only H.264 has a decoder today. Audio decoding does
-not include HE-AAC/HE-AACv2 or Opus yet. See
+`paleo-player` is the same engine without the widget: `Player::open`,
+`play`/`pause`/`seek`/`set_rate`, and `update(now)` returning the current picture
+and clock. Paleo still leaves VP8, MPEG-4 Part 2, and Motion JPEG without a
+decoder, and audio decoding does not include HE-AAC/HE-AACv2. See
 [MEDIA.md](https://github.com/NMogolev/drawen/blob/main/docs/MEDIA.md) and
 [PALEO.md](https://github.com/NMogolev/drawen/blob/main/docs/PALEO.md) for the
 contract and backend details.
@@ -337,12 +344,13 @@ player. The limits that surprise new applications most often:
 
 **Media**
 
-- Paleo video is H.264 4:2:0 only. HEVC, AV1, VP8/VP9, and MPEG-4 Part 2 still
-  need decoder backends.
-- Paleo audio does not decode HE-AAC, HE-AACv2, or Opus.
-- `AudioPaleoSession` plays at `1x`, decodes on the calling thread, and needs an
-  output device. Device loss is reported as an error instead of switching
-  outputs automatically.
+- Paleo video decodes H.264, HEVC, VP9, and AV1 in pure Rust. VP8, MPEG-4 Part 2,
+  and Motion JPEG still need decoder backends.
+- Paleo audio does not decode HE-AAC or HE-AACv2.
+- Paleo playback runs at `1x` with audio. Other rates suspend audio and follow the
+  wall clock; decoding happens on the calling thread, and `AudioPaleoSession`
+  needs an output device. Device loss is reported as an error instead of
+  switching outputs automatically.
 - The FFmpeg path needs external executables, has no audio track, no hardware
   decode, no zero-copy external textures, and no network or adaptive streaming.
 - Multiple tracks, subtitles, chapters, adaptive bitrate, and encoding are not

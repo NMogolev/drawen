@@ -4,9 +4,9 @@ Media support in Drawen is split into three layers: a timing and scheduling
 contract, a decode/playback session behind that contract, and widgets that only
 present frames and forward user intent. This document defines the contract and
 the current backends: the out-of-process `FFmpeg` command-line backend, the
-in-process Paleo/H.264 backend, and the audio-mastered Paleo backend with real
-audio output. It is the reference to read before adding a streaming source or a
-new decoder.
+in-process Paleo backend (H.264, HEVC, VP9, and AV1 in pure Rust), and the
+audio-mastered Paleo backend with real audio output. It is the reference to read
+before adding a streaming source or a new decoder.
 
 ## Layers
 
@@ -169,80 +169,85 @@ These are backend limits, not contract limits. A new backend implements
 ## Paleo backend
 
 `PaleoSession` (in `drawen-widgets`, behind the `media` feature) is the
-in-process backend. It opens a file with `paleo::Media`, demuxes video packets
-with Symphonia, and decodes H.264 with `paleo_h264::H264Decoder`:
+in-process backend. It wraps `paleo_player::Player`, which owns the container
+reader, the decoder chosen by `paleo-video`, and the bounded picture queue:
 
 - `Video::open_paleo(path)` is the convenience entry point; `Video::with_session`
   attaches any other `MediaSession` implementation.
+- The default build decodes H.264, HEVC, VP9, and AV1. A track whose codec has no
+  backend fails the video-only session with an error that names the codec and the
+  backends this build contains.
 - Files open video-only, so an audio codec that this build cannot decode does
   not prevent playback and no audio is decoded before an output device exists.
 - Decoding is synchronous and bounded on the calling thread. Each `update`
-  decodes at most a few packets and keeps a couple of pictures ahead of the
-  playhead instead of building an unbounded queue. A picture is released only
-  when the clock reaches its timestamp, so a high update rate cannot outrun the
-  stream. There is no worker thread yet, so a large frame can briefly block the
-  UI thread.
+  reads at most 96 packets and keeps three pictures ahead of the playhead
+  instead of building an unbounded queue. A picture is released only when the
+  clock reaches its timestamp, so a high update rate cannot outrun the stream.
+  There is no worker thread yet, so a large frame can briefly block the UI
+  thread.
 - Seeking finds the keyframe at or before the target (scanning back up to 10 s),
   moves the reader there, resets the decoder, and decodes a preview even while
   paused, so the view repaints at or before the requested position instead of
-  jumping forward to the next keyframe. Symphonia 0.6 does not expose packet
-  keyframe flags, so `paleo_h264::H264Decoder::is_keyframe_data` recognizes IDR
-  slices in the bitstream during the scan.
-- `PaleoSession` stores the source path and reopens it when seeking after
-  end-of-stream. Symphonia 0.6's ISO/MP4 reader cannot resume once its atom
-  iterator has reached EOF; `paleo::Media` does the same for direct callers.
-- B-pictures are ordered by the decoder's `PicOrderCnt`, because Symphonia 0.6
-  does not implement the ISO/MP4 `ctts` composition offsets. See
+  jumping forward to the next keyframe. Each backend recognizes its own
+  random-access points (`VideoDecoder::is_keyframe_data`), because Symphonia 0.6
+  does not expose packet keyframe flags.
+- `Player` reopens the source when seeking after end-of-stream. Symphonia 0.6's
+  ISO/MP4 reader cannot resume once its atom iterator has reached EOF;
+  `paleo::Media` does the same for direct callers.
+- H.264 B-pictures are ordered by the decoder's `PicOrderCnt`, because Symphonia
+  0.6 does not implement the ISO/MP4 `ctts` composition offsets. See
   [PALEO.md](PALEO.md) for the framing and timestamp details.
 
 Known limits:
 
-- H.264 only (4:2:0 frame pictures); AV1, VP8/VP9, and HEVC still need a
-  backend;
-- no hardware decode or zero-copy textures.
+- decoding is software-only on the calling thread; there is no hardware decode
+  or zero-copy texture path;
+- H.264 supports 4:2:0 frame pictures, HEVC and VP9 cover the profiles their
+  pure-Rust decoders implement, and AV1 uses `rusty_av1d` without its assembly
+  kernels, so high-bitrate 4K playback is CPU-bound;
+- VP8 and MPEG-4 Part 2 still need a backend.
 
 ## Audio-mastered Paleo backend
 
 `AudioPaleoSession` (in `drawen-widgets`, behind the `audio` feature) adds the
-other half of playback. It decodes audio with Paleo, converts it to the output
-device with `paleo_audio::PcmConverter`, and calls
-`MediaClock::synchronize(output.position())` on every update, so the device is
-the master clock and video follows it:
+other half of playback. It is the same `paleo_player::Player` with audio output
+enabled: the player decodes audio with Paleo, converts it to the output device
+with `paleo_audio::PcmConverter`, and uses the device position as the master
+clock, so video follows it:
 
 ```text
 Paleo audio ──► PcmConverter ──► AudioOutput ring ──► device
                                         │
-                                        └── position ──► MediaClock ──► Video frames
+                                        └── position ──► player timeline ──► Video frames
 ```
 
 - `Video::open_paleo_audio(path)` is the convenience entry point; the
   `drawen` facade forwards the same feature as `drawen/audio`.
 - The device is opened with its default output configuration and the media is
-  adapted to it. A file with no audio track falls back to the wall-clock
-  behavior of `PaleoSession`; a file with an audio track needs an output device
-  to open.
-- Audio is queued ahead of the device up to 120 ms. The ring drops the
-  remainder rather than blocking, so a stalled decoder cannot grow the queue.
-  Video is decoded on a 200 ms time budget rather than a fixed queue length, so
-  the demuxer cannot race ahead of the device and reach end-of-stream early.
-- Seeking searches back for the preceding IDR, repositions audio and video
+  adapted to it. A file with no audio track, an unsupported audio codec, or no
+  usable output device falls back to the wall-clock behavior of `PaleoSession`;
+  `PaleoSession::warning` reports why audio was skipped.
+- Audio is queued ahead of the device up to 300 ms, bounded by the device ring.
+  The ring drops the remainder rather than blocking, so a stalled decoder cannot
+  grow the queue. Video is limited to three queued pictures, so the demuxer
+  cannot race ahead of the device and reach end-of-stream early.
+- Seeking searches back for the preceding keyframe, repositions audio and video
   together, resets the converter and output clock to the requested position, and
   trims audio decoded before the target. The decoder resumes at a random-access
   point, so the preview is at or before the target.
-- A video track is decoded only when it is H.264. An unsupported video codec is
+- Video is decoded for every codec with a backend. An unsupported video codec is
   skipped so that audio still plays, instead of failing the session.
 - `set_video_enabled(false)` stops video decoding and presentation while audio
-  keeps playing; `set_video_enabled(true)` decodes from the current demuxer
-  position, waits for the next IDR, and drops pictures behind the audio clock.
+  keeps playing; `set_video_enabled(true)` resynchronizes at the audio clock.
   Minimizing or occluding a window to trigger this is an application policy. The
   platform layer reports `WindowEvent::Visible`, `Minimized`, and `Occluded` so
   an application or director can stop presenting frames without stopping audio.
+- `set_rate` scales the timeline and suspends audio outside `1.0`, because the
+  device has no rate control. Returning to `1.0` seeks to the current position
+  so audio resumes in sync.
 
 Known limits:
 
-- playback speed is fixed at `1x`: scaling the rate would require resampling at
-  a scaled ratio, so `set_rate` keeps the clock at `1.0` instead of reporting a
-  rate the device does not follow;
 - decoding still happens on the calling thread. Audio decoding, conversion, and
   queueing are bounded per update, but a large video frame can briefly block the
   UI thread;

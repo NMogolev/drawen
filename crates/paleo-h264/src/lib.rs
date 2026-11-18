@@ -52,6 +52,7 @@ mod decoder;
 mod error;
 mod rgba;
 
-pub use decoder::{DEFAULT_REORDER_DEPTH, H264Decoder, VideoFrame};
+pub use decoder::{DEFAULT_REORDER_DEPTH, H264Decoder};
 pub use error::{Error, Result};
+pub use paleo::VideoFrame;
 pub use rgba::ColorMatrix;

@@ -8,12 +8,16 @@
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::codecs::video::VideoExtraDataId;
 use symphonia::core::codecs::video::well_known::extra_data as extra_data_ids;
+#[cfg(feature = "opus")]
+use symphonia::core::common::Tier;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{
     FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackFlags, TrackType,
@@ -156,9 +160,25 @@ impl VideoTrackInfo {
     /// Returns the H.264 `AVCDecoderConfigurationRecord`, when present.
     #[must_use]
     pub fn avc_decoder_config(&self) -> Option<&[u8]> {
+        self.decoder_config(VideoExtraDataKind::AvcDecoderConfig)
+    }
+
+    /// Returns the HEVC `HEVCDecoderConfigurationRecord`, when present.
+    #[must_use]
+    pub fn hevc_decoder_config(&self) -> Option<&[u8]> {
+        self.decoder_config(VideoExtraDataKind::HevcDecoderConfig)
+    }
+
+    /// Returns the AV1 `AV1CodecConfigurationRecord`, when present.
+    #[must_use]
+    pub fn av1_decoder_config(&self) -> Option<&[u8]> {
+        self.decoder_config(VideoExtraDataKind::Av1DecoderConfig)
+    }
+
+    fn decoder_config(&self, kind: VideoExtraDataKind) -> Option<&[u8]> {
         self.extra_data
             .iter()
-            .find(|extra| extra.kind() == VideoExtraDataKind::AvcDecoderConfig)
+            .find(|extra| extra.kind() == kind)
             .map(VideoExtraData::data)
     }
 }
@@ -253,7 +273,7 @@ impl Media {
             .map(|params| (AudioCodec::from_id(params.codec), params))
         {
             Some((codec, params)) => {
-                let decoder = symphonia::default::get_codecs()
+                let decoder = codec_registry()
                     .make_audio_decoder(params, &AudioDecoderOptions::default())
                     .map_err(|error| Error::UnsupportedCodec(format!("{codec} audio ({error})")))?;
                 let resolved = decoder.codec_params();
@@ -503,6 +523,23 @@ impl Media {
         if let Some(decoder) = self.decoder.as_mut() {
             decoder.reset();
         }
+    }
+}
+
+fn codec_registry() -> &'static CodecRegistry {
+    #[cfg(feature = "opus")]
+    {
+        static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            let mut registry = CodecRegistry::new();
+            symphonia::default::register_enabled_codecs(&mut registry);
+            registry.register_audio_decoder_at_tier::<symphonia_opus::OpusDecoder>(Tier::Fallback);
+            registry
+        })
+    }
+    #[cfg(not(feature = "opus"))]
+    {
+        symphonia::default::get_codecs()
     }
 }
 

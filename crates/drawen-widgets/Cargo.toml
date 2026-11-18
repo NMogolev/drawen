@@ -16,16 +16,15 @@ workspace = true
 # `media` from its own default feature set so applications keep Video available.
 default = []
 # Enables Video, AnimatedImage, PaleoSession, and the shared media contracts,
-# linking Paleo, its H.264 decoder, and the GIF decoder.
-media = ["dep:image", "dep:paleo", "dep:paleo-h264"]
+# linking the Paleo player with its pure-Rust H.264, HEVC, VP9, and AV1
+# backends, plus the GIF decoder.
+media = ["dep:image", "dep:paleo-player"]
 # Enables AudioPaleoSession and links the cpal audio output backend.
-audio = ["media", "dep:paleo-audio"]
+audio = ["media", "paleo-player/device"]
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
-paleo = { version = "0.2", path = "../paleo", optional = true }
-paleo-audio = { version = "0.2", path = "../paleo-audio", optional = true }
-paleo-h264 = { version = "0.2", path = "../paleo-h264", optional = true }
+paleo-player = { version = "0.2", path = "../paleo-player", default-features = false, optional = true }
 drawen-core = { version = "0.2", path = "../drawen-core" }
 drawen-render = { version = "0.2", path = "../drawen-render" }
 drawen-ui = { version = "0.2", path = "../drawen-ui" }

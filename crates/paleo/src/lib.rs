@@ -36,12 +36,18 @@
 
 mod audio;
 mod codec;
+mod decoder;
 mod error;
+mod frame;
 mod media;
 mod video;
+mod yuv;
 
 pub use audio::AudioBuffer;
 pub use codec::{AudioCodec, VideoCodec};
+pub use decoder::VideoDecoder;
 pub use error::{Error, Result};
+pub use frame::VideoFrame;
 pub use media::{AudioTrackInfo, Event, Media, MediaInfo, MediaSelection, VideoTrackInfo};
 pub use video::{VideoExtraData, VideoExtraDataKind, VideoPacket};
+pub use yuv::{ColorMatrix, YuvPlane, YuvPlane16, YuvRange, rgba_from_yuv, rgba_from_yuv16};

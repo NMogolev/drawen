@@ -1,0 +1,23 @@
+[package]
+name = "paleo-player"
+description = "One-object video and audio playback for Paleo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["device"]
+# Opens a real output device through `paleo-audio`. A test or server build can
+# still decode audio and video without linking a native audio API.
+device = ["paleo-audio/device"]
+
+[dependencies]
+paleo = { version = "0.2", path = "../paleo" }
+paleo-audio = { version = "0.2", path = "../paleo-audio", default-features = false }
+paleo-video = { version = "0.2", path = "../paleo-video" }

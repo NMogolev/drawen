@@ -1,0 +1,16 @@
+[package]
+name = "paleo-vp9"
+description = "Pure-Rust VP9 decoding backend for Paleo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+paleo = { version = "0.2", path = "../paleo" }
+rusty_vp9 = "0.2.1"

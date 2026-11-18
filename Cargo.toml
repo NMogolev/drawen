@@ -2,7 +2,12 @@
 members = [
     "crates/paleo",
     "crates/paleo-audio",
+    "crates/paleo-av1",
     "crates/paleo-h264",
+    "crates/paleo-hevc",
+    "crates/paleo-vp9",
+    "crates/paleo-video",
+    "crates/paleo-player",
     "crates/drawen-core",
     "crates/drawen-render",
     "crates/drawen-ui",
