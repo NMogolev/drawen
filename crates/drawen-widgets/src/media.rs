@@ -578,6 +578,35 @@ pub trait MediaSession {
     /// Changes the playback rate.
     fn set_rate(&mut self, rate: f64);
 
+    /// Returns the current output volume in the inclusive `0.0..=1.0` range.
+    ///
+    /// Sessions without audio output return `1.0`. The player widgets keep their
+    /// own volume so the control stays meaningful even when a decoder has no
+    /// audio path.
+    fn volume(&self) -> f32 {
+        1.0
+    }
+
+    /// Sets the output volume, clamped to `0.0..=1.0`.
+    ///
+    /// Returns whether the session changed. The default ignores the request so
+    /// video-only backends stay source-compatible.
+    fn set_volume(&mut self, _volume: f32) -> bool {
+        false
+    }
+
+    /// Returns whether audio output is muted.
+    fn is_muted(&self) -> bool {
+        false
+    }
+
+    /// Mutes or unmutes audio output.
+    ///
+    /// Returns whether the session changed. The default ignores the request.
+    fn set_muted(&mut self, _muted: bool) -> bool {
+        false
+    }
+
     /// Returns whether this session can suspend video while audio continues.
     ///
     /// The default returns `false`: a session that presents only video, or

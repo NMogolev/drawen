@@ -314,19 +314,30 @@ validation are covered in [DOCKING.md](DOCKING.md) and the `workspace` example.
 
 ## 7. Video and audio
 
-Use the backend that matches the file and the platform:
+Both players share one configuration vocabulary: `PlayerTheme`,
+`PlayerBehavior`, and a plain control set. Open media through the backend that
+matches the file:
 
 ```rust
-use drawen::Video;
+use drawen::{Color, PlayerBehavior, PlayerTheme, Video, VideoControls};
 
 // Pure Rust, in-process. H.264 video only; no audio.
-let video = Video::open_paleo("clip.mp4")?;
+let video = Video::open_paleo("clip.mp4")?
+    .with_title("A short film")
+    .with_subtitle("Paleo · 1080p")
+    .with_control_set(VideoControls::new())
+    .with_theme(PlayerTheme::new().with_accent(Color::rgba8(255, 45, 85, 255)))
+    .with_behavior(PlayerBehavior::new().with_auto_hide(None));
+let video = runtime.append_child(runtime.root(), video)?;
 
 // External ffmpeg/ffprobe. Broad codecs, but no audio track.
 // let video = Video::open("clip.mp4")?;
-
-let video = runtime.append_child(runtime.root(), video)?;
 ```
+
+The overlay behaves like a web player: hovering shows it, inactivity hides it
+after `PlayerBehavior::auto_hide` (three seconds by default), the center badge
+pauses, and the seek bar shows a hover time preview. Set `auto_hide: None` to pin
+the controls, or start from `VideoControls::none()` / `minimal()`.
 
 For files with audio, enable the `audio` feature and open the audio-mastered
 Paleo session:
@@ -341,8 +352,34 @@ let video = Video::open_paleo_audio("clip.mp4")?;
 let video = runtime.append_child(runtime.root(), video)?;
 ```
 
-`Video` presents frames and forwards play/pause/seek/rate intent to its
-`MediaSession`. It does not own a timer. Return
+The audio player is a separate widget over the same `MediaSession` contract:
+
+```rust
+use drawen::{AudioControls, AudioPlayer, AudioPlayerLayout, PlayerTheme, RepeatMode};
+
+let audio = AudioPlayer::open("song.flac")?
+    .with_title("Night drive")
+    .with_subtitle("Paleo · FLAC")
+    .with_layout(AudioPlayerLayout::Inline)
+    .with_control_set(AudioControls::new())
+    .with_repeat(RepeatMode::All)
+    .with_theme(PlayerTheme::new().with_accent(Color::rgba8(46, 196, 182, 255)));
+
+// Take the signals before moving the widget into the tree.
+let previous = audio.previous_requested();
+let next = audio.next_requested();
+let audio = runtime.append_child(runtime.root(), audio)?;
+previous.subscribe(|()| { /* load the previous track */ });
+next.subscribe(|()| { /* load the next track */ });
+```
+
+`AudioPlayerLayout::Compact` collapses to a single row for tight surfaces.
+Previous and next are requests: subscribe to the signals and rebuild the player
+with the new session, so the widget never invents playlist policy. `RepeatMode`
+and shuffle are also signals rather than implicit playlist mutations.
+
+Both players present frames and forward play/pause/seek/rate intent to their
+`MediaSession`. They do not own a timer. Return
 `runtime.next_frame_in()` from `WindowApplication::next_frame_in` so the event
 loop ticks playback while the session is active:
 

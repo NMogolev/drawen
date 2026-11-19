@@ -32,6 +32,8 @@ pub struct PaleoSession {
     frame_duration: Duration,
     now: Duration,
     pending_error: Option<MediaError>,
+    volume: f32,
+    muted: bool,
 }
 
 impl PaleoSession {
@@ -85,6 +87,8 @@ impl PaleoSession {
             frame_duration,
             now: Duration::ZERO,
             pending_error: None,
+            volume: 1.0,
+            muted: false,
         })
     }
 
@@ -157,6 +161,37 @@ impl MediaSession for PaleoSession {
             self.pending_error = Some(MediaError::new(format!("could not change rate: {error}")));
         }
         self.clock.set_rate(self.player.rate());
+    }
+
+    fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    fn set_volume(&mut self, volume: f32) -> bool {
+        let volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if (self.volume - volume).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.volume = volume;
+        self.player.set_volume(volume);
+        true
+    }
+
+    fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    fn set_muted(&mut self, muted: bool) -> bool {
+        if self.muted == muted {
+            return false;
+        }
+        self.muted = muted;
+        self.player.set_muted(muted);
+        true
     }
 
     fn supports_video_pause(&self) -> bool {

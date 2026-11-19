@@ -4,6 +4,25 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
+## Unreleased
+
+### Player widgets
+
+- `Video` is now a configurable YouTube-style player: overlay title and subtitle,
+  center play badge while paused, hover time preview on the seek bar, play/pause,
+  back and forward seek, elapsed/remaining/both time labels, volume and mute,
+  rate cycling, fullscreen and loop requests, and auto-hiding controls. Existing
+  constructors and transport methods keep working. `VideoPlayer` is an alias.
+- Added `AudioPlayer`, a music-player widget with cover art, title and subtitle,
+  seek bar, transport, volume and mute, rate, repeat, shuffle, and
+  previous/next signals. `AudioPlayerLayout::Inline` and `Compact` cover full and
+  single-row surfaces.
+- Both players share `PlayerTheme`, `PlayerBehavior`, `PlayerTimeDisplay`,
+  `VideoControls`, `AudioControls`, and `RepeatMode`, re-exported by `drawen`.
+  Players emit typed signals and never spawn threads, timers, or platform calls.
+- `MediaSession` gained default volume and mute methods; `PaleoSession` and
+  `AudioPaleoSession` implement them.
+
 ## 0.2.0 - 2026-11-17
 
 ### GPU renderer

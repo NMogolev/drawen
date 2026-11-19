@@ -71,6 +71,22 @@ impl MediaSession for AudioPaleoSession {
         self.0.set_rate(rate);
     }
 
+    fn volume(&self) -> f32 {
+        self.0.volume()
+    }
+
+    fn set_volume(&mut self, volume: f32) -> bool {
+        self.0.set_volume(volume)
+    }
+
+    fn is_muted(&self) -> bool {
+        self.0.is_muted()
+    }
+
+    fn set_muted(&mut self, muted: bool) -> bool {
+        self.0.set_muted(muted)
+    }
+
     fn supports_video_pause(&self) -> bool {
         self.0.supports_video_pause()
     }

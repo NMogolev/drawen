@@ -184,8 +184,10 @@ Start there instead of inventing a second architecture:
   `:hover`/`:focus`.
 - **Scrolling and virtual lists** — `ScrollView`, `ListView`, `VirtualList`.
 - **Docking workspace** — `WorkspaceLayout` plus `DockArea`.
-- **Video and audio** — `Video::open_paleo`, `open_paleo_audio`, and the FFmpeg
-  command-line path.
+- **Video and audio** — `Video` / `VideoPlayer` with a YouTube-style overlay and
+  `AudioPlayer` with cover art, transport, shuffle, and repeat. Both share
+  `PlayerTheme`, `PlayerBehavior`, and plain control sets; `Video::open_paleo`,
+  `open_paleo_audio`, and the FFmpeg command-line path select the backend.
 
 ### Why `Button::new()` takes no text
 
@@ -242,7 +244,7 @@ The facade separates the headless core from the GPU, browser, and media stacks:
 | --- | --- | --- |
 | `gpu` | yes | `drawen::gpu` and the `wgpu` renderer |
 | `browser` | yes | `drawen::browser` and Servo shared-texture surfaces; implies `gpu` |
-| `media` | yes | `Video`, `AnimatedImage`, `PaleoSession`, and the media contracts |
+| `media` | yes | `Video`, `AudioPlayer`, `AnimatedImage`, `PaleoSession`, and the media contracts |
 | `audio` | no | `AudioPaleoSession` and the `cpal` output device; implies `media` |
 | `director` | no | `MediaDirector` playback policy; implies `media` |
 
@@ -276,6 +278,7 @@ the platform, and whether audio must be real.
 | `Video::open_paleo` | `media` | H.264, HEVC, VP9, AV1 | none | None; pure Rust and in-process | Bounded synchronous decode on the calling thread |
 | `Video::open_paleo_audio` | `audio` | H.264, HEVC, VP9, AV1 when present | AAC-LC, ALAC, FLAC, MP1/MP2/MP3, Vorbis, Opus, PCM, ADPCM | A default output device through `cpal` | Audio is the master clock; rates other than 1x suspend audio; no hot-plug failover |
 | `Video::open` | `media` | Whatever the local `ffmpeg` decodes | none | `ffmpeg` and `ffprobe` on `PATH` or in `FfmpegConfig` | Out-of-process, raw RGBA frames, 1280 px default cap, CFR timestamps, no audio |
+| `AudioPlayer::open` | `audio` | none | Same as `Video::open_paleo_audio` | A default output device through `cpal` | Music-player surface: cover art, transport, shuffle, repeat |
 | `Video::with_session` | depends on session | Custom `MediaSession` | depends on session | Application-supplied | The widget only presents frames and forwards transport intent |
 
 `paleo-player` is the same engine without the widget: `Player::open`,

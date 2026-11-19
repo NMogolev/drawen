@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use drawen_core::{
     Color, Constraints, InputEvent, Key, NamedKey, Point, PointerButton, PointerId, Rect, Size,
+    WheelDelta,
 };
 use drawen_render::{PaintContext, RasterImage, TextStyle};
 use drawen_ui::{
@@ -12,68 +13,130 @@ use drawen_ui::{
 
 use crate::ImageFit;
 use crate::image::{fitted_rect, image_size};
-use crate::media::{
-    MediaClock, MediaError, MediaFrame, MediaFrameScheduler, MediaMetadata, MediaSession,
-};
+use crate::media::{MediaError, MediaMetadata, MediaSession, MediaState};
 use crate::paleo_session::PaleoSession;
+use crate::player::{
+    PlayerBehavior, PlayerCore, PlayerTheme, PlayerTimeDisplay, VideoControls, cycle_rate,
+    format_rate, paint_buffering, paint_fullscreen, paint_hover_background, paint_play_pause,
+    paint_repeat, paint_skip, paint_vertical_gradient, paint_volume,
+};
 use crate::video_ffmpeg::{FfmpegConfig, FfmpegSession, VideoError};
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
-const CONTROL_HEIGHT: f32 = 40.0;
-const CONTROL_PADDING: f32 = 10.0;
-const PLAY_BUTTON: f32 = 24.0;
-const PROGRESS_HEIGHT: f32 = 4.0;
-const TIME_RESERVE: f32 = 96.0;
-const SEEK_STEP_SECONDS: f32 = 5.0;
+const CENTER_BADGE: f32 = 58.0;
+const VOLUME_SLIDER_WIDTH: f32 = 76.0;
+const TOP_SCRIM: f32 = 58.0;
+const BUFFERING_RADIUS: f32 = 18.0;
 
-/// A video presentation surface with optional `FFmpeg` decoding.
+/// The kind of pointer gesture currently owned by the player.
+#[derive(Clone, Copy, Debug)]
+enum Drag {
+    Seek(PointerId),
+    Volume(PointerId),
+}
+
+/// A transport button under the pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HoverTarget {
+    Play,
+    Back,
+    Forward,
+    Mute,
+    Rate,
+    Loop,
+    Fullscreen,
+    CenterPlay,
+}
+
+/// The video player widget: a picture surface with a YouTube-style control
+/// overlay.
 ///
-/// [`Self::open`] attaches the built-in `FFmpeg` command-line backend as a
-/// [`MediaSession`]: the session probes metadata, decodes frames on a worker
-/// thread, and owns playback timing, while the widget stays a view and control.
-/// A [`MediaFrameScheduler`] presents the frame that matches the current
-/// presentation time and drops frames that are already stale.
+/// `Video` presents frames from a [`MediaSession`] or from application-supplied
+/// [`RasterImage`] values. The overlay is fully configurable through
+/// [`VideoControls`], [`PlayerTheme`], and [`PlayerBehavior`]:
 ///
-/// Applications that already own a decoder can keep using [`Self::set_frame`]
-/// and react to [`Self::play_toggled`] and [`Self::seek_requested`] instead. In
-/// that manual mode the widget advances a [`MediaClock`] itself so progress and
-/// time labels stay live; externally supplied frames should arrive at the
-/// matching rate.
+/// ```no_run
+/// use std::time::Duration;
+/// use drawen_core::Color;
+/// use drawen_widgets::{PlayerBehavior, PlayerTheme, Video, VideoControls};
+///
+/// let video = Video::open_paleo("clip.mp4")?
+///     .with_title("A short film")
+///     .with_subtitle("Paleo · 1080p")
+///     .with_control_set(VideoControls::default())
+///     .with_theme(PlayerTheme::new().with_accent(Color::rgba8(255, 45, 85, 255)))
+///     .with_behavior(PlayerBehavior::new().with_auto_hide(Some(Duration::from_secs(3))));
+/// # Ok::<(), drawen_widgets::MediaError>(())
+/// ```
+///
+/// The widget never creates a window, starts a timer, or spawns a thread. It
+/// paints, forwards transport intent, and emits typed signals. Applications tick
+/// playback through [`Widget::advance_animation`] (normally via
+/// `UiRuntime::next_frame_in`).
 pub struct Video {
-    clock: MediaClock,
-    session: Option<Box<dyn MediaSession>>,
-    scheduler: MediaFrameScheduler,
-    looping: bool,
-    controls: bool,
+    core: PlayerCore,
+    theme: PlayerTheme,
+    behavior: PlayerBehavior,
+    controls_config: VideoControls,
+    time_display: PlayerTimeDisplay,
     fit: ImageFit,
     background: Option<Color>,
     label: Option<String>,
+    title: Option<String>,
+    subtitle: Option<String>,
+    placeholder: Option<String>,
+    controls: bool,
     viewport: Size,
-    seeking: Option<PointerId>,
-    session_error: Option<String>,
+    hover: Option<HoverTarget>,
+    hover_position: Option<Point>,
+    drag: Option<Drag>,
+    pointer_inside: bool,
+    controls_shown: bool,
+    hide_in: Option<Duration>,
     play_toggled: Signal<bool>,
     seek_requested: Signal<Duration>,
+    volume_changed: Signal<f32>,
+    mute_toggled: Signal<bool>,
+    rate_changed: Signal<f64>,
+    fullscreen_requested: Signal<bool>,
+    loop_toggled: Signal<bool>,
 }
 
 impl Video {
-    /// Creates an empty video surface with controls enabled.
+    /// Creates an empty video surface with the default controls.
     #[must_use]
     pub fn new() -> Self {
+        let behavior = PlayerBehavior::default();
+        let mut core = PlayerCore::new();
+        core.apply_behavior(&behavior);
         Self {
-            clock: MediaClock::new(),
-            session: None,
-            scheduler: MediaFrameScheduler::new(),
-            looping: false,
-            controls: true,
+            core,
+            theme: PlayerTheme::default(),
+            behavior,
+            controls_config: VideoControls::default(),
+            time_display: PlayerTimeDisplay::default(),
             fit: ImageFit::Contain,
             background: None,
             label: None,
+            title: None,
+            subtitle: None,
+            placeholder: None,
+            controls: true,
             viewport: Size::ZERO,
-            seeking: None,
-            session_error: None,
+            hover: None,
+            hover_position: None,
+            drag: None,
+            pointer_inside: false,
+            controls_shown: true,
+            hide_in: None,
             play_toggled: Signal::new(),
             seek_requested: Signal::new(),
+            volume_changed: Signal::new(),
+            mute_toggled: Signal::new(),
+            rate_changed: Signal::new(),
+            fullscreen_requested: Signal::new(),
+            loop_toggled: Signal::new(),
         }
     }
 
@@ -109,9 +172,7 @@ impl Video {
     /// container is rejected, or the decoded size cannot be represented.
     pub fn open_with(path: impl AsRef<Path>, config: FfmpegConfig) -> Result<Self, VideoError> {
         let session = FfmpegSession::open(path.as_ref(), config)?;
-        let mut video = Self::new();
-        video.session = Some(Box::new(session));
-        Ok(video)
+        Ok(Self::new().with_session(session))
     }
 
     /// Opens `path` with the pure-Rust Paleo backend.
@@ -153,93 +214,85 @@ impl Video {
     /// Attaches an externally created [`MediaSession`].
     ///
     /// This is the escape hatch for custom decoders and for backends that are
-    /// not built in, such as a future AV1 or hardware session.
+    /// not built in, such as a future hardware session.
     #[must_use]
     pub fn with_session(mut self, session: impl MediaSession + 'static) -> Self {
-        self.session = Some(Box::new(session));
+        self.core.attach(session);
         self
-    }
-
-    /// Returns the timeline owned by the attached session or by manual mode.
-    fn timeline(&self) -> &MediaClock {
-        self.session
-            .as_deref()
-            .map_or(&self.clock, |session| session.clock())
     }
 
     /// Returns the metadata reported by the built-in session.
     #[must_use]
     pub fn metadata(&self) -> Option<MediaMetadata> {
-        self.session
-            .as_deref()
-            .and_then(|session| session.metadata().copied())
+        self.core.metadata()
     }
 
     /// Returns whether a media session is attached.
     #[must_use]
     pub const fn has_decoder(&self) -> bool {
-        self.session.is_some()
+        self.core.has_session()
     }
 
     /// Returns the most recent session error, if any.
-    ///
-    /// Decoding happens on a worker thread, so start-up and read failures are
-    /// reported here rather than by [`Self::open`]. A reported error stops
-    /// playback immediately.
     #[must_use]
     pub fn decoder_error(&self) -> Option<&str> {
-        self.session_error.as_deref()
+        self.core.error()
     }
 
     /// Stops and releases the built-in session while keeping the last frame.
     pub fn close_decoder(&mut self) {
-        if let Some(session) = self.session.take() {
-            self.clock = *session.clock();
-        }
-        self.clock.pause();
-        self.session_error = None;
+        self.core.close_session();
     }
 
     /// Returns the current frame, if one has been supplied or decoded.
     #[must_use]
     pub fn frame(&self) -> Option<&RasterImage> {
-        self.scheduler.current().map(MediaFrame::image)
+        self.core.frame()
     }
 
     /// Returns the declared media duration.
     #[must_use]
     pub fn duration(&self) -> Duration {
-        self.timeline().duration().unwrap_or(Duration::ZERO)
+        self.core.duration()
     }
 
     /// Returns the current playback position.
     #[must_use]
     pub fn position(&self) -> Duration {
-        self.timeline().position()
+        self.core.position()
     }
 
     /// Returns whether playback is currently running.
     #[must_use]
     pub fn is_playing(&self) -> bool {
-        self.timeline().is_playing()
+        self.core.is_playing()
     }
 
     /// Returns whether playback reached the end of the media.
     #[must_use]
     pub fn is_ended(&self) -> bool {
-        self.timeline().is_ended()
+        self.core.is_ended()
     }
 
     /// Returns whether playback wraps to the start at the end.
     #[must_use]
-    pub const fn is_looping(&self) -> bool {
-        self.looping
+    pub fn is_looping(&self) -> bool {
+        self.core.is_looping()
     }
 
-    /// Returns whether the overlay controls are painted.
+    /// Returns whether the overlay controls are enabled.
     #[must_use]
     pub const fn controls_visible(&self) -> bool {
         self.controls
+    }
+
+    /// Returns whether the overlay controls are currently painted.
+    ///
+    /// This is `false` while auto-hide has hidden them; [`Self::controls_visible`]
+    /// reports the configuration switch instead.
+    #[must_use]
+    pub const fn controls_shown(&self) -> bool {
+        self.controls && self.controls_shown
     }
 
     /// Returns how frames are scaled into the widget bounds.
@@ -254,6 +307,42 @@ impl Video {
         self.label.as_deref()
     }
 
+    /// Returns the configured visual theme.
+    #[must_use]
+    pub const fn theme(&self) -> &PlayerTheme {
+        &self.theme
+    }
+
+    /// Returns the configured behavior.
+    #[must_use]
+    pub const fn behavior(&self) -> &PlayerBehavior {
+        &self.behavior
+    }
+
+    /// Returns the configured control set.
+    #[must_use]
+    pub const fn control_set(&self) -> VideoControls {
+        self.controls_config
+    }
+
+    /// Returns the configured time-label format.
+    #[must_use]
+    pub const fn time_display(&self) -> PlayerTimeDisplay {
+        self.time_display
+    }
+
+    /// Returns the current output volume in the `0.0..=1.0` range.
+    #[must_use]
+    pub fn volume(&self) -> f32 {
+        self.core.volume()
+    }
+
+    /// Returns whether output is muted.
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        self.core.muted()
+    }
+
     /// Returns a signal emitted when the user starts or pauses playback.
     #[must_use]
     pub fn play_toggled(&self) -> Signal<bool> {
@@ -266,66 +355,63 @@ impl Video {
         self.seek_requested.clone()
     }
 
-    /// Replaces the displayed frame without changing playback state.
+    /// Returns a signal emitted when the user changes the volume.
+    #[must_use]
+    pub fn volume_changed(&self) -> Signal<f32> {
+        self.volume_changed.clone()
+    }
+
+    /// Returns a signal emitted when the user mutes or unmutes output.
+    #[must_use]
+    pub fn mute_toggled(&self) -> Signal<bool> {
+        self.mute_toggled.clone()
+    }
+
+    /// Returns a signal emitted when the user selects a playback rate.
+    #[must_use]
+    pub fn rate_changed(&self) -> Signal<f64> {
+        self.rate_changed.clone()
+    }
+
+    /// Returns a signal emitted when the user asks for fullscreen.
     ///
-    /// In manual mode the frame stays visible until another frame arrives. With
-    /// an attached session the next decoded frame wins.
+    /// The widget reports intent only; the application owns the native window
+    /// transition.
+    #[must_use]
+    pub fn fullscreen_requested(&self) -> Signal<bool> {
+        self.fullscreen_requested.clone()
+    }
+
+    /// Returns a signal emitted when the user toggles looping.
+    #[must_use]
+    pub fn loop_toggled(&self) -> Signal<bool> {
+        self.loop_toggled.clone()
+    }
+
+    /// Replaces the displayed frame without changing playback state.
     pub fn set_frame(&mut self, frame: RasterImage) {
-        let position = self.position();
-        self.scheduler
-            .replace(MediaFrame::new(frame, position, Duration::ZERO));
+        self.core.set_frame(frame);
     }
 
     /// Clears the displayed frame.
     pub fn clear_frame(&mut self) {
-        self.scheduler.clear();
+        self.core.clear_frame();
     }
 
     /// Sets the media duration and clamps the current position to it.
     pub fn set_duration(&mut self, duration: Duration) {
-        if let Some(session) = self.session.as_mut() {
-            session.clock_mut().set_duration(Some(duration));
-        } else {
-            self.clock.set_duration(Some(duration));
-        }
-        self.scheduler.seek(self.position());
+        self.core.set_duration(duration);
     }
 
     /// Sets the playback position, clamping it to `0..=duration`.
-    ///
-    /// With an attached session this seeks immediately. Seeking while paused
-    /// asks the session for a preview frame at the new position.
     pub fn set_position(&mut self, position: Duration) {
-        if let Some(session) = self.session.as_mut() {
-            if let Err(error) = session.seek(position) {
-                self.record_error(&error);
-            }
-        } else {
-            self.clock.seek(position);
-        }
-        self.scheduler.seek(self.position());
+        self.core.set_position(position);
     }
 
     /// Updates playback state without emitting [`Self::play_toggled`].
     pub fn set_playing(&mut self, playing: bool) {
-        if let Some(session) = self.session.as_mut() {
-            if playing {
-                if let Err(error) = session.play() {
-                    self.record_error(&error);
-                }
-            } else {
-                session.pause();
-            }
-        } else {
-            if playing
-                && !self.looping
-                && !self.duration().is_zero()
-                && self.position() >= self.duration()
-            {
-                self.clock.seek(Duration::ZERO);
-            }
-            self.clock.set_playing(playing);
-        }
+        self.core.set_playing(playing);
+        self.refresh_auto_hide();
     }
 
     /// Starts or pauses playback without emitting [`Self::play_toggled`].
@@ -335,99 +421,251 @@ impl Video {
 
     /// Changes the playback rate, clamped by the media clock.
     pub fn set_rate(&mut self, rate: f64) {
-        if let Some(session) = self.session.as_mut() {
-            session.set_rate(rate);
-        } else {
-            self.clock.set_rate(rate);
-        }
+        self.core.set_rate(rate);
     }
 
     /// Returns the current playback rate.
     #[must_use]
     pub fn rate(&self) -> f64 {
-        self.timeline().rate()
+        self.core.rate()
+    }
+
+    /// Sets the output volume without emitting [`Self::volume_changed`].
+    pub fn set_volume(&mut self, volume: f32) {
+        self.core.set_volume(volume);
+    }
+
+    /// Mutes or unmutes output without emitting [`Self::mute_toggled`].
+    pub fn set_muted(&mut self, muted: bool) {
+        self.core.set_muted(muted);
+    }
+
+    /// Replaces the visual theme.
+    pub fn set_theme(&mut self, theme: PlayerTheme) {
+        self.theme = theme;
+    }
+
+    /// Replaces the behavior, including volume and looping.
+    pub fn set_behavior(&mut self, behavior: PlayerBehavior) {
+        self.behavior = behavior;
+        self.core.apply_behavior(&self.behavior);
+        self.refresh_auto_hide();
+    }
+
+    /// Replaces the control set.
+    pub fn set_control_set(&mut self, controls: VideoControls) {
+        self.controls_config = controls;
+    }
+
+    /// Sets the time-label format.
+    pub fn set_time_display(&mut self, display: PlayerTimeDisplay) {
+        self.time_display = display;
+    }
+
+    /// Shows or hides the overlay controls.
+    pub fn set_controls_enabled(&mut self, enabled: bool) {
+        self.controls = enabled;
+        self.controls_shown = enabled;
+        self.refresh_auto_hide();
     }
 
     /// Returns whether the attached session can stop video while audio plays.
-    ///
-    /// A policy layer should pause the whole session when this is `false`;
-    /// [`Self::set_video_enabled`] then has no effect.
     #[must_use]
     pub fn supports_video_pause(&self) -> bool {
-        self.session
-            .as_deref()
-            .is_some_and(MediaSession::supports_video_pause)
+        self.core.supports_video_pause()
     }
 
     /// Suspends or resumes video decoding and presentation.
-    ///
-    /// Audio keeps playing when the session supports it, which is how a window
-    /// that is minimized or occluded can keep its soundtrack. The last painted
-    /// frame stays visible. Resuming decodes from the audio clock and discards
-    /// pictures that are already behind the playhead.
     pub fn set_video_enabled(&mut self, enabled: bool) {
-        if let Some(session) = self.session.as_mut()
-            && let Err(error) = session.set_video_enabled(enabled)
-        {
-            self.record_error(&error);
-        }
+        self.core.set_video_enabled(enabled);
     }
 
     /// Detaches the media session and stops playback.
-    ///
-    /// The last painted frame and the current position are kept, so the view
-    /// does not jump when a policy releases a stopped session.
     pub fn release_session(&mut self) {
-        if let Some(session) = self.session.as_deref() {
-            self.clock = *session.clock();
+        self.core.release_session();
+    }
+
+    fn refresh_auto_hide(&mut self) {
+        if !self.controls {
+            self.hide_in = None;
+            return;
         }
-        if let Some(mut session) = self.session.take() {
-            session.pause();
+        self.controls_shown = true;
+        self.hide_in = if self.is_playing() {
+            self.behavior.auto_hide
+        } else {
+            None
+        };
+    }
+
+    fn note_activity(&mut self) {
+        if !self.controls {
+            return;
+        }
+        self.controls_shown = true;
+        self.hide_in = if self.is_playing() {
+            self.behavior.auto_hide
+        } else {
+            None
+        };
+    }
+
+    fn toggle(&mut self, context: &mut EventContext<'_>) {
+        self.core.toggle_playback();
+        self.note_activity();
+        context.request_redraw();
+        let playing = self.is_playing();
+        self.play_toggled.emit(&playing);
+    }
+
+    fn seek_to(&mut self, position: Duration, context: &mut EventContext<'_>) {
+        let duration = self.duration();
+        let position = if duration.is_zero() {
+            position
+        } else {
+            position.min(duration)
+        };
+        if position == self.position() {
+            return;
+        }
+        self.core.set_position(position);
+        self.note_activity();
+        context.request_redraw();
+        self.seek_requested.emit(&position);
+    }
+
+    fn seek_by(&mut self, seconds: f32, context: &mut EventContext<'_>) {
+        let position = self.position().as_secs_f32() + seconds;
+        let duration = self.duration();
+        let position = if duration.is_zero() {
+            position.max(0.0)
+        } else {
+            position.clamp(0.0, duration.as_secs_f32())
+        };
+        self.seek_to(Duration::from_secs_f32(position), context);
+    }
+
+    fn seek_from_pointer(&mut self, x: f32, context: &mut EventContext<'_>) {
+        let track = video_geometry(Rect::new(Point::ZERO, self.viewport), &self.theme, self).track;
+        let ratio = if track.size.width() > 0.0 {
+            ((x - track.origin.x) / track.size.width()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let position = self.duration().mul_f32(ratio);
+        self.seek_to(position, context);
+    }
+
+    fn volume_from_pointer(&mut self, x: f32, context: &mut EventContext<'_>) {
+        let slider =
+            video_geometry(Rect::new(Point::ZERO, self.viewport), &self.theme, self).volume_slider;
+        let ratio = if slider.size.width() > 0.0 {
+            ((x - slider.origin.x) / slider.size.width()).clamp(0.0, 1.0)
+        } else {
+            self.volume()
+        };
+        if self.core.set_volume(ratio) {
+            self.note_activity();
+            context.request_redraw();
+            self.volume_changed.emit(&ratio);
         }
     }
 
-    fn record_error(&mut self, error: &MediaError) {
-        self.session_error = Some(error.message().to_owned());
+    fn change_volume(&mut self, delta: f32, context: &mut EventContext<'_>) {
+        let volume = (self.volume() + delta).clamp(0.0, 1.0);
+        if self.core.set_volume(volume) {
+            self.note_activity();
+            context.request_redraw();
+            self.volume_changed.emit(&volume);
+        }
+    }
+
+    fn toggle_mute(&mut self, context: &mut EventContext<'_>) {
+        let muted = !self.is_muted();
+        self.core.set_muted(muted);
+        self.note_activity();
+        context.request_redraw();
+        self.mute_toggled.emit(&muted);
+    }
+
+    fn cycle_rate(&mut self, context: &mut EventContext<'_>) {
+        let rate = cycle_rate(self.rate(), &self.behavior.playback_rates);
+        self.core.set_rate(rate);
+        self.note_activity();
+        context.request_redraw();
+        self.rate_changed.emit(&rate);
+    }
+
+    fn request_fullscreen(&mut self, context: &mut EventContext<'_>) {
+        context.request_redraw();
+        self.fullscreen_requested.emit(&true);
+    }
+
+    fn set_loop(&mut self, looping: bool, context: &mut EventContext<'_>) {
+        self.core.set_looping(looping);
+        context.request_redraw();
+        self.loop_toggled.emit(&looping);
+    }
+
+    fn toggle_loop(&mut self, context: &mut EventContext<'_>) {
+        let looping = !self.is_looping();
+        self.set_loop(looping, context);
+    }
+
+    fn hit_target(&self, point: Point) -> Option<HoverTarget> {
+        let geometry = video_geometry(Rect::new(Point::ZERO, self.viewport), &self.theme, self);
+        if geometry.play.contains(point) {
+            Some(HoverTarget::Play)
+        } else if geometry.back.contains(point) {
+            Some(HoverTarget::Back)
+        } else if geometry.forward.contains(point) {
+            Some(HoverTarget::Forward)
+        } else if geometry.mute.contains(point) {
+            Some(HoverTarget::Mute)
+        } else if geometry.rate.contains(point) {
+            Some(HoverTarget::Rate)
+        } else if geometry.loop_button.contains(point) {
+            Some(HoverTarget::Loop)
+        } else if geometry.fullscreen.contains(point) {
+            Some(HoverTarget::Fullscreen)
+        } else if geometry.center_play.contains(point) {
+            Some(HoverTarget::CenterPlay)
+        } else {
+            None
+        }
+    }
+
+    fn activate_target(&mut self, target: HoverTarget, context: &mut EventContext<'_>) {
+        match target {
+            HoverTarget::Play | HoverTarget::CenterPlay => self.toggle(context),
+            HoverTarget::Back => self.seek_by(-self.behavior.seek_step.as_secs_f32(), context),
+            HoverTarget::Forward => self.seek_by(self.behavior.seek_step.as_secs_f32(), context),
+            HoverTarget::Mute => self.toggle_mute(context),
+            HoverTarget::Rate => self.cycle_rate(context),
+            HoverTarget::Loop => self.toggle_loop(context),
+            HoverTarget::Fullscreen => self.request_fullscreen(context),
+        }
     }
 
     /// Advances the session or manual clock and presents the matching frame.
     fn poll(&mut self, delta: Duration) -> bool {
-        let mut changed = false;
-        if let Some(session) = self.session.as_mut() {
-            let update = session.update(delta);
-            if let Some(frame) = update.frame {
-                changed |= self.scheduler.push(frame);
-            }
-            if let Some(error) = update.error {
-                self.session_error = Some(error.message().to_owned());
-                changed = true;
-            }
-            changed |= update.state_changed;
-            let position = session.clock().position();
-            changed |= self.scheduler.present(position);
-            if session.clock().is_ended() {
-                if self.looping {
-                    session.clock_mut().seek(Duration::ZERO);
-                    if let Err(error) = session.play() {
-                        self.session_error = Some(error.message().to_owned());
-                    }
-                    self.scheduler.seek(Duration::ZERO);
-                    changed = true;
-                } else {
-                    changed = true;
-                }
-            }
-        } else {
-            if self.clock.is_playing() {
-                changed |= if self.looping {
-                    self.clock.advance_looping(delta)
-                } else {
-                    self.clock.advance(delta)
-                };
-            }
-            changed |= self.scheduler.present(self.clock.position());
-        }
-        changed
+        self.core.tick(delta)
+    }
+
+    fn paint_icon_button(
+        &self,
+        context: &mut PaintContext<'_>,
+        rect: Rect,
+        target: HoverTarget,
+        foreground: Color,
+    ) {
+        paint_hover_background(
+            context,
+            rect,
+            self.hover == Some(target),
+            foreground,
+            self.theme.corner_radius,
+        );
     }
 
     /// Returns this video with an explicit duration.
@@ -453,15 +691,68 @@ impl Video {
 
     /// Returns this video with looping enabled or disabled.
     #[must_use]
-    pub const fn with_looping(mut self, looping: bool) -> Self {
-        self.looping = looping;
+    pub fn with_looping(mut self, looping: bool) -> Self {
+        self.core.set_looping(looping);
+        self.behavior.looping = looping;
         self
     }
 
-    /// Returns this video with overlay controls shown or hidden.
+    /// Returns this video with overlay controls enabled or disabled.
     #[must_use]
-    pub const fn with_controls(mut self, controls: bool) -> Self {
+    pub fn with_controls(mut self, controls: bool) -> Self {
         self.controls = controls;
+        self.controls_shown = controls;
+        self.controls_config = if controls {
+            VideoControls::default()
+        } else {
+            VideoControls::none()
+        };
+        self
+    }
+
+    /// Returns this video with a specific control set.
+    #[must_use]
+    pub fn with_control_set(mut self, controls: VideoControls) -> Self {
+        self.controls = true;
+        self.controls_config = controls;
+        self.controls_shown = true;
+        self
+    }
+
+    /// Returns this video with a specific visual theme.
+    #[must_use]
+    pub fn with_theme(mut self, theme: PlayerTheme) -> Self {
+        self.theme = theme;
+        self
+    }
+
+    /// Returns this video with a specific behavior.
+    #[must_use]
+    pub fn with_behavior(mut self, behavior: PlayerBehavior) -> Self {
+        self.set_behavior(behavior);
+        self
+    }
+
+    /// Returns this video with a specific time-label format.
+    #[must_use]
+    pub const fn with_time_display(mut self, display: PlayerTimeDisplay) -> Self {
+        self.time_display = display;
+        self
+    }
+
+    /// Returns this video with an initial volume.
+    #[must_use]
+    pub fn with_volume(mut self, volume: f32) -> Self {
+        self.behavior.volume = crate::player::clamp_unit(volume);
+        self.core.set_volume(volume);
+        self
+    }
+
+    /// Returns this video starting muted or unmuted.
+    #[must_use]
+    pub fn with_muted(mut self, muted: bool) -> Self {
+        self.behavior.muted = muted;
+        self.core.set_muted(muted);
         self
     }
 
@@ -486,90 +777,25 @@ impl Video {
         self
     }
 
-    fn toggle(&mut self, context: &mut EventContext<'_>) {
-        self.set_playing(!self.is_playing());
-        context.request_redraw();
-        let playing = self.is_playing();
-        self.play_toggled.emit(&playing);
+    /// Returns this video with an overlay title.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
     }
 
-    fn seek_to(&mut self, position: Duration, context: &mut EventContext<'_>) {
-        let duration = self.duration();
-        let position = if duration.is_zero() {
-            position
-        } else {
-            position.min(duration)
-        };
-        if position == self.position() {
-            return;
-        }
-        self.set_position(position);
-        context.request_redraw();
-        self.seek_requested.emit(&position);
+    /// Returns this video with an overlay subtitle.
+    #[must_use]
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 
-    fn seek_by(&mut self, seconds: f32, context: &mut EventContext<'_>) {
-        let position = self.position().as_secs_f32() + seconds;
-        let duration = self.duration();
-        let position = if duration.is_zero() {
-            position.max(0.0)
-        } else {
-            position.clamp(0.0, duration.as_secs_f32())
-        };
-        self.seek_to(Duration::from_secs_f32(position), context);
-    }
-
-    fn seek_from_pointer(&mut self, x: f32, context: &mut EventContext<'_>) {
-        let track = progress_track(Rect::new(Point::ZERO, self.viewport));
-        let ratio = if track.size.width() > 0.0 {
-            ((x - track.origin.x) / track.size.width()).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let position = self.duration().mul_f32(ratio);
-        self.seek_to(position, context);
-    }
-
-    fn paint_play_icon(&self, context: &mut PaintContext<'_>, button: Rect, color: Color) {
-        let center = Point::new(
-            button.origin.x + button.size.width() / 2.0,
-            button.origin.y + button.size.height() / 2.0,
-        );
-        let height = button.size.height() * 0.58;
-        let width = height * 0.82;
-        if self.is_playing() {
-            let bar = (width * 0.28).max(2.0);
-            let gap = (width * 0.18).max(2.0);
-            let y = center.y - height / 2.0;
-            for offset in [-1.0_f32, 1.0] {
-                let x = center.x + offset * (bar + gap) / 2.0 - bar / 2.0;
-                context.fill_rounded_rect(
-                    Rect::new(
-                        Point::new(x, y),
-                        Size::new(bar, height).expect("play icon bar is finite"),
-                    ),
-                    bar / 2.0,
-                    color,
-                );
-            }
-        } else {
-            let left = center.x - width / 2.0;
-            let top = center.y - height / 2.0;
-            let row_height = height / 12.0;
-            let mut row = 0.0_f32;
-            while row < 12.0 {
-                let fraction = (row + 0.5) / 12.0;
-                let row_width = width * (1.0 - (2.0 * fraction - 1.0).abs()).max(0.0);
-                context.fill_rect(
-                    Rect::new(
-                        Point::new(left, top + row * row_height),
-                        Size::new(row_width, row_height).expect("play icon row is finite"),
-                    ),
-                    color,
-                );
-                row += 1.0;
-            }
-        }
+    /// Returns this video with placeholder text for an empty surface.
+    #[must_use]
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
     }
 }
 
@@ -610,6 +836,7 @@ impl Widget for Video {
         self.paint_styled(context, environment, bounds, &DssStyle::default());
     }
 
+    #[allow(clippy::too_many_lines)]
     fn paint_styled(
         &self,
         context: &mut PaintContext<'_>,
@@ -617,14 +844,21 @@ impl Widget for Video {
         bounds: Rect,
         style: &DssStyle,
     ) {
-        let background = self
-            .background
-            .or(style.background)
-            .unwrap_or_else(|| environment.theme().background());
+        let theme = environment.theme();
+        let background = self.theme.background(theme, style);
         context.fill_rect(bounds, background);
-        if let Some(frame) = self.scheduler.current() {
-            let image = frame.image();
-            if image.width() > 0 && image.height() > 0 && !bounds.is_empty() {
+        if bounds.is_empty() {
+            return;
+        }
+
+        let foreground = self.theme.foreground(theme, style);
+        let muted = self.theme.muted_foreground(theme);
+        let accent = self.theme.accent(theme, style);
+        let overlay = self.theme.overlay();
+        let show_controls = self.controls && self.controls_shown && bounds.size.height() >= 72.0;
+
+        if let Some(image) = self.core.frame_shared() {
+            if image.width() > 0 && image.height() > 0 {
                 let destination = fitted_rect(
                     bounds,
                     image_size(image),
@@ -632,77 +866,88 @@ impl Widget for Video {
                     crate::Alignment::Center,
                     crate::Alignment::Center,
                 );
-                let shared = frame.shared_image().clone();
                 context.with_clip(bounds, |context| {
-                    context.draw_image(shared, destination);
+                    context.draw_image(std::sync::Arc::clone(image), destination);
                 });
             }
-        }
-        if !self.controls || bounds.size.height() < CONTROL_HEIGHT || bounds.is_empty() {
-            return;
-        }
-
-        let bar = control_bar(bounds);
-        context.fill_rect(bar, Color::rgba8(0, 0, 0, 150));
-        let foreground = style.foreground.unwrap_or(Color::WHITE);
-        let accent = style.accent_or(environment.theme().accent());
-        let button = play_button(bounds);
-        self.paint_play_icon(context, button, foreground);
-
-        let track = progress_track(bounds);
-        context.fill_rounded_rect(
-            track,
-            PROGRESS_HEIGHT / 2.0,
-            Color::rgba8(255, 255, 255, 70),
-        );
-        let ratio = if self.duration() > Duration::ZERO {
-            (self.position().as_secs_f32() / self.duration().as_secs_f32()).clamp(0.0, 1.0)
         } else {
-            0.0
-        };
-        let filled_width = track.size.width() * ratio;
-        if filled_width > 0.0 {
+            self.paint_placeholder(context, environment, bounds, style, muted);
+        }
+
+        if show_controls {
+            let geometry = video_geometry(bounds, &self.theme, self);
+            let scrim_top = (geometry.bar.origin.y - 36.0).max(bounds.origin.y);
+            paint_vertical_gradient(
+                context,
+                Rect::new(
+                    Point::new(bounds.origin.x, scrim_top),
+                    Size::new(bounds.size.width(), (bounds.bottom() - scrim_top).max(0.0))
+                        .expect("video bottom scrim is finite"),
+                ),
+                Color::TRANSPARENT,
+                overlay,
+            );
+
+            if self.controls_config.title
+                && (self.title.is_some() || self.subtitle.is_some())
+                && bounds.size.height() >= 140.0
+            {
+                let top = Rect::new(
+                    bounds.origin,
+                    Size::new(
+                        bounds.size.width(),
+                        TOP_SCRIM.min(bounds.size.height() * 0.35),
+                    )
+                    .expect("video top scrim is finite"),
+                );
+                paint_vertical_gradient(context, top, overlay, Color::TRANSPARENT);
+                self.paint_title(context, environment, style, top, foreground, muted);
+            }
+
+            self.paint_progress(context, environment, style, &geometry, foreground, accent);
+            self.paint_controls(context, environment, style, &geometry, foreground, accent);
+
+            if self.controls_config.center_play
+                && !self.is_playing()
+                && !geometry.center_play.is_empty()
+            {
+                context.fill_rounded_rect(
+                    geometry.center_play,
+                    geometry.center_play.size.height() / 2.0,
+                    self.theme.badge(accent).with_alpha(0.92),
+                );
+                paint_play_pause(
+                    context,
+                    geometry.center_play,
+                    false,
+                    self.theme.foreground(theme, style),
+                );
+            }
+        }
+
+        if self.core.state() == MediaState::Buffering {
+            let center = Point::new(
+                bounds.origin.x + bounds.size.width() / 2.0,
+                bounds.origin.y + bounds.size.height() / 2.0,
+            );
             context.fill_rounded_rect(
                 Rect::new(
-                    track.origin,
-                    Size::new(filled_width, track.size.height())
-                        .expect("filled progress width is finite"),
+                    Point::new(
+                        center.x - BUFFERING_RADIUS * 2.4,
+                        center.y - BUFFERING_RADIUS,
+                    ),
+                    Size::new(BUFFERING_RADIUS * 4.8, BUFFERING_RADIUS * 2.0)
+                        .expect("buffering badge is finite"),
                 ),
-                PROGRESS_HEIGHT / 2.0,
-                accent,
+                self.theme.corner_radius,
+                overlay,
             );
+            paint_buffering(context, center, BUFFERING_RADIUS, foreground);
         }
-        let thumb = Rect::new(
-            Point::new(
-                track.origin.x + filled_width - PROGRESS_HEIGHT,
-                track.origin.y - PROGRESS_HEIGHT,
-            ),
-            Size::new(PROGRESS_HEIGHT * 3.0, PROGRESS_HEIGHT * 3.0)
-                .expect("progress thumb size is finite"),
-        );
-        context.fill_rounded_rect(thumb, PROGRESS_HEIGHT * 1.5, accent);
 
-        let mut font = environment.font_for(style);
-        if style.font_size.is_none() {
-            font.set_pixel_size(12.0);
+        if let Some(error) = self.core.error() {
+            self.paint_error(context, environment, style, bounds, error);
         }
-        let time = format!(
-            "{} / {}",
-            format_time(self.position()),
-            format_time(self.duration())
-        );
-        let layout = environment.text_shaper().layout(
-            &time,
-            &TextStyle::new_with_font(font, foreground),
-            None,
-        );
-        context.draw_text(
-            layout.clone(),
-            Point::new(
-                bar.origin.x + bar.size.width() - CONTROL_PADDING - layout.size().width(),
-                bar.origin.y + (bar.size.height() - layout.size().height()) / 2.0,
-            ),
-        );
     }
 
     fn advance_animation(&mut self, delta: Duration, settle: bool) -> bool {
@@ -711,58 +956,177 @@ impl Widget for Video {
             self.set_playing(false);
             changed = true;
         }
+        if let Some(remaining) = self.hide_in {
+            if !self.is_playing() {
+                self.hide_in = None;
+                self.controls_shown = true;
+                changed = true;
+            } else if settle {
+                self.hide_in = None;
+                self.controls_shown = false;
+                changed = true;
+            } else {
+                let remaining = remaining.saturating_sub(delta);
+                if remaining.is_zero() {
+                    self.hide_in = None;
+                    self.controls_shown = false;
+                } else {
+                    self.hide_in = Some(remaining);
+                }
+                changed = true;
+            }
+        }
+        if !self.is_playing() && !self.controls_shown && self.controls {
+            self.controls_shown = true;
+            changed = true;
+        }
         changed
     }
 
     fn is_animating(&self) -> bool {
-        if let Some(session) = self.session.as_deref() {
-            return session.clock().is_playing() || session.is_active();
-        }
-        let duration = self.clock.duration().unwrap_or(Duration::ZERO);
-        self.clock.is_playing() && !duration.is_zero() && self.clock.position() < duration
+        self.core.is_animating() || self.hide_in.is_some()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
         if context.phase() != EventPhase::Target {
             return EventStatus::Ignored;
         }
         match event {
-            InputEvent::PointerDown(pointer) if pointer.button == Some(PointerButton::Primary) => {
-                context.request_focus();
-                let bounds = Rect::new(Point::ZERO, self.viewport);
-                if self.controls && progress_track(bounds).contains(pointer.position) {
-                    self.seeking = Some(pointer.pointer_id);
-                    context.capture_pointer(pointer.pointer_id);
-                    self.seek_from_pointer(pointer.position.x, context);
-                } else {
-                    self.toggle(context);
+            InputEvent::PointerEnter(pointer) => {
+                self.pointer_inside = true;
+                self.note_activity();
+                self.hover = self.hit_target(pointer.position);
+                EventStatus::Handled
+            }
+            InputEvent::PointerLeave(_) => {
+                self.pointer_inside = false;
+                self.hover = None;
+                self.hover_position = None;
+                if self.drag.is_none() && self.is_playing() {
+                    self.hide_in = self.behavior.auto_hide;
                 }
                 EventStatus::Handled
             }
-            InputEvent::PointerMove(pointer) if self.seeking == Some(pointer.pointer_id) => {
-                self.seek_from_pointer(pointer.position.x, context);
+            InputEvent::PointerMove(pointer) => {
+                self.pointer_inside = true;
+                self.note_activity();
+                self.hover_position = Some(pointer.position);
+                if let Some(drag) = self.drag {
+                    match drag {
+                        Drag::Seek(_) => self.seek_from_pointer(pointer.position.x, context),
+                        Drag::Volume(_) => self.volume_from_pointer(pointer.position.x, context),
+                    }
+                    return EventStatus::Handled;
+                }
+                let hover = self.hit_target(pointer.position);
+                if hover != self.hover {
+                    self.hover = hover;
+                    context.request_redraw();
+                }
+                if self.controls_shown && self.controls {
+                    EventStatus::Handled
+                } else {
+                    EventStatus::Ignored
+                }
+            }
+            InputEvent::PointerDown(pointer) if pointer.button == Some(PointerButton::Primary) => {
+                context.request_focus();
+                self.note_activity();
+                if self.controls && self.controls_shown {
+                    let geometry =
+                        video_geometry(Rect::new(Point::ZERO, self.viewport), &self.theme, self);
+                    if geometry.track.contains(pointer.position) {
+                        self.drag = Some(Drag::Seek(pointer.pointer_id));
+                        context.capture_pointer(pointer.pointer_id);
+                        self.seek_from_pointer(pointer.position.x, context);
+                        return EventStatus::Handled;
+                    }
+                    if geometry.volume_slider.contains(pointer.position) {
+                        self.drag = Some(Drag::Volume(pointer.pointer_id));
+                        context.capture_pointer(pointer.pointer_id);
+                        self.volume_from_pointer(pointer.position.x, context);
+                        return EventStatus::Handled;
+                    }
+                    if geometry.bar.contains(pointer.position)
+                        && !geometry.play.contains(pointer.position)
+                        && !geometry.back.contains(pointer.position)
+                        && !geometry.forward.contains(pointer.position)
+                        && !geometry.mute.contains(pointer.position)
+                        && !geometry.rate.contains(pointer.position)
+                        && !geometry.loop_button.contains(pointer.position)
+                        && !geometry.fullscreen.contains(pointer.position)
+                    {
+                        return EventStatus::Handled;
+                    }
+                }
+                if let Some(target) = self.hit_target(pointer.position)
+                    && self.controls_shown
+                {
+                    self.activate_target(target, context);
+                    return EventStatus::Handled;
+                }
+                if self.controls_shown {
+                    self.controls_shown = false;
+                } else if self.controls {
+                    self.controls_shown = true;
+                }
+                self.toggle(context);
                 EventStatus::Handled
             }
-            InputEvent::PointerUp(pointer) if self.seeking == Some(pointer.pointer_id) => {
-                self.seeking = None;
-                context.release_pointer(pointer.pointer_id);
-                EventStatus::Handled
+            InputEvent::PointerUp(pointer) => {
+                if let Some(drag) = self.drag
+                    && drag_pointer(drag) == pointer.pointer_id
+                {
+                    self.drag = None;
+                    context.release_pointer(pointer.pointer_id);
+                    return EventStatus::Handled;
+                }
+                EventStatus::Ignored
             }
-            InputEvent::PointerCancel(pointer) if self.seeking == Some(pointer.pointer_id) => {
-                self.seeking = None;
-                EventStatus::Handled
+            InputEvent::PointerCancel(pointer) => {
+                if let Some(drag) = self.drag
+                    && drag_pointer(drag) == pointer.pointer_id
+                {
+                    self.drag = None;
+                    return EventStatus::Handled;
+                }
+                EventStatus::Ignored
             }
-            InputEvent::KeyDown(key) => match &key.key {
+            InputEvent::Wheel(wheel) if self.behavior.wheel_volume => {
+                let rect = Rect::new(Point::ZERO, self.viewport);
+                if rect.contains(wheel.position) {
+                    let direction =
+                        match wheel.delta {
+                            WheelDelta::Lines(delta) | WheelDelta::Pixels(delta) => {
+                                if delta.y < 0.0 { 1.0 } else { -1.0 }
+                            }
+                        };
+                    self.change_volume(direction * self.behavior.volume_step, context);
+                    EventStatus::Handled
+                } else {
+                    EventStatus::Ignored
+                }
+            }
+            InputEvent::KeyDown(key) if self.behavior.keyboard => match &key.key {
                 Key::Named(NamedKey::Space) => {
                     self.toggle(context);
                     EventStatus::Handled
                 }
                 Key::Named(NamedKey::ArrowLeft) => {
-                    self.seek_by(-SEEK_STEP_SECONDS, context);
+                    self.seek_by(-self.behavior.seek_step.as_secs_f32(), context);
                     EventStatus::Handled
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    self.seek_by(SEEK_STEP_SECONDS, context);
+                    self.seek_by(self.behavior.seek_step.as_secs_f32(), context);
+                    EventStatus::Handled
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.change_volume(self.behavior.volume_step, context);
+                    EventStatus::Handled
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.change_volume(-self.behavior.volume_step, context);
                     EventStatus::Handled
                 }
                 Key::Named(NamedKey::Home) => {
@@ -771,6 +1135,18 @@ impl Widget for Video {
                 }
                 Key::Named(NamedKey::End) => {
                     self.seek_to(self.duration(), context);
+                    EventStatus::Handled
+                }
+                Key::Character(character) if character.eq_ignore_ascii_case("m") => {
+                    self.toggle_mute(context);
+                    EventStatus::Handled
+                }
+                Key::Character(character) if character.eq_ignore_ascii_case("f") => {
+                    self.request_fullscreen(context);
+                    EventStatus::Handled
+                }
+                Key::Character(character) if character.eq_ignore_ascii_case("l") => {
+                    self.toggle_loop(context);
                     EventStatus::Handled
                 }
                 _ => EventStatus::Ignored,
@@ -792,50 +1168,466 @@ impl Widget for Video {
     }
 }
 
-fn control_bar(bounds: Rect) -> Rect {
-    let height = CONTROL_HEIGHT.min(bounds.size.height());
-    Rect::new(
+impl Video {
+    #[allow(clippy::too_many_lines)]
+    fn paint_placeholder(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        bounds: Rect,
+        style: &DssStyle,
+        muted: Color,
+    ) {
+        let center = Point::new(
+            bounds.origin.x + bounds.size.width() / 2.0,
+            bounds.origin.y + bounds.size.height() / 2.0,
+        );
+        let badge = CENTER_BADGE.min(bounds.size.height() / 3.0).max(20.0);
+        let rect = Rect::new(
+            Point::new(center.x - badge / 2.0, center.y - badge / 2.0),
+            Size::new(badge, badge).expect("placeholder badge is finite"),
+        );
+        context.fill_rounded_rect(rect, badge / 2.0, muted.with_alpha(0.18));
+        paint_play_pause(context, rect, false, muted);
+        if let Some(text) = &self.placeholder {
+            let font = Self::font(environment, style, self.theme.title_size);
+            let layout = environment.text_shaper().layout(
+                text,
+                &TextStyle::new_with_font(font, muted),
+                Some(bounds.size.width() * 0.8),
+            );
+            context.draw_text(
+                layout.clone(),
+                Point::new(
+                    center.x - layout.size().width() / 2.0,
+                    rect.bottom() + self.theme.spacing,
+                ),
+            );
+        }
+    }
+
+    fn paint_title(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        style: &DssStyle,
+        top: Rect,
+        foreground: Color,
+        muted: Color,
+    ) {
+        let padding = self.theme.padding;
+        let mut y = top.origin.y + padding;
+        if let Some(title) = &self.title {
+            let font = Self::font(environment, style, self.theme.title_size);
+            let layout = environment.text_shaper().layout(
+                title,
+                &TextStyle::new_with_font(font, foreground),
+                Some((top.size.width() - padding * 2.0).max(0.0)),
+            );
+            let height = layout.size().height();
+            context.draw_text(layout, Point::new(top.origin.x + padding, y));
+            y += height + 2.0;
+        }
+        if let Some(subtitle) = &self.subtitle {
+            let font = Self::font(environment, style, self.theme.subtitle_size);
+            let layout = environment.text_shaper().layout(
+                subtitle,
+                &TextStyle::new_with_font(font, muted),
+                Some((top.size.width() - padding * 2.0).max(0.0)),
+            );
+            context.draw_text(layout, Point::new(top.origin.x + padding, y));
+        }
+    }
+
+    fn paint_progress(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        style: &DssStyle,
+        geometry: &VideoGeometry,
+        foreground: Color,
+        accent: Color,
+    ) {
+        if !self.controls_config.seek_bar {
+            return;
+        }
+        let track = geometry.track;
+        context.fill_rounded_rect(
+            track,
+            track.size.height() / 2.0,
+            self.theme.track(foreground),
+        );
+        let ratio = if self.duration() > Duration::ZERO {
+            (self.position().as_secs_f32() / self.duration().as_secs_f32()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let filled_width = track.size.width() * ratio;
+        if filled_width > 0.0 {
+            context.fill_rounded_rect(
+                Rect::new(
+                    track.origin,
+                    Size::new(filled_width, track.size.height())
+                        .expect("filled progress width is finite"),
+                ),
+                track.size.height() / 2.0,
+                accent,
+            );
+        }
+        let thumb_size = track.size.height() * 2.4;
+        context.fill_rounded_rect(
+            Rect::new(
+                Point::new(
+                    track.origin.x + filled_width - thumb_size / 2.0,
+                    track.origin.y + (track.size.height() - thumb_size) / 2.0,
+                ),
+                Size::new(thumb_size, thumb_size).expect("progress thumb is finite"),
+            ),
+            thumb_size / 2.0,
+            self.theme.badge(accent),
+        );
+
+        if self.controls_config.hover_preview
+            && self.hover_position.is_some_and(|point| {
+                point.x >= track.origin.x - 8.0
+                    && point.x <= track.right() + 8.0
+                    && point.y >= track.origin.y - 12.0
+                    && point.y <= track.bottom() + 12.0
+            })
+            && let Some(position) = self.hover_position
+            && !self.duration().is_zero()
+        {
+            let ratio = ((position.x - track.origin.x) / track.size.width()).clamp(0.0, 1.0);
+            let seconds = self.duration().as_secs_f32() * ratio;
+            let label = crate::player::format_time(Duration::from_secs_f32(seconds));
+            let font = Self::font(environment, style, self.theme.time_size);
+            let layout = environment.text_shaper().layout(
+                &label,
+                &TextStyle::new_with_font(font, foreground),
+                None,
+            );
+            let width = layout.size().width() + 12.0;
+            let height = layout.size().height() + 6.0;
+            let x = (position.x - width / 2.0)
+                .clamp(track.origin.x, (track.right() - width).max(track.origin.x));
+            let top = (track.origin.y - height - 10.0).max(0.0);
+            context.fill_rounded_rect(
+                Rect::new(
+                    Point::new(x, top),
+                    Size::new(width, height).expect("preview label is finite"),
+                ),
+                self.theme.corner_radius,
+                self.theme.overlay(),
+            );
+            context.draw_text(layout, Point::new(x + 6.0, top + 3.0));
+        }
+    }
+
+    fn paint_controls(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        style: &DssStyle,
+        geometry: &VideoGeometry,
+        foreground: Color,
+        accent: Color,
+    ) {
+        if self.controls_config.play_pause {
+            self.paint_icon_button(context, geometry.play, HoverTarget::Play, foreground);
+            paint_play_pause(context, geometry.play, self.is_playing(), foreground);
+        }
+        if self.controls_config.seek_seconds {
+            self.paint_icon_button(context, geometry.back, HoverTarget::Back, foreground);
+            paint_skip(context, geometry.back, false, foreground);
+            self.paint_icon_button(context, geometry.forward, HoverTarget::Forward, foreground);
+            paint_skip(context, geometry.forward, true, foreground);
+        }
+        if self.controls_config.time {
+            let font = Self::font(environment, style, self.theme.time_size);
+            let label = self.time_display.format(self.position(), self.duration());
+            let layout = environment.text_shaper().layout(
+                &label,
+                &TextStyle::new_with_font(font, foreground),
+                None,
+            );
+            context.draw_text(
+                layout.clone(),
+                Point::new(
+                    geometry.time_origin,
+                    geometry.row_top + (geometry.row_height - layout.size().height()) / 2.0,
+                ),
+            );
+        }
+
+        if self.controls_config.mute || self.controls_config.volume {
+            self.paint_icon_button(context, geometry.mute, HoverTarget::Mute, foreground);
+            let level = if self.is_muted() { 0.0 } else { self.volume() };
+            paint_volume(context, geometry.mute, self.is_muted(), level, foreground);
+            if self.controls_config.volume {
+                context.fill_rounded_rect(
+                    geometry.volume_slider,
+                    geometry.volume_slider.size.height() / 2.0,
+                    self.theme.track(foreground),
+                );
+                let width = geometry.volume_slider.size.width() * self.volume();
+                if width > 0.0 {
+                    context.fill_rounded_rect(
+                        Rect::new(
+                            geometry.volume_slider.origin,
+                            Size::new(width, geometry.volume_slider.size.height())
+                                .expect("volume fill is finite"),
+                        ),
+                        geometry.volume_slider.size.height() / 2.0,
+                        accent,
+                    );
+                }
+            }
+        }
+        if self.controls_config.rate {
+            self.paint_icon_button(context, geometry.rate, HoverTarget::Rate, foreground);
+            let font = Self::font(environment, style, self.theme.time_size);
+            let layout = environment.text_shaper().layout(
+                &format_rate(self.rate()),
+                &TextStyle::new_with_font(font, foreground),
+                None,
+            );
+            context.draw_text(
+                layout.clone(),
+                Point::new(
+                    geometry.rate.origin.x
+                        + (geometry.rate.size.width() - layout.size().width()) / 2.0,
+                    geometry.rate.origin.y
+                        + (geometry.rate.size.height() - layout.size().height()) / 2.0,
+                ),
+            );
+        }
+        if self.controls_config.loop_button {
+            self.paint_icon_button(context, geometry.loop_button, HoverTarget::Loop, foreground);
+            paint_repeat(
+                context,
+                geometry.loop_button,
+                self.is_looping(),
+                if self.is_looping() {
+                    accent
+                } else {
+                    foreground
+                },
+            );
+        }
+        if self.controls_config.fullscreen {
+            self.paint_icon_button(
+                context,
+                geometry.fullscreen,
+                HoverTarget::Fullscreen,
+                foreground,
+            );
+            paint_fullscreen(context, geometry.fullscreen, foreground);
+        }
+    }
+
+    fn paint_error(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        style: &DssStyle,
+        bounds: Rect,
+        error: &str,
+    ) {
+        context.fill_rect(bounds, Color::rgba8(0, 0, 0, 180));
+        let font = Self::font(environment, style, self.theme.font_size);
+        let color = self.theme.error(environment.theme());
+        let layout = environment.text_shaper().layout(
+            error,
+            &TextStyle::new_with_font(font, color),
+            Some((bounds.size.width() - self.theme.padding * 2.0).max(0.0)),
+        );
+        let origin = Point::new(
+            bounds.origin.x + (bounds.size.width() - layout.size().width()) / 2.0,
+            bounds.origin.y + (bounds.size.height() - layout.size().height()) / 2.0,
+        );
+        context.draw_text(layout, origin);
+    }
+
+    fn font(environment: &UiEnvironment, style: &DssStyle, size: f32) -> drawen_render::Font {
+        let mut font = environment.font_for(style);
+        if style.font_size.is_none() {
+            font.set_pixel_size(size);
+        }
+        font
+    }
+}
+
+fn drag_pointer(drag: Drag) -> PointerId {
+    match drag {
+        Drag::Seek(pointer) | Drag::Volume(pointer) => pointer,
+    }
+}
+
+/// Rectangles used by painting and hit testing for a video control overlay.
+#[derive(Clone, Copy, Debug)]
+struct VideoGeometry {
+    bar: Rect,
+    row_top: f32,
+    row_height: f32,
+    track: Rect,
+    play: Rect,
+    back: Rect,
+    forward: Rect,
+    time_origin: f32,
+    mute: Rect,
+    volume_slider: Rect,
+    rate: Rect,
+    loop_button: Rect,
+    fullscreen: Rect,
+    center_play: Rect,
+}
+
+#[allow(clippy::too_many_lines)]
+fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeometry {
+    let controls = video.controls_config;
+    let padding = theme.padding;
+    let button = theme.button_size;
+    let spacing = theme.spacing;
+    let control_height = theme.control_height.min(bounds.size.height());
+    let bar = Rect::new(
         Point::new(
             bounds.origin.x,
-            bounds.origin.y + bounds.size.height() - height,
+            bounds.origin.y + bounds.size.height() - control_height,
         ),
-        Size::new(bounds.size.width(), height).expect("control bar size is finite"),
-    )
-}
+        Size::new(bounds.size.width(), control_height).expect("video control bar is finite"),
+    );
+    let track = Rect::new(
+        Point::new(bar.origin.x + padding, bar.origin.y + padding * 0.45),
+        Size::new(
+            (bar.size.width() - padding * 2.0).max(0.0),
+            theme.track_height,
+        )
+        .expect("video seek track is finite"),
+    );
+    let row_top = bar.origin.y + padding * 0.45 + theme.track_height + 4.0;
+    let row_height = (bar.bottom() - row_top - padding * 0.2).max(button);
+    let button_y = row_top + (row_height - button) / 2.0;
 
-fn play_button(bounds: Rect) -> Rect {
-    let bar = control_bar(bounds);
-    Rect::new(
-        Point::new(
-            bar.origin.x + CONTROL_PADDING,
-            bar.origin.y + (bar.size.height() - PLAY_BUTTON) / 2.0,
-        ),
-        Size::new(PLAY_BUTTON, PLAY_BUTTON).expect("play button size is finite"),
-    )
-}
-
-fn progress_track(bounds: Rect) -> Rect {
-    let bar = control_bar(bounds);
-    let left = bar.origin.x + CONTROL_PADDING + PLAY_BUTTON + CONTROL_PADDING * 0.8;
-    let right = bar.origin.x + bar.size.width() - CONTROL_PADDING - TIME_RESERVE;
-    Rect::new(
-        Point::new(
-            left,
-            bar.origin.y + (bar.size.height() - PROGRESS_HEIGHT) / 2.0,
-        ),
-        Size::new((right - left).max(0.0), PROGRESS_HEIGHT).expect("progress track size is finite"),
-    )
-}
-
-fn format_time(duration: Duration) -> String {
-    let total = duration.as_secs();
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
+    let empty = Rect::new(Point::ZERO, Size::ZERO);
+    let mut x = bar.origin.x + padding;
+    let play = if controls.play_pause {
+        let rect = Rect::new(
+            Point::new(x, button_y),
+            Size::new(button, button).expect("play button is finite"),
+        );
+        x += button + spacing;
+        rect
     } else {
-        format!("{minutes}:{seconds:02}")
+        empty
+    };
+    let back = if controls.seek_seconds {
+        let rect = Rect::new(
+            Point::new(x, button_y),
+            Size::new(button, button).expect("back button is finite"),
+        );
+        x += button + spacing;
+        rect
+    } else {
+        empty
+    };
+    let forward = if controls.seek_seconds {
+        let rect = Rect::new(
+            Point::new(x, button_y),
+            Size::new(button, button).expect("forward button is finite"),
+        );
+        x += button + spacing;
+        rect
+    } else {
+        empty
+    };
+    let time_origin = x;
+
+    let mut right = bar.right() - padding;
+    let fullscreen = if controls.fullscreen {
+        right -= button;
+        let rect = Rect::new(
+            Point::new(right, button_y),
+            Size::new(button, button).expect("fullscreen button is finite"),
+        );
+        right -= spacing;
+        rect
+    } else {
+        empty
+    };
+    let loop_button = if controls.loop_button {
+        right -= button;
+        let rect = Rect::new(
+            Point::new(right, button_y),
+            Size::new(button, button).expect("loop button is finite"),
+        );
+        right -= spacing;
+        rect
+    } else {
+        empty
+    };
+    let rate = if controls.rate && !video.behavior.playback_rates.is_empty() {
+        right -= button;
+        let rect = Rect::new(
+            Point::new(right, button_y),
+            Size::new(button, button).expect("rate button is finite"),
+        );
+        right -= spacing;
+        rect
+    } else {
+        empty
+    };
+    let volume_slider = if controls.volume {
+        let width = VOLUME_SLIDER_WIDTH.min((right - padding).max(0.0));
+        right -= width + spacing;
+        Rect::new(
+            Point::new(
+                right,
+                bar.origin.y + (bar.size.height() - theme.track_height) / 2.0,
+            ),
+            Size::new(width, theme.track_height).expect("volume slider is finite"),
+        )
+    } else {
+        empty
+    };
+    let mute = if controls.mute || controls.volume {
+        right -= button;
+        let rect = Rect::new(
+            Point::new(right, button_y),
+            Size::new(button, button).expect("mute button is finite"),
+        );
+        right -= spacing;
+        rect
+    } else {
+        empty
+    };
+    let _ = right;
+
+    let badge = CENTER_BADGE
+        .min(bounds.size.width())
+        .min(bounds.size.height());
+    let center_play = Rect::new(
+        Point::new(
+            bounds.origin.x + (bounds.size.width() - badge) / 2.0,
+            bounds.origin.y + (bounds.size.height() - badge) / 2.0,
+        ),
+        Size::new(badge, badge).expect("center badge is finite"),
+    );
+
+    VideoGeometry {
+        bar,
+        row_top,
+        row_height,
+        track,
+        play,
+        back,
+        forward,
+        time_origin,
+        mute,
+        volume_slider,
+        rate,
+        loop_button,
+        fullscreen,
+        center_play,
     }
 }
 
@@ -844,19 +1636,17 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use drawen_core::{Modifiers, PointerButtons, PointerEvent};
+    use drawen_core::{Modifiers, PointerButtons, PointerEvent, WheelEvent};
     use drawen_render::{DisplayCommand, DisplayList};
     use drawen_ui::UiRuntime;
 
     use super::*;
-    use crate::media::MediaUpdate;
+    use crate::media::{MediaClock, MediaFrame, MediaUpdate};
 
     fn frame() -> RasterImage {
         RasterImage::new(2, 2, vec![255; 16]).expect("valid RGBA image")
     }
 
-    /// A session with no decoder used to verify that the view only forwards
-    /// transport commands and presents frames scheduled by the contract.
     struct MockSession {
         clock: MediaClock,
         metadata: MediaMetadata,
@@ -993,9 +1783,12 @@ mod tests {
         runtime.layout(viewport()).expect("video layout succeeds");
 
         let bounds = Rect::new(Point::ZERO, Size::new(320.0, 180.0).expect("valid size"));
-        let track = progress_track(bounds);
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
         let down = InputEvent::PointerDown(pointer(
-            Point::new(track.origin.x + track.size.width() / 2.0, track.origin.y),
+            Point::new(
+                geometry.track.origin.x + geometry.track.size.width() / 2.0,
+                geometry.track.origin.y,
+            ),
             Some(PointerButton::Primary),
         ));
         assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
@@ -1072,8 +1865,7 @@ mod tests {
 
     #[test]
     fn transport_commands_are_forwarded_to_the_session() {
-        let mut video = Video::new();
-        video.session = Some(Box::new(MockSession::new()));
+        let mut video = Video::new().with_session(MockSession::new());
         assert_eq!(video.metadata().map(|metadata| metadata.width()), Some(4));
 
         video.set_playing(true);
@@ -1093,14 +1885,13 @@ mod tests {
 
     #[test]
     fn session_frames_reach_the_view_at_their_presentation_time() {
-        let mut video = Video::new();
         let mut session = MockSession::new();
         session.pending.push(MediaFrame::new(
             RasterImage::new(3, 3, vec![255; 36]).expect("valid RGBA image"),
             Duration::ZERO,
             Duration::from_millis(100),
         ));
-        video.session = Some(Box::new(session));
+        let mut video = Video::new().with_session(session);
 
         assert!(video.advance_animation(Duration::ZERO, false));
         assert_eq!(video.frame().map(RasterImage::width), Some(3));
@@ -1112,8 +1903,7 @@ mod tests {
         let mut session = MockSession::new();
         session.video_pausable = true;
         session.clock.seek(Duration::from_millis(500));
-        let mut video = Video::new();
-        video.session = Some(Box::new(session));
+        let mut video = Video::new().with_session(session);
 
         assert!(video.supports_video_pause());
         video.set_video_enabled(false);
@@ -1129,8 +1919,7 @@ mod tests {
 
     #[test]
     fn video_pause_is_ignored_without_session_support() {
-        let mut video = Video::new();
-        video.session = Some(Box::new(MockSession::new()));
+        let mut video = Video::new().with_session(MockSession::new());
 
         assert!(!video.supports_video_pause());
         video.set_video_enabled(false);
@@ -1139,9 +1928,70 @@ mod tests {
     }
 
     #[test]
+    fn volume_and_mute_emit_signals_and_clamp() {
+        let video = Video::new().with_volume(0.25);
+        assert!((video.volume() - 0.25).abs() < f32::EPSILON);
+        let observed = Rc::new(Cell::new(0.0_f32));
+        let _subscription = video.volume_changed().subscribe({
+            let observed = Rc::clone(&observed);
+            move |volume| observed.set(*volume)
+        });
+        let muted = Rc::new(Cell::new(false));
+        let _mute_subscription = video.mute_toggled().subscribe({
+            let muted = Rc::clone(&muted);
+            move |value| muted.set(*value)
+        });
+        let mut runtime = UiRuntime::new(video);
+        runtime.layout(viewport()).expect("video layout succeeds");
+
+        let bounds = Rect::new(Point::ZERO, Size::new(320.0, 180.0).expect("valid size"));
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
+        let down = InputEvent::PointerDown(pointer(
+            Point::new(geometry.mute.origin.x + 2.0, geometry.mute.origin.y + 2.0),
+            Some(PointerButton::Primary),
+        ));
+        assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
+        assert!(muted.get());
+
+        let wheel = InputEvent::Wheel(WheelEvent {
+            position: Point::new(100.0, 100.0),
+            delta: WheelDelta::Lines(Point::new(0.0, -1.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert_eq!(runtime.dispatch_event(&wheel), EventStatus::Handled);
+        assert!(observed.get() > 0.25);
+    }
+
+    #[test]
+    fn maximum_volume_is_one() {
+        let video = Video::new().with_volume(4.0);
+        assert!((video.volume() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn control_set_can_hide_the_overlay() {
+        let video = Video::with_frame(frame()).with_control_set(VideoControls::none());
+        let mut runtime = UiRuntime::new(video);
+        let mut list = DisplayList::new();
+        runtime.layout(viewport()).expect("video layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("video paint succeeds");
+        assert!(
+            !list
+                .commands()
+                .iter()
+                .any(|command| matches!(command, DisplayCommand::DrawText { .. }))
+        );
+    }
+
+    #[test]
     fn formats_times_with_hours_when_needed() {
-        assert_eq!(format_time(Duration::from_secs(5)), "0:05");
-        assert_eq!(format_time(Duration::from_secs(65)), "1:05");
-        assert_eq!(format_time(Duration::from_secs(3665)), "1:01:05");
+        assert_eq!(crate::player::format_time(Duration::from_secs(5)), "0:05");
+        assert_eq!(crate::player::format_time(Duration::from_secs(65)), "1:05");
+        assert_eq!(
+            crate::player::format_time(Duration::from_secs(3665)),
+            "1:01:05"
+        );
     }
 }

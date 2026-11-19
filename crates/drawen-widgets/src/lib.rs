@@ -10,14 +10,16 @@
 //! returns a `Signal<()>` whose subscription fires after a completed click or
 //! keyboard activation.
 //!
-//! The `media` feature enables `Video`, `AnimatedImage`, `PaleoSession`, and the
-//! shared media contracts. The `audio` feature additionally enables
-//! `AudioPaleoSession` and links the `cpal` output backend.
+//! The `media` feature enables `Video`, `AudioPlayer`, `AnimatedImage`,
+//! `PaleoSession`, and the shared media contracts. The `audio` feature
+//! additionally enables `AudioPaleoSession` and links the `cpal` output backend.
 
 mod alert;
 mod align;
 #[cfg(feature = "media")]
 mod animated_image;
+#[cfg(feature = "media")]
+mod audio_player;
 #[cfg(feature = "audio")]
 mod audio_session;
 mod avatar;
@@ -39,6 +41,8 @@ mod menu_bar;
 mod padding;
 #[cfg(feature = "media")]
 mod paleo_session;
+#[cfg(feature = "media")]
+mod player;
 mod progress_bar;
 mod radio_button;
 mod scroll_view;
@@ -68,6 +72,8 @@ pub use alert::{Alert, AlertTone};
 pub use align::{Align, Alignment};
 #[cfg(feature = "media")]
 pub use animated_image::{AnimatedImage, AnimationFrame, GifDecodeError};
+#[cfg(feature = "media")]
+pub use audio_player::AudioPlayer;
 #[cfg(feature = "audio")]
 pub use audio_session::AudioPaleoSession;
 pub use avatar::{Avatar, AvatarStatus};
@@ -92,6 +98,11 @@ pub use menu_bar::MenuBar;
 pub use padding::Padding;
 #[cfg(feature = "media")]
 pub use paleo_session::PaleoSession;
+#[cfg(feature = "media")]
+pub use player::{
+    AudioControls, AudioPlayerLayout, PlayerBehavior, PlayerTheme, PlayerTimeDisplay, RepeatMode,
+    VideoControls,
+};
 pub use progress_bar::ProgressBar;
 pub use radio_button::{RadioButton, RadioGroup};
 pub use scroll_view::{ScrollAxis, ScrollView};
@@ -113,6 +124,13 @@ pub use toolbar::Toolbar;
 pub use video::Video;
 #[cfg(feature = "media")]
 pub use video_ffmpeg::{FfmpegConfig, VideoError};
+
+/// Compatibility name for the video player widget.
+///
+/// [`Video`] is both the presentation surface and the configurable video
+/// player. The alias makes that role explicit in application code.
+#[cfg(feature = "media")]
+pub type VideoPlayer = Video;
 pub use virtual_list::{
     Column, SelectionMode, SelectionModel, VirtualDataSource, VirtualList, VirtualTable,
     VirtualTableSource,

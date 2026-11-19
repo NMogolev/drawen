@@ -15,13 +15,13 @@ MediaClock          presentation time, rate, state
     │
 MediaSession        decode, transport, buffering, failure
     │
-Video               view and controls
+Video / AudioPlayer views and controls
 ```
 
-A view never owns the decoder. `Video` holds an optional `Box<dyn MediaSession>`
-plus a `MediaClock` that is used when the application supplies frames manually.
-All position, duration, rate, and playing-state queries resolve through the
-session when one is attached.
+A view never owns the decoder. `Video` and `AudioPlayer` hold an optional
+`Box<dyn MediaSession>` plus a `MediaClock` that is used when the application
+supplies frames manually. All position, duration, rate, and playing-state queries
+resolve through the session when one is attached.
 
 ## Clock
 
@@ -124,16 +124,51 @@ the requested position.
 ## Widget rules
 
 - `Video` paints `MediaFrameScheduler::current()` and forwards play, pause, seek,
-  rate, and loop requests to the session.
+  rate, and loop requests to the session. `VideoPlayer` is an alias that names the
+  widget's player role.
 - `Video::set_frame` is the manual path for applications that already own a
   decoder. It installs the frame through the scheduler; the widget advances its
   own `MediaClock` so progress and time labels stay live.
+- `AudioPlayer` drives the same `MediaSession`/`MediaClock` contract without a
+  picture surface. It paints cover art, metadata, a seek bar, and transport
+  controls, and reports track changes through signals instead of guessing a
+  playlist.
 - `AnimatedImage` and `Image` are not sessions. A GIF is a small, fully decoded
   timeline, not a media pipeline, and it keeps its own frame index.
-- Audio playback subscribes to the same clock rather than being an independent
-  widget with its own timer. Adding a separate `AudioPlayer` before the clock
-  was shared is how video and audio drift apart. Audio output lives in
-  `paleo-audio` and `AudioPaleoSession`; there is deliberately no audio widget.
+- Neither player owns a timer, spawns a thread, or calls a platform API. They
+  paint, tick through `Widget::advance_animation`, and emit typed signals. Audio
+  output still lives in `paleo-audio` and `AudioPaleoSession`.
+
+## Player configuration
+
+`Video` and `AudioPlayer` share configuration types from
+`drawen_widgets::player` (re-exported by `drawen`):
+
+- `PlayerTheme` sets every color, radius, padding, spacing, button size, track
+  height, and font size the players paint. It falls back to the active theme for
+  anything the application does not override.
+- `PlayerBehavior` sets looping, initial volume and mute state, playback-rate
+  choices, seek and volume steps, keyboard and wheel handling, and the control
+  auto-hide delay. A `None` delay keeps controls visible; video defaults to
+  auto-hide, audio defaults to permanent controls.
+- `VideoControls` and `AudioControls` are plain bool sets. `none()` hides
+  everything and `minimal()` starts from a small, opinionated set.
+- `AudioPlayerLayout` selects `Inline` (metadata and a full transport row) or
+  `Compact` (one row for narrow surfaces).
+- `PlayerTimeDisplay` selects elapsed, remaining, or both time labels;
+  `RepeatMode` cycles off, all, and one.
+
+Both players emit signals rather than mutating application state:
+`play_toggled`, `seek_requested`, `volume_changed`, `mute_toggled`,
+`rate_changed`, and layout-specific extras. Video adds `fullscreen_requested` and
+`loop_toggled`; audio adds `repeat_changed`, `shuffle_toggled`,
+`previous_requested`, and `next_requested`. Subscribing to a
+signal keeps the widget free of application policy.
+
+Styling uses the `video` and `audio-player` type selectors. Both widgets accept
+DSS borders, hover/focus state, and the standard text and accent properties
+through `paint_styled`; the players' own theme values fill in whatever the
+stylesheet leaves unset.
 
 ## FFmpeg command-line backend
 

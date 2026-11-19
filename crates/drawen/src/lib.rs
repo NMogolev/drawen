@@ -99,6 +99,11 @@ pub use drawen_widgets::{
     MediaFrame, MediaFrameScheduler, MediaMetadata, MediaSession, MediaState, MediaUpdate, Video,
     VideoError, VideoMetadata,
 };
+#[cfg(feature = "media")]
+pub use drawen_widgets::{
+    AudioControls, AudioPlayer, AudioPlayerLayout, PlayerBehavior, PlayerTheme, PlayerTimeDisplay,
+    RepeatMode, VideoControls, VideoPlayer,
+};
 pub use drawen_workspace::{
     DockAxis, DocumentId, DocumentPresentation, FloatingDocument, FloatingPanel, LayoutNode,
     MIN_VISIBLE_FLOATING_EXTENT, PanelId, SplitPlacement, WorkspaceBounds, WorkspaceError,
