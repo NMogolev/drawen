@@ -244,7 +244,11 @@ impl Adapter {
     }
 
     fn frame_delay(&self, requested: Duration) -> Duration {
-        throttle_frame_delay(self.current_presentation().is_presented(), requested)
+        throttle_frame_delay(
+            self.current_presentation(),
+            self.application.inactive_frame_interval(),
+            requested,
+        )
     }
 
     fn background_tick(&mut self) {
@@ -691,11 +695,17 @@ impl ApplicationHandler<UserEvent> for Adapter {
     }
 }
 
-fn throttle_frame_delay(presented: bool, requested: Duration) -> Duration {
-    if presented {
-        requested
-    } else {
+fn throttle_frame_delay(
+    presentation: WindowPresentation,
+    inactive_interval: Option<Duration>,
+    requested: Duration,
+) -> Duration {
+    if !presentation.is_presented() {
         requested.max(BACKGROUND_FRAME_INTERVAL)
+    } else if !presentation.is_active() {
+        inactive_interval.map_or(requested, |interval| requested.max(interval))
+    } else {
+        requested
     }
 }
 
@@ -905,9 +915,10 @@ fn named_key(key: WinitNamedKey) -> Option<NamedKey> {
 mod tests {
     use std::time::Duration;
 
+    use drawen_platform::{BACKGROUND_FRAME_INTERVAL, INACTIVE_FRAME_INTERVAL, WindowPresentation};
+
     use super::{
-        BACKGROUND_FRAME_INTERVAL, pointer_button, pointer_input, text_input, throttle_frame_delay,
-        update_pointer_buttons,
+        pointer_button, pointer_input, text_input, throttle_frame_delay, update_pointer_buttons,
     };
     use drawen_core::{InputEvent, Modifiers, Point, PointerButton, PointerButtons};
     use winit::event::{ElementState, MouseButton};
@@ -980,15 +991,43 @@ mod tests {
     #[test]
     fn hidden_windows_use_the_slow_background_cadence() {
         assert_eq!(
-            throttle_frame_delay(true, Duration::from_millis(16)),
+            throttle_frame_delay(
+                WindowPresentation::VISIBLE,
+                Some(INACTIVE_FRAME_INTERVAL),
+                Duration::from_millis(16),
+            ),
             Duration::from_millis(16)
         );
         assert_eq!(
-            throttle_frame_delay(false, Duration::from_millis(16)),
+            throttle_frame_delay(
+                WindowPresentation::new(true, false, false, false),
+                Some(INACTIVE_FRAME_INTERVAL),
+                Duration::from_millis(16),
+            ),
+            INACTIVE_FRAME_INTERVAL
+        );
+        assert_eq!(
+            throttle_frame_delay(
+                WindowPresentation::new(true, false, false, false),
+                None,
+                Duration::from_millis(16),
+            ),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            throttle_frame_delay(
+                WindowPresentation::new(true, true, true, false),
+                Some(INACTIVE_FRAME_INTERVAL),
+                Duration::from_millis(16),
+            ),
             BACKGROUND_FRAME_INTERVAL
         );
         assert_eq!(
-            throttle_frame_delay(false, Duration::from_secs(1)),
+            throttle_frame_delay(
+                WindowPresentation::new(true, true, true, false),
+                Some(INACTIVE_FRAME_INTERVAL),
+                Duration::from_secs(1),
+            ),
             Duration::from_secs(1)
         );
     }
