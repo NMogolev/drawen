@@ -257,6 +257,10 @@ pub enum WindowEvent {
     Minimized(bool),
     /// The window is completely occluded by another window or the desktop, or
     /// it became visible again.
+    ///
+    /// `winit` reports this on macOS, iOS, X11, and web, but not on Windows.
+    /// Windows applications should treat focus loss plus minimize state as the
+    /// practical presentation signal.
     Occluded(bool),
     /// An input event relative to the content area in logical pixels.
     Input(InputEvent),
