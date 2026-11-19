@@ -29,6 +29,10 @@ impl DirectorAction {
     }
 
     /// Returns the window action the adapter should apply.
+    ///
+    /// A restore from a hidden state includes [`WindowAction::RequestRedraw`],
+    /// so an application that only forwards this value still repaints the first
+    /// visible frame.
     #[must_use]
     pub const fn window(self) -> WindowAction {
         self.window
@@ -298,12 +302,17 @@ impl MediaDirector {
     }
 
     fn derive_action(&self, previous: AppLifecycle) -> DirectorAction {
+        let redraw = self.lifecycle == AppLifecycle::WindowVisible
+            && previous != AppLifecycle::WindowVisible;
         DirectorAction {
             lifecycle: self.lifecycle,
             playback: self.playback_for(self.lifecycle),
-            window: self.window_action(),
-            redraw: self.lifecycle == AppLifecycle::WindowVisible
-                && previous != AppLifecycle::WindowVisible,
+            window: if redraw {
+                WindowAction::RequestRedraw
+            } else {
+                self.window_action()
+            },
+            redraw,
         }
     }
 
@@ -371,6 +380,7 @@ mod tests {
         assert_eq!(action.lifecycle(), AppLifecycle::WindowVisible);
         assert_eq!(action.playback(), PlaybackAction::Continue);
         assert!(action.redraw());
+        assert_eq!(action.window(), WindowAction::RequestRedraw);
     }
 
     #[test]
