@@ -132,6 +132,102 @@ impl WindowOptions {
     }
 }
 
+/// The default interval between ticks while a window is minimized or occluded.
+///
+/// The adapter does not present frames at this cadence. It only advances
+/// application time so media clocks and background work keep running.
+pub const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A normalized snapshot of the native window's presentation state.
+///
+/// The individual [`WindowEvent`] variants remain the primary notification
+/// channel. This snapshot exists so an application can forward one value to
+/// [`UiRuntime`](https://docs.rs/drawen-ui/latest/drawen_ui/struct.UiRuntime.html)
+/// or decide whether a frame is worth drawing without reconstructing the state
+/// from several events.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowPresentation {
+    visible: bool,
+    focused: bool,
+    minimized: bool,
+    occluded: bool,
+}
+
+impl WindowPresentation {
+    /// A visible, focused, restored window.
+    pub const VISIBLE: Self = Self {
+        visible: true,
+        focused: true,
+        minimized: false,
+        occluded: false,
+    };
+
+    /// A hidden, unfocused window.
+    pub const HIDDEN: Self = Self {
+        visible: false,
+        focused: false,
+        minimized: false,
+        occluded: false,
+    };
+
+    /// Creates a snapshot from its independent native flags.
+    #[must_use]
+    pub const fn new(visible: bool, focused: bool, minimized: bool, occluded: bool) -> Self {
+        Self {
+            visible,
+            focused,
+            minimized,
+            occluded,
+        }
+    }
+
+    /// Returns whether the platform reports the window as visible.
+    #[must_use]
+    pub const fn visible(self) -> bool {
+        self.visible
+    }
+
+    /// Returns whether the window currently owns keyboard focus.
+    #[must_use]
+    pub const fn focused(self) -> bool {
+        self.focused
+    }
+
+    /// Returns whether the user minimized the window.
+    #[must_use]
+    pub const fn minimized(self) -> bool {
+        self.minimized
+    }
+
+    /// Returns whether another window or the desktop fully covers the window.
+    ///
+    /// The flag is available on platforms that report occlusion to `winit`.
+    /// Windows does not, so focus loss is the practical signal there.
+    #[must_use]
+    pub const fn occluded(self) -> bool {
+        self.occluded
+    }
+
+    /// Returns whether the window can present pixels.
+    ///
+    /// A presented window is visible, restored, and not fully occluded. This is
+    /// the condition for painting and GPU presentation, not for advancing time.
+    #[must_use]
+    pub const fn is_presented(self) -> bool {
+        self.visible && !self.minimized && !self.occluded
+    }
+
+    /// Returns whether the window is presented and focused.
+    ///
+    /// Adapters use this to apply a softer frame cap to a visible window that
+    /// lost focus without stopping it completely.
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        self.is_presented() && self.focused
+    }
+}
+
 /// A native-window event translated into Drawen types.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowEvent {
@@ -222,6 +318,35 @@ pub trait WindowApplication {
     /// Handles a translated native event.
     fn window_event(&mut self, event: WindowEvent) -> WindowAction;
 
+    /// Handles a normalized change in the window's presentation state.
+    ///
+    /// The adapter calls this after it dispatches the individual `Visible`,
+    /// `Minimized`, and `Occluded` events, and after focus changes. Returning
+    /// [`WindowAction::RequestRedraw`] while the window is presented schedules
+    /// a frame; while it is hidden the request is held until restore.
+    ///
+    /// Applications that use a `UiRuntime` normally forward
+    /// [`WindowPresentation::is_presented`] to
+    /// `UiRuntime::set_presented` here. The default ignores the update.
+    fn presentation_changed(&mut self, _presentation: WindowPresentation) -> WindowAction {
+        WindowAction::None
+    }
+
+    /// Advances application time while the window cannot be presented.
+    ///
+    /// Adapters call this at [`BACKGROUND_FRAME_INTERVAL`] while the window is
+    /// minimized, hidden, or fully occluded. The return value asks for one
+    /// repaint after the window becomes visible again.
+    ///
+    /// The default calls [`Self::redraw`] and discards the result, so existing
+    /// applications keep advancing media clocks without changes. Override it
+    /// to avoid building a display list; `UiRuntime::tick` is the usual
+    /// replacement.
+    fn tick(&mut self, _delta: Duration) -> bool {
+        let _ = self.redraw();
+        false
+    }
+
     /// Records the display list for the next rendered frame.
     ///
     /// Platform adapters may execute this list asynchronously and continue to
@@ -275,7 +400,7 @@ mod tests {
 
     use drawen_core::Size;
 
-    use super::{WindowOptions, WindowWaker};
+    use super::{WindowOptions, WindowPresentation, WindowWaker};
 
     #[test]
     fn waker_clones_share_the_wake_up() {
@@ -307,6 +432,26 @@ mod tests {
         assert!(!options.maximized);
         assert!(!options.fullscreen);
         assert_eq!(options.min_size, None);
+    }
+
+    #[test]
+    fn presentation_distinguishes_presented_active_and_hidden_windows() {
+        let visible = WindowPresentation::VISIBLE;
+        assert!(visible.is_presented());
+        assert!(visible.is_active());
+
+        let unfocused = WindowPresentation::new(true, false, false, false);
+        assert!(unfocused.is_presented());
+        assert!(!unfocused.is_active());
+
+        for hidden in [
+            WindowPresentation::new(true, true, true, false),
+            WindowPresentation::new(true, true, false, true),
+            WindowPresentation::HIDDEN,
+        ] {
+            assert!(!hidden.is_presented());
+            assert!(!hidden.is_active());
+        }
     }
 
     #[test]
