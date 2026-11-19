@@ -260,6 +260,20 @@ impl Adapter {
         }
     }
 
+    fn hidden_redraw(&mut self, event_loop: &ActiveEventLoop) {
+        match self.application.window_event(WindowEvent::RedrawRequested) {
+            WindowAction::Exit => {
+                event_loop.exit();
+                return;
+            }
+            WindowAction::RequestRedraw => self.needs_render = true,
+            WindowAction::None => {}
+            action => self.apply_action(event_loop, action),
+        }
+        self.background_tick();
+        self.schedule_animation(event_loop);
+    }
+
     fn sync_presentation(&mut self, event_loop: &ActiveEventLoop) {
         let observed = self.current_presentation();
         if observed == self.presentation {
@@ -528,8 +542,7 @@ impl Adapter {
             return;
         }
         if !self.current_presentation().is_presented() {
-            self.background_tick();
-            self.schedule_animation(event_loop);
+            self.hidden_redraw(event_loop);
             return;
         }
         self.dispatch(event_loop, WindowEvent::RedrawRequested);
@@ -574,8 +587,7 @@ impl ApplicationHandler<UserEvent> for Adapter {
                 // Do not depend on the platform delivering a paint request for
                 // a hidden surface. Audio and other background clocks must keep
                 // running even when the compositor drops the window.
-                self.background_tick();
-                self.schedule_animation(event_loop);
+                self.hidden_redraw(event_loop);
             }
         }
     }
