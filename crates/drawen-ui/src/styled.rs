@@ -125,6 +125,10 @@ where
         self.inner.is_animating()
     }
 
+    fn advances_while_hidden(&self) -> bool {
+        self.inner.advances_while_hidden()
+    }
+
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
         self.inner.handle_event(context, event)
     }
@@ -241,6 +245,10 @@ mod tests {
             true
         }
 
+        fn advances_while_hidden(&self) -> bool {
+            true
+        }
+
         fn handle_event(
             &mut self,
             _context: &mut EventContext<'_>,
@@ -307,6 +315,7 @@ mod tests {
         assert!(styled.advance_animation(Duration::ZERO, false));
         assert_eq!(counters.advance.get(), 1);
         assert!(styled.is_animating());
+        assert!(styled.advances_while_hidden());
         assert!(styled.accepts_focus());
 
         let accessibility = styled.accessibility();

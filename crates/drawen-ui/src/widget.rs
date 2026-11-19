@@ -76,6 +76,16 @@ pub trait Widget {
         false
     }
 
+    /// Returns whether this widget must keep advancing while the window is hidden.
+    ///
+    /// The runtime freezes purely visual animations when the window cannot be
+    /// presented. Media widgets return `true` so their audio clocks and session
+    /// updates keep running; a widget that only changes pixels should leave the
+    /// default `false` and resume from the same state on restore.
+    fn advances_while_hidden(&self) -> bool {
+        false
+    }
+
     /// Handles an input event during capture, target, or bubble propagation.
     fn handle_event(
         &mut self,
@@ -168,6 +178,10 @@ where
 
     fn is_animating(&self) -> bool {
         (**self).is_animating()
+    }
+
+    fn advances_while_hidden(&self) -> bool {
+        (**self).advances_while_hidden()
     }
 
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {

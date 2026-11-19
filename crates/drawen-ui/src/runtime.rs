@@ -509,9 +509,15 @@ impl UiRuntime {
                 .is_some_and(Widget::is_animating)
         });
         if !self.presented {
-            // Visual transitions freeze while the window is hidden. Widgets
-            // that keep a media clock alive still need a low-frequency tick.
-            return widget_animating.then_some(BACKGROUND_FRAME_INTERVAL);
+            // Visual transitions freeze while the window is hidden. Only
+            // widgets that keep a media clock alive need a low-frequency tick.
+            let background_animating = self.nodes.iter().any(|slot| {
+                slot.node
+                    .as_ref()
+                    .and_then(|node| node.widget.as_deref())
+                    .is_some_and(|widget| widget.is_animating() && widget.advances_while_hidden())
+            });
+            return background_animating.then_some(BACKGROUND_FRAME_INTERVAL);
         }
         let transition_animating = self.nodes.iter().enumerate().any(|(index, slot)| {
             let Some(node) = &slot.node else {
@@ -590,6 +596,7 @@ impl UiRuntime {
 
         let mut widgets_changed = false;
         let mut widgets_animating = false;
+        let presented = self.presented;
         for slot in &mut self.nodes {
             let Some(node) = &mut slot.node else {
                 continue;
@@ -597,6 +604,9 @@ impl UiRuntime {
             let Some(widget) = &mut node.widget else {
                 continue;
             };
+            if !presented && !widget.advances_while_hidden() {
+                continue;
+            }
             widgets_changed |= widget.advance_animation(delta, settle);
             widgets_animating |= widget.is_animating();
         }
@@ -1858,6 +1868,7 @@ mod tests {
 
     struct TimelineRecorder {
         remaining: std::time::Duration,
+        background: bool,
     }
 
     impl Widget for EnvironmentRecorder {
@@ -1960,6 +1971,10 @@ mod tests {
 
         fn is_animating(&self) -> bool {
             !self.remaining.is_zero()
+        }
+
+        fn advances_while_hidden(&self) -> bool {
+            self.background
         }
     }
 
@@ -2646,6 +2661,7 @@ mod tests {
     fn schedules_frames_for_widget_owned_animations() {
         let mut runtime = UiRuntime::new(TimelineRecorder {
             remaining: std::time::Duration::from_millis(20),
+            background: false,
         });
         runtime
             .layout(Constraints::tight(size(10.0, 10.0)).expect("valid constraints"))
@@ -2663,6 +2679,7 @@ mod tests {
     fn hidden_runtimes_tick_widgets_without_presenting_frames() {
         let mut runtime = UiRuntime::new(TimelineRecorder {
             remaining: std::time::Duration::from_millis(20),
+            background: true,
         });
         runtime
             .layout(Constraints::tight(size(10.0, 10.0)).expect("valid constraints"))
@@ -2680,6 +2697,27 @@ mod tests {
         runtime.set_presented(true);
         assert!(runtime.is_presented());
         assert!(runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn hidden_runtimes_freeze_visual_widget_animations() {
+        let mut runtime = UiRuntime::new(TimelineRecorder {
+            remaining: std::time::Duration::from_millis(20),
+            background: false,
+        });
+        runtime
+            .layout(Constraints::tight(size(10.0, 10.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+
+        runtime.set_presented(false);
+        assert!(runtime.next_frame_in().is_none());
+        assert!(!runtime.tick(std::time::Duration::from_millis(10)));
+
+        runtime.set_presented(true);
+        assert_eq!(
+            runtime.next_frame_in(),
+            Some(super::ANIMATION_FRAME_INTERVAL)
+        );
     }
 
     #[test]
