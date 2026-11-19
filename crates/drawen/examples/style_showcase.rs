@@ -20,7 +20,7 @@ use drawen::{
     RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner, SplitAxis,
     Splitter, Subscription, Switch, TabBar, TextEdit, TextField, Theme, Toolbar, UiEnvironment,
     UiRuntime, Widget, WorkspaceLayout,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions},
+    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, PaintContext, RasterImage, TextLayout, TextStyle},
 };
 
@@ -541,12 +541,21 @@ impl WindowApplication for StyleShowcase {
         }
     }
 
+    fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+        self.runtime.set_presented(presentation.is_presented());
+        WindowAction::None
+    }
+
     fn redraw(&mut self) -> DisplayList {
         let mut display_list = DisplayList::new();
         let _ = self
             .runtime
             .paint(&mut PaintContext::new(&mut display_list));
         display_list
+    }
+
+    fn tick(&mut self, delta: Duration) -> bool {
+        self.runtime.tick(delta)
     }
 
     fn next_frame_in(&self) -> Option<Duration> {

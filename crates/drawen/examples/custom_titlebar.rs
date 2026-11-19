@@ -10,7 +10,9 @@ use drawen::{
     Badge, BadgeTone, Border, Box as DrawenBox, Card, Color, Column, Constraints, Divider, Insets,
     Padding, Row, Size, SizedBox, Subscription, Switch, Text, TitleBar, TitleBarStyle, UiRuntime,
     WidgetId, WindowChromeState, WindowControl, WindowFrame,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, action_for},
+    platform::{
+        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation, action_for,
+    },
     render::{DisplayList, PaintContext, TextStyle},
 };
 
@@ -312,12 +314,21 @@ impl WindowApplication for CustomTitleBar {
         }
     }
 
+    fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+        self.runtime.set_presented(presentation.is_presented());
+        WindowAction::None
+    }
+
     fn redraw(&mut self) -> DisplayList {
         let mut display_list = DisplayList::new();
         let _ = self
             .runtime
             .paint(&mut PaintContext::new(&mut display_list));
         display_list
+    }
+
+    fn tick(&mut self, delta: std::time::Duration) -> bool {
+        self.runtime.tick(delta)
     }
 
     fn next_frame_in(&self) -> Option<std::time::Duration> {

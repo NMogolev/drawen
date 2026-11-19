@@ -7,7 +7,7 @@ use std::{cell::Cell, rc::Rc};
 
 use drawen::{
     Box as DrawenBox, Button, Color, Constraints, Size, Subscription, Text, UiRuntime,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions},
+    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
 
@@ -98,12 +98,21 @@ impl WindowApplication for HelloDrawen {
         }
     }
 
+    fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+        self.runtime.set_presented(presentation.is_presented());
+        WindowAction::None
+    }
+
     fn redraw(&mut self) -> DisplayList {
         let mut display_list = DisplayList::new();
         let _ = self
             .runtime
             .paint(&mut PaintContext::new(&mut display_list));
         display_list
+    }
+
+    fn tick(&mut self, delta: std::time::Duration) -> bool {
+        self.runtime.tick(delta)
     }
 
     fn next_frame_in(&self) -> Option<std::time::Duration> {

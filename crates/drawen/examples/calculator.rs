@@ -8,7 +8,7 @@ use drawen::{
     Color, Constraints, DockArea, DockAxis, EventContext, EventPhase, EventStatus, InputEvent, Key,
     LayoutContext, LayoutNode, LayoutResult, NamedKey, PanelId, Point, Rect, Size, Theme,
     UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions},
+    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
 
@@ -257,6 +257,11 @@ impl WindowApplication for CalculatorApp {
         }
     }
 
+    fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+        self.runtime.set_presented(presentation.is_presented());
+        WindowAction::None
+    }
+
     fn redraw(&mut self) -> DisplayList {
         let now = Instant::now();
         if let Some(previous_frame) = self.previous_frame.replace(now) {
@@ -276,6 +281,10 @@ impl WindowApplication for CalculatorApp {
         metrics.commands = stats.last_paint_command_count();
         metrics.paint_micros = stats.last_paint_time().as_micros();
         display_list
+    }
+
+    fn tick(&mut self, delta: std::time::Duration) -> bool {
+        self.runtime.tick(delta)
     }
 
     fn next_frame_in(&self) -> Option<std::time::Duration> {

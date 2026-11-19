@@ -16,7 +16,10 @@ use std::{
 use drawen::{
     Button, ChildLayout, Color, Constraints, LayoutContext, LayoutResult, Point, Rect, Size,
     Subscription, Text, UiEnvironment, UiRuntime, Widget,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowWaker},
+    platform::{
+        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation,
+        WindowWaker,
+    },
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
     tasks::{TaskPool, UiDispatcher, UiSender},
 };
@@ -271,12 +274,21 @@ impl WindowApplication for TaskApp {
         }
     }
 
+    fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+        self.runtime.set_presented(presentation.is_presented());
+        WindowAction::None
+    }
+
     fn redraw(&mut self) -> DisplayList {
         let mut display_list = DisplayList::new();
         let _ = self
             .runtime
             .paint(&mut PaintContext::new(&mut display_list));
         display_list
+    }
+
+    fn tick(&mut self, delta: Duration) -> bool {
+        self.runtime.tick(delta)
     }
 
     fn next_frame_in(&self) -> Option<Duration> {
