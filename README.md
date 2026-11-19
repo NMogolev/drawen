@@ -321,11 +321,13 @@ fn handle(
 ```
 
 `PauseVideoKeepAudio` is already the default visibility policy; set it explicitly
-when the behavior is part of the product contract. The director does **not**
-create a timer. Audio continues only while the event loop keeps ticking the
-`MediaSession`; a fully hidden window may stop receiving redraws, so a
-background-playing application must keep a tick source that does not depend on
-painting. See
+when the behavior is part of the product contract. The native adapter does not
+present frames while the window is hidden. It calls `WindowApplication::tick` at
+a low background cadence instead, so audio keeps running even when the platform
+stops delivering redraws. With a `UiRuntime`, forward the presentation snapshot
+to `UiRuntime::set_presented` and implement `tick` as `UiRuntime::tick`; purely
+visual animations freeze, while `Video` and `AudioPlayer` keep their sessions
+alive. See
 [MEDIA.md](https://github.com/NMogolev/drawen/blob/main/docs/MEDIA.md#audio-mastered-paleo-backend).
 
 ## Current limits

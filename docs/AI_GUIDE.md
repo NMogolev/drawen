@@ -114,11 +114,13 @@ let audio = AudioPlayer::open("song.flac")?;       // "audio"; music player with
 
 Only `open_paleo_audio` has an audio-mastered clock. Audio continues only while
 the event loop ticks the session; return `runtime.next_frame_in()` from
-`WindowApplication::next_frame_in`. Use `drawen-director` with the `director`
-feature for minimize/occlude/close policy. Background playback after the last
-window closes requires
-`MediaDirector::with_background_playback(true)`; it is deliberately not the
-default.
+`WindowApplication::next_frame_in`. Forward `WindowPresentation` to
+`runtime.set_presented` from `presentation_changed` and return
+`runtime.tick(delta)` from `tick`, so a hidden window advances media without
+painting. Use `drawen-director` with the `director` feature for
+minimize/occlude/close policy. Background playback after the last window closes
+requires `MediaDirector::with_background_playback(true)`; it is deliberately not
+the default.
 
 ### "Why is my window frozen or my audio stopped?"
 
@@ -129,6 +131,10 @@ Common causes:
 - A `Subscription` was dropped immediately, so the click handler never runs.
 - The event loop ignores `take_redraw_request()` or never returns a frame
   interval from `next_frame_in()`.
+- `presentation_changed` does not forward to `UiRuntime::set_presented`, so the
+  runtime keeps scheduling visible frames while the window is hidden. With the
+  forwarding in place, `next_frame_in()` returns the background interval only
+  for media widgets and `None` for purely visual animation.
 - A long decode or file read runs inside `paint`; paint must only record display
   commands. Move blocking work out of the UI thread.
 - A worker thread tries to mutate the runtime; that is not supported.

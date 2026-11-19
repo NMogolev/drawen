@@ -6,6 +6,27 @@ in the headings because the version itself must stay valid semver; see
 
 ## Unreleased
 
+### Window presentation
+
+- Added `WindowPresentation`, a normalized snapshot of the visible, focused,
+  minimized, and occluded flags, plus the `WindowApplication::presentation_changed`
+  hook. Adapters now tell an application when the whole presentation state
+  changes instead of only forwarding individual events.
+- Hidden windows no longer present frames on the 16 ms animation cadence. The
+  winit adapter caps them at the 100 ms background interval and calls
+  `WindowApplication::tick` directly when the platform stops delivering redraws,
+  so audio and media clocks keep running. Restoring requests one full frame.
+- Visible but unfocused windows fall back to a 30 fps cap. Applications can opt
+  out with `WindowApplication::inactive_frame_interval`. Windows does not report
+  full occlusion through `winit`, so focus loss is the practical signal there.
+- `UiRuntime::set_presented` freezes interaction transitions and purely visual
+  widget animation while hidden; `UiRuntime::tick` advances the runtime without
+  building a display list. `Video` and `AudioPlayer` opt into background ticks,
+  while `AnimatedImage` and other visual widgets freeze.
+- `MediaDirector` now includes `WindowAction::RequestRedraw` in the window action
+  when a window is restored, so the documented single-director snippet repaints
+  the first visible frame without checking the separate `redraw` flag.
+
 ### Player widgets
 
 - `Video` is now a configurable YouTube-style player: overlay title and subtitle,

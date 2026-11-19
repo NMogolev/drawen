@@ -113,8 +113,8 @@ pub use drawen_workspace::{
 /// Platform-independent native-window contracts.
 pub mod platform {
     pub use drawen_platform::{
-        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowResizeDirection,
-        WindowWaker,
+        BACKGROUND_FRAME_INTERVAL, INACTIVE_FRAME_INTERVAL, WindowAction, WindowApplication,
+        WindowEvent, WindowOptions, WindowPresentation, WindowResizeDirection, WindowWaker,
     };
 
     use drawen_ui::{ResizeEdge, WindowCommand};

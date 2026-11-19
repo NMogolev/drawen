@@ -276,7 +276,9 @@ Paleo audio ──► PcmConverter ──► AudioOutput ring ──► device
   keeps playing; `set_video_enabled(true)` resynchronizes at the audio clock.
   Minimizing or occluding a window to trigger this is an application policy. The
   platform layer reports `WindowEvent::Visible`, `Minimized`, and `Occluded` so
-  an application or director can stop presenting frames without stopping audio.
+  an application or director can stop decoding without stopping audio. The
+  adapter itself already stops presenting hidden frames and keeps the background
+  tick running; decoding is the part that needs a policy.
 - `set_rate` scales the timeline and suspends audio outside `1.0`, because the
   device has no rate control. Returning to `1.0` seeks to the current position
   so audio resumes in sync.
@@ -289,10 +291,11 @@ Known limits:
 - no device hot-plug handling: a device that disappears surfaces as a stream
   error and a failed clock rather than a silent switch to another output;
 - audio is refilled from `MediaSession::update`, so sound continues only while
-  the application keeps ticking the session. A minimized or fully occluded
-  window may stop receiving redraws; a background-playing application must keep
-  a tick source that does not depend on painting. `drawen-director` supplies the
-  policy and window actions, but the event loop still owns that tick.
+  the application keeps ticking the session. The native adapter calls
+  `WindowApplication::tick` at the background interval while the window is
+  minimized or occluded, so a `UiRuntime` application keeps media alive by
+  forwarding that call to `UiRuntime::tick`. `drawen-director` supplies the
+  policy and window actions, but the application still owns the tick hook.
 
 ## Lifecycle and presentation policy
 
@@ -312,6 +315,11 @@ are application decisions. The intended defaults are:
 - minimize or occlude: keep audio playing, stop presenting video, and skip GPU
   redraws; pause video decoding or keep only a tiny preview buffer. On restore,
   the audio clock already gives the position the video must catch up to.
+- lose focus while still visible: keep presenting, but cap the frame cadence at
+  30 frames per second so a sidelined player does not compete with a game or
+  another foreground application. `WindowApplication::inactive_frame_interval`
+  can opt out; `winit` does not report full occlusion on Windows, so focus loss
+  is the practical signal there.
 - close the last window: exit the application, unless background playback was
   requested explicitly.
 
@@ -380,10 +388,10 @@ fn handle(
 
 `with_background_playback(true)` is the explicit opt-in that keeps the process
 alive after the last window closes. Without it, the director returns
-`WindowAction::Exit`. The director does not tick audio: a hidden window may stop
-receiving redraws because the platform has nothing to present, so the
-application must keep a frame/tick source and call
-`MediaSession::update` while background audio should continue.
+`WindowAction::Exit`. The director does not tick audio itself: the native adapter
+calls `WindowApplication::tick` while the window is hidden, and the application
+forwards it to `UiRuntime::tick` (or calls `MediaSession::update` directly) so
+background audio keeps running.
 
 ## Adding a backend
 

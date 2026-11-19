@@ -379,15 +379,27 @@ with the new session, so the widget never invents playlist policy. `RepeatMode`
 and shuffle are also signals rather than implicit playlist mutations.
 
 Both players present frames and forward play/pause/seek/rate intent to their
-`MediaSession`. They do not own a timer. Return
-`runtime.next_frame_in()` from `WindowApplication::next_frame_in` so the event
-loop ticks playback while the session is active:
+`MediaSession`. They do not own a timer. Return `runtime.next_frame_in()` from
+`WindowApplication::next_frame_in` so the event loop ticks playback while the
+session is active. Forward presentation changes and the hidden tick as well:
 
 ```rust
+fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
+    self.runtime.set_presented(presentation.is_presented());
+    WindowAction::None
+}
+
+fn tick(&mut self, delta: std::time::Duration) -> bool {
+    self.runtime.tick(delta)
+}
+
 fn next_frame_in(&self) -> Option<std::time::Duration> {
     self.runtime.next_frame_in()
 }
 ```
+
+A hidden runtime freezes visual transitions and animated images, but keeps
+`Video` and `AudioPlayer` sessions on the low-frequency background cadence.
 
 Audio is the master clock in `AudioPaleoSession`. If the window is minimized or
 occluded, use `drawen-director` to stop video presentation while keeping audio,
