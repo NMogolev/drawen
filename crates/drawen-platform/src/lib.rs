@@ -138,6 +138,12 @@ impl WindowOptions {
 /// application time so media clocks and background work keep running.
 pub const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
+/// The default frame interval cap while a window is visible but unfocused.
+///
+/// This keeps a sidelined window from competing at full cadence with the
+/// foreground application without stopping playback or presentation completely.
+pub const INACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
 /// A normalized snapshot of the native window's presentation state.
 ///
 /// The individual [`WindowEvent`] variants remain the primary notification
@@ -330,6 +336,16 @@ pub trait WindowApplication {
     /// `UiRuntime::set_presented` here. The default ignores the update.
     fn presentation_changed(&mut self, _presentation: WindowPresentation) -> WindowAction {
         WindowAction::None
+    }
+
+    /// Returns the frame interval cap while the window is visible but unfocused.
+    ///
+    /// Adapters apply this as a lower bound on [`Self::next_frame_in`] so a
+    /// sidelined window keeps repainting without competing at full cadence with
+    /// the foreground application. Return `None` to keep the application
+    /// cadence. The default is [`INACTIVE_FRAME_INTERVAL`].
+    fn inactive_frame_interval(&self) -> Option<Duration> {
+        Some(INACTIVE_FRAME_INTERVAL)
     }
 
     /// Advances application time while the window cannot be presented.
