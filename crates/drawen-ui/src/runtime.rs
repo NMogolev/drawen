@@ -604,7 +604,7 @@ impl UiRuntime {
             let Some(widget) = &mut node.widget else {
                 continue;
             };
-            if !presented && !widget.advances_while_hidden() {
+            if !presented && !settle && !widget.advances_while_hidden() {
                 continue;
             }
             widgets_changed |= widget.advance_animation(delta, settle);
