@@ -27,6 +27,7 @@ const MAX_RETAINED_DIAGNOSTICS: usize = 256;
 const FOCUS_RING_WIDTH: f32 = 2.0;
 const FOCUS_RING_GAP: f32 = 2.0;
 const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSITION_EPSILON: f32 = 0.000_1;
 
 /// Per-node invalidation state maintained by [`UiRuntime`].
@@ -253,6 +254,7 @@ pub struct UiRuntime {
     pending_damage: Option<Rect>,
     last_animation_tick: Instant,
     animating: bool,
+    presented: bool,
 }
 
 struct ArenaSlot {
@@ -386,6 +388,7 @@ impl UiRuntime {
             pending_damage: None,
             last_animation_tick: Instant::now(),
             animating: false,
+            presented: true,
         };
         runtime.root = runtime.insert_node(Box::new(root), None);
         runtime
@@ -442,6 +445,7 @@ impl UiRuntime {
     /// the previous frame. Call it directly to drive deterministic animation in
     /// tests or custom render loops.
     pub fn advance_animations(&mut self, delta: Duration) {
+        self.last_animation_tick = Instant::now();
         self.advance_animations_with(delta, false);
     }
 
@@ -451,6 +455,42 @@ impl UiRuntime {
     /// reduced-motion mode while a transition is in flight.
     pub fn settle_animations(&mut self) {
         self.advance_animations_with(Duration::ZERO, true);
+    }
+
+    /// Records whether the native window can present pixels.
+    ///
+    /// Platform adapters report the value from `WindowPresentation`. When the
+    /// window is minimized, hidden, or fully occluded, [`Self::next_frame_in`]
+    /// stops scheduling visual frames and [`Self::tick`] advances only the work
+    /// that must continue in the background. Restoring the window invalidates
+    /// paint so the first presented frame is complete.
+    pub fn set_presented(&mut self, presented: bool) {
+        if self.presented == presented {
+            return;
+        }
+        self.presented = presented;
+        self.last_animation_tick = Instant::now();
+        if presented {
+            self.invalidate_paint();
+        } else {
+            self.redraw_requested = false;
+        }
+    }
+
+    /// Returns whether the runtime currently expects its window to present.
+    #[must_use]
+    pub const fn is_presented(&self) -> bool {
+        self.presented
+    }
+
+    /// Advances time without building a display list.
+    ///
+    /// Return `true` from
+    /// `WindowApplication::tick` when this reports that a repaint is needed
+    /// after the window becomes visible again.
+    pub fn tick(&mut self, delta: Duration) -> bool {
+        self.advance_animations(delta);
+        self.redraw_requested || self.animating
     }
 
     /// Returns how long to wait before painting the next animation frame.
@@ -468,6 +508,11 @@ impl UiRuntime {
                 .and_then(|node| node.widget.as_deref())
                 .is_some_and(Widget::is_animating)
         });
+        if !self.presented {
+            // Visual transitions freeze while the window is hidden. Widgets
+            // that keep a media clock alive still need a low-frequency tick.
+            return widget_animating.then_some(BACKGROUND_FRAME_INTERVAL);
+        }
         let transition_animating = self.nodes.iter().enumerate().any(|(index, slot)| {
             let Some(node) = &slot.node else {
                 return false;
@@ -525,7 +570,7 @@ impl UiRuntime {
         let focused = self.focused;
         let pressed = self.pressed;
         let mut transition_changed = false;
-        if step > 0.0 {
+        if step > 0.0 && (self.presented || settle) {
             for (index, slot) in self.nodes.iter_mut().enumerate() {
                 let Some(node) = &mut slot.node else {
                     continue;
@@ -2612,6 +2657,58 @@ mod tests {
         );
         runtime.advance_animations(std::time::Duration::from_millis(30));
         assert!(runtime.next_frame_in().is_none());
+    }
+
+    #[test]
+    fn hidden_runtimes_tick_widgets_without_presenting_frames() {
+        let mut runtime = UiRuntime::new(TimelineRecorder {
+            remaining: std::time::Duration::from_millis(20),
+        });
+        runtime
+            .layout(Constraints::tight(size(10.0, 10.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+
+        runtime.set_presented(false);
+        assert!(!runtime.is_presented());
+        assert_eq!(
+            runtime.next_frame_in(),
+            Some(super::BACKGROUND_FRAME_INTERVAL)
+        );
+        assert!(runtime.tick(std::time::Duration::from_millis(20)));
+        assert!(runtime.next_frame_in().is_none());
+
+        runtime.set_presented(true);
+        assert!(runtime.is_presented());
+        assert!(runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn hidden_runtimes_freeze_interaction_transitions() {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = UiRuntime::with_environment(
+            TransitionRecorder {
+                observed: Rc::clone(&observed),
+            },
+            UiEnvironment::new(LightTheme),
+        );
+        runtime
+            .layout(Constraints::tight(size(20.0, 20.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        let _ = runtime.dispatch_event(&pointer_move(Point::new(5.0, 5.0)));
+        assert!(runtime.next_frame_in().is_some());
+
+        runtime.set_presented(false);
+        assert!(runtime.next_frame_in().is_none());
+        runtime.advance_animations(LightTheme.animation_duration() / 2);
+
+        runtime.set_presented(true);
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(LightTheme.animation_duration() / 2);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("paint succeeds");
+        let (hover, _, _) = observed.borrow().last().copied().expect("painted once");
+        assert!((hover - 0.5).abs() < 0.05, "hover progress was {hover}");
     }
 
     #[test]
