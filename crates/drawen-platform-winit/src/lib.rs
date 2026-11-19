@@ -4,14 +4,20 @@
 //! Drawen's coordinate system logical and renders display lists directly with
 //! `wgpu` to the native surface.
 
-use std::{error::Error, fmt, sync::Arc, time::Instant};
+use std::{
+    error::Error,
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use drawen_core::{
     Clipboard, InputEvent, Key, KeyCode, KeyEvent, Modifiers, NamedKey, Point, PointerButton,
     PointerButtons, PointerEvent, PointerId, Size, TextPreedit, WheelDelta, WheelEvent,
 };
 use drawen_platform::{
-    WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowResizeDirection, WindowWaker,
+    BACKGROUND_FRAME_INTERVAL, WindowAction, WindowApplication, WindowEvent, WindowOptions,
+    WindowPresentation, WindowResizeDirection, WindowWaker,
 };
 use drawen_wgpu::{GpuError, GpuRenderer, RenderStatus};
 use winit::{
@@ -152,10 +158,12 @@ struct Adapter {
     logical_size: Option<Size>,
     needs_render: bool,
     state: WindowState,
+    presentation: WindowPresentation,
     cursor: Point,
     buttons: PointerButtons,
     modifiers: Modifiers,
     animation_deadline: Option<Instant>,
+    last_tick: Instant,
 }
 
 /// The normalized presentation state of the native window.
@@ -171,6 +179,7 @@ struct WindowState {
     maximized: bool,
     fullscreen: bool,
     visible: bool,
+    focused: bool,
     minimized: bool,
     occluded: bool,
 }
@@ -181,6 +190,7 @@ impl WindowState {
             maximized,
             fullscreen,
             visible: true,
+            focused: true,
             minimized: false,
             occluded: false,
         }
@@ -204,10 +214,12 @@ impl Adapter {
             logical_size: None,
             needs_render: false,
             state,
+            presentation: WindowPresentation::VISIBLE,
             cursor: Point::ZERO,
             buttons: PointerButtons::NONE,
             modifiers: Modifiers::NONE,
             animation_deadline: None,
+            last_tick: Instant::now(),
         }
     }
 
@@ -222,6 +234,48 @@ impl Adapter {
         self.request_redraw();
     }
 
+    fn current_presentation(&self) -> WindowPresentation {
+        WindowPresentation::new(
+            self.state.visible,
+            self.state.focused,
+            self.state.minimized,
+            self.state.occluded,
+        )
+    }
+
+    fn frame_delay(&self, requested: Duration) -> Duration {
+        throttle_frame_delay(self.current_presentation().is_presented(), requested)
+    }
+
+    fn background_tick(&mut self) {
+        let now = Instant::now();
+        let delta = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
+        if self.application.tick(delta) {
+            self.needs_render = true;
+        }
+    }
+
+    fn sync_presentation(&mut self, event_loop: &ActiveEventLoop) {
+        let observed = self.current_presentation();
+        if observed == self.presentation {
+            return;
+        }
+        let was_presented = self.presentation.is_presented();
+        self.presentation = observed;
+        if observed.is_presented() && !was_presented {
+            self.needs_render = true;
+            self.request_redraw();
+        }
+        let action = self.application.presentation_changed(observed);
+        if observed.is_presented() || action != WindowAction::RequestRedraw {
+            self.apply_action(event_loop, action);
+        } else {
+            self.needs_render = true;
+        }
+        self.schedule_animation(event_loop);
+    }
+
     fn schedule_animation(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             return;
@@ -231,6 +285,7 @@ impl Adapter {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         };
+        let delay = self.frame_delay(delay);
         let deadline = Instant::now() + delay;
         self.animation_deadline = Some(deadline);
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -284,6 +339,7 @@ impl Adapter {
             maximized: window.is_maximized(),
             fullscreen: window.fullscreen().is_some(),
             visible: window.is_visible().unwrap_or(self.state.visible),
+            focused: window.has_focus(),
             minimized: window.is_minimized().unwrap_or(self.state.minimized),
             occluded: self.state.occluded,
         };
@@ -467,6 +523,11 @@ impl Adapter {
         if self.logical_size.is_none() {
             return;
         }
+        if !self.current_presentation().is_presented() {
+            self.background_tick();
+            self.schedule_animation(event_loop);
+            return;
+        }
         self.dispatch(event_loop, WindowEvent::RedrawRequested);
         self.needs_render = false;
         match self.render_display_list() {
@@ -481,6 +542,7 @@ impl Adapter {
             }
             Err(_) => event_loop.exit(),
         }
+        self.last_tick = Instant::now();
         self.schedule_animation(event_loop);
     }
 
@@ -502,7 +564,15 @@ impl ApplicationHandler<UserEvent> for Adapter {
             && self.animation_deadline.take().is_some()
         {
             event_loop.set_control_flow(ControlFlow::Wait);
-            self.request_redraw();
+            if self.current_presentation().is_presented() {
+                self.request_redraw();
+            } else {
+                // Do not depend on the platform delivering a paint request for
+                // a hidden surface. Audio and other background clocks must keep
+                // running even when the compositor drops the window.
+                self.background_tick();
+                self.schedule_animation(event_loop);
+            }
         }
     }
 
@@ -559,6 +629,8 @@ impl ApplicationHandler<UserEvent> for Adapter {
         window.set_visible(true);
         self.state.maximized = window.is_maximized();
         self.state.fullscreen = window.fullscreen().is_some();
+        self.state.focused = window.has_focus();
+        self.last_tick = Instant::now();
         let physical_size = window.inner_size();
         let scale_factor = window.scale_factor();
         if self.create_surface(physical_size, scale_factor).is_err() {
@@ -569,6 +641,7 @@ impl ApplicationHandler<UserEvent> for Adapter {
             self.dispatch(event_loop, WindowEvent::Resized(size));
         }
         self.request_render();
+        self.sync_presentation(event_loop);
     }
 
     fn window_event(
@@ -614,6 +687,15 @@ impl ApplicationHandler<UserEvent> for Adapter {
         // platform, so normalize them after each native event. The helper only
         // dispatches the values that actually changed.
         self.sync_window_state(event_loop);
+        self.sync_presentation(event_loop);
+    }
+}
+
+fn throttle_frame_delay(presented: bool, requested: Duration) -> Duration {
+    if presented {
+        requested
+    } else {
+        requested.max(BACKGROUND_FRAME_INTERVAL)
     }
 }
 
@@ -821,7 +903,12 @@ fn named_key(key: WinitNamedKey) -> Option<NamedKey> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pointer_button, pointer_input, text_input, update_pointer_buttons};
+    use std::time::Duration;
+
+    use super::{
+        BACKGROUND_FRAME_INTERVAL, pointer_button, pointer_input, text_input, throttle_frame_delay,
+        update_pointer_buttons,
+    };
     use drawen_core::{InputEvent, Modifiers, Point, PointerButton, PointerButtons};
     use winit::event::{ElementState, MouseButton};
 
@@ -888,5 +975,21 @@ mod tests {
         };
         assert!(!event.buttons.contains_button(PointerButton::Primary));
         assert!(event.buttons.contains_button(PointerButton::Other(4)));
+    }
+
+    #[test]
+    fn hidden_windows_use_the_slow_background_cadence() {
+        assert_eq!(
+            throttle_frame_delay(true, Duration::from_millis(16)),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            throttle_frame_delay(false, Duration::from_millis(16)),
+            BACKGROUND_FRAME_INTERVAL
+        );
+        assert_eq!(
+            throttle_frame_delay(false, Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
     }
 }
