@@ -178,6 +178,7 @@ impl WindowPresentation {
     };
 
     /// Creates a snapshot from its independent native flags.
+    #[allow(clippy::fn_params_excessive_bools)] // The four flags are a direct platform mapping.
     #[must_use]
     pub const fn new(visible: bool, focused: bool, minimized: bool, occluded: bool) -> Self {
         Self {
