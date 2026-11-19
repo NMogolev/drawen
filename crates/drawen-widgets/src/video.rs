@@ -987,6 +987,10 @@ impl Widget for Video {
         self.core.is_animating() || self.hide_in.is_some()
     }
 
+    fn advances_while_hidden(&self) -> bool {
+        self.core.is_animating()
+    }
+
     #[allow(clippy::too_many_lines)]
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
         if context.phase() != EventPhase::Target {
