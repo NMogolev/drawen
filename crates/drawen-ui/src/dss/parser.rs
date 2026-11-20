@@ -1,7 +1,21 @@
 use super::DssError;
 use super::selector::{Combinator, CompoundSelector, Condition, NthChild, PseudoClass, Selector};
-use super::style::DssStyle;
-use super::value::set_property;
+
+/// A declaration before custom properties are expanded and values are typed.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RawDeclaration {
+    pub(super) property: String,
+    pub(super) value: String,
+    pub(super) important: bool,
+    pub(super) position: usize,
+}
+
+/// One selector and its raw declaration block, in source order.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ParsedRule {
+    pub(super) selector: Selector,
+    pub(super) declarations: Vec<RawDeclaration>,
+}
 
 pub(super) struct Parser<'a> {
     source: &'a str,
@@ -13,7 +27,7 @@ impl<'a> Parser<'a> {
         Self { source, cursor: 0 }
     }
 
-    pub(super) fn parse_rules(mut self) -> Result<Vec<(Selector, DssStyle)>, DssError> {
+    pub(super) fn parse_rules(mut self) -> Result<Vec<ParsedRule>, DssError> {
         let mut rules = Vec::new();
         self.skip_ignored()?;
         while !self.is_eof() {
@@ -21,30 +35,29 @@ impl<'a> Parser<'a> {
             let selector_source = self.read_until_open_brace()?;
             let selectors = parse_selectors(selector_source, selector_position)?;
             self.advance_char();
-            let style = self.parse_declarations()?;
-            rules.extend(
-                selectors
-                    .into_iter()
-                    .map(|selector| (selector, style.clone())),
-            );
+            let declarations = self.parse_declarations()?;
+            rules.extend(selectors.into_iter().map(|selector| ParsedRule {
+                selector,
+                declarations: declarations.clone(),
+            }));
             self.skip_ignored()?;
         }
         Ok(rules)
     }
 
-    fn parse_declarations(&mut self) -> Result<DssStyle, DssError> {
-        let mut style = DssStyle::default();
+    fn parse_declarations(&mut self) -> Result<Vec<RawDeclaration>, DssError> {
+        let mut declarations = Vec::new();
         loop {
             self.skip_ignored()?;
             if self.consume_char('}') {
-                return Ok(style);
+                return Ok(declarations);
             }
             if self.is_eof() {
                 return Err(self.error("expected `}` to close declaration block"));
             }
 
             let property_position = self.cursor;
-            let property = self.read_identifier()?;
+            let property = self.read_property_name()?;
             self.skip_ignored()?;
             if !self.consume_char(':') {
                 return Err(self.error("expected `:` after property name"));
@@ -52,16 +65,23 @@ impl<'a> Parser<'a> {
             self.skip_ignored()?;
             let value_position = self.cursor;
             let value = self.read_declaration_value()?;
-            if value.trim().is_empty() {
+            let (value, important) = split_important(value);
+            let value = value.trim();
+            if value.is_empty() {
                 return Err(DssError::new(value_position, "expected a property value"));
             }
-            set_property(&mut style, &property, value.trim(), value_position)?;
+            declarations.push(RawDeclaration {
+                property,
+                value: value.to_owned().replace(['\r', '\n'], " "),
+                important,
+                position: value_position,
+            });
 
             if self.consume_char(';') {
                 continue;
             }
             if self.consume_char('}') {
-                return Ok(style);
+                return Ok(declarations);
             }
             return Err(DssError::new(
                 property_position,
@@ -101,7 +121,9 @@ impl<'a> Parser<'a> {
         Err(self.error("expected `{` after selector"))
     }
 
-    fn read_identifier(&mut self) -> Result<String, DssError> {
+    /// Reads a property name. Custom properties are case-sensitive, standard
+    /// properties are normalized so `BACKGROUND` and `background` share a slot.
+    fn read_property_name(&mut self) -> Result<String, DssError> {
         let start = self.cursor;
         while self.peek_char().is_some_and(is_identifier_character) {
             self.advance_char();
@@ -109,7 +131,12 @@ impl<'a> Parser<'a> {
         if start == self.cursor {
             return Err(self.error("expected identifier"));
         }
-        Ok(self.source[start..self.cursor].to_ascii_lowercase())
+        let property = &self.source[start..self.cursor];
+        if property.starts_with("--") {
+            Ok(property.to_owned())
+        } else {
+            Ok(property.to_ascii_lowercase())
+        }
     }
 
     fn read_declaration_value(&mut self) -> Result<&'a str, DssError> {
@@ -447,11 +474,7 @@ fn parse_nth_child(arguments: &str, position: usize) -> Result<NthChild, DssErro
     Ok(NthChild::new(a, b))
 }
 
-fn read_arguments<'a>(
-    source: &'a str,
-    cursor: usize,
-    position: usize,
-) -> Result<(&'a str, usize), DssError> {
+fn read_arguments(source: &str, cursor: usize, position: usize) -> Result<(&str, usize), DssError> {
     let start = cursor + 1;
     let mut depth = 1_usize;
     let mut index = start;
@@ -505,6 +528,17 @@ fn skip_whitespace(source: &str, cursor: &mut usize) {
 
 fn peek_char(source: &str, cursor: usize) -> Option<char> {
     source.get(cursor..)?.chars().next()
+}
+
+/// Splits a trailing `!important` flag from a declaration value.
+fn split_important(value: &str) -> (&str, bool) {
+    let trimmed = value.trim_end();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with("!important") {
+        (&trimmed[..trimmed.len() - "!important".len()], true)
+    } else {
+        (trimmed, false)
+    }
 }
 
 pub(super) fn is_identifier_character(character: char) -> bool {

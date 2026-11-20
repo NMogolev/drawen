@@ -407,6 +407,135 @@ fn combinator_rules_keep_css_specificity_and_source_order() {
 }
 
 #[test]
+fn expands_custom_properties_and_fallbacks() {
+    let style = resolve(
+        r"
+            :root {
+                --space: 6px;
+                --brand: #224466;
+                --alpha: rgba(1, 2, 3, 0.5);
+            }
+            button {
+                padding: var(--space) calc(var(--space) * 2);
+                background: var(--brand);
+                color: var(--undefined, #abcdef);
+                border-radius: var(--undefined, 3px);
+                gap: var(--space);
+                border: var(--space) solid var(--alpha);
+            }
+        ",
+        &StyleTarget::new("button"),
+    );
+
+    assert_eq!(style.padding, Some(Insets::new(6.0, 12.0, 6.0, 12.0)));
+    assert_eq!(style.background, Some(Color::rgba8(34, 68, 102, 255)));
+    assert_eq!(style.foreground, Some(Color::rgba8(0xab, 0xcd, 0xef, 255)));
+    assert_eq!(style.corner_radius, Some(3.0));
+    assert_eq!(style.spacing, Some(6.0));
+    assert_eq!(
+        style.border,
+        Some(Border::new(6.0, Color::rgba8(1, 2, 3, 128)))
+    );
+}
+
+#[test]
+fn later_custom_property_definitions_win() {
+    let style = resolve(
+        ":root { --tone: #111111; } :root { --tone: #222222; } button { color: var(--tone); }",
+        &StyleTarget::new("button"),
+    );
+    assert_eq!(style.foreground, Some(Color::rgba8(34, 34, 34, 255)));
+}
+
+#[test]
+fn rejects_broken_custom_properties() {
+    let error = StyleSheet::parse(":root { --tone: #111; } button { color: var(--missing); }")
+        .expect_err("undefined custom property must fail");
+    assert!(error.message().contains("undefined custom property"));
+
+    let error =
+        StyleSheet::parse(":root { --a: var(--b); --b: var(--a); } button { color: var(--a); }")
+            .expect_err("cycles must fail");
+    assert!(error.message().contains("32 levels"));
+
+    let error = StyleSheet::parse("button { color: var(red); }")
+        .expect_err("var() needs a custom property name");
+    assert!(error.message().contains("custom property name"));
+}
+
+#[test]
+fn important_declarations_override_specificity() {
+    let stylesheet = StyleSheet::parse(
+        r"
+            button { color: #111111 !important; background: #222222 !important; }
+            #save { color: #333333; background: #444444; }
+            #save { background: #555555 !important; }
+        ",
+    )
+    .expect("valid DSS");
+    let style = stylesheet.resolve(&StyleTarget::new("button").with_id("save"));
+
+    assert_eq!(style.foreground, Some(Color::rgba8(0x11, 0x11, 0x11, 255)));
+    assert_eq!(style.background, Some(Color::rgba8(0x55, 0x55, 0x55, 255)));
+}
+
+#[test]
+fn parses_named_hsl_and_modern_rgb_colors() {
+    let cases = [
+        ("rebeccapurple", Color::rgba8(0x66, 0x33, 0x99, 255)),
+        ("OrangeRed", Color::rgba8(0xff, 0x45, 0x00, 255)),
+        ("hsl(120, 100%, 25%)", Color::rgba8(0, 128, 0, 255)),
+        ("hsl(0deg 100% 50%)", Color::rgba8(255, 0, 0, 255)),
+        ("hsla(240, 100%, 50%, 0.5)", Color::rgba8(0, 0, 255, 128)),
+        ("rgb(255 0 0 / 50%)", Color::rgba8(255, 0, 0, 128)),
+        ("rgb(100% 0% 0%)", Color::rgba8(255, 0, 0, 255)),
+        ("rgb(0 0 0 / 0.25)", Color::rgba8(0, 0, 0, 64)),
+    ];
+    for (source, expected) in cases {
+        let style = resolve(
+            &format!("button {{ background: {source}; }}"),
+            &StyleTarget::new("button"),
+        );
+        assert_eq!(style.background, Some(expected), "color `{source}`");
+    }
+}
+
+#[test]
+fn evaluates_calc_expressions() {
+    let style = resolve(
+        r"
+            button {
+                padding: calc(2px * 3) calc((10px + 5px) / 3);
+                gap: calc(2 * 4px);
+                font-size: calc(12px + 2px);
+            }
+        ",
+        &StyleTarget::new("button"),
+    );
+
+    assert_eq!(style.padding, Some(Insets::new(6.0, 5.0, 6.0, 5.0)));
+    assert_eq!(style.spacing, Some(8.0));
+    assert_eq!(style.font_size, Some(FontSize::pixels(14.0)));
+}
+
+#[test]
+fn rejects_unsupported_calc_and_color_syntax() {
+    for source in [
+        "button { padding: calc(100% - 4px); }",
+        "button { padding: calc(1px / 0); }",
+        "button { padding: calc(4em); }",
+        "button { background: hsl(0, 50, 50); }",
+        "button { background: rgb(1 2); }",
+        "button { background: rgb(1, 2, 3, 4, 5); }",
+    ] {
+        assert!(
+            StyleSheet::parse(source).is_err(),
+            "`{source}` must be rejected"
+        );
+    }
+}
+
+#[test]
 fn rejects_malformed_extended_selectors() {
     for source in [
         "button > { color: #000; }",

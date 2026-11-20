@@ -10,6 +10,7 @@ mod selector;
 mod style;
 mod theme;
 mod value;
+mod variables;
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,10 @@ pub use selector::{PseudoClass, Selector, StyleTarget};
 pub use style::DssStyle;
 pub use theme::DssTheme;
 
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
+
+use parser::ParsedRule;
+use variables::CustomProperties;
 
 /// A parsed DSS stylesheet.
 ///
@@ -36,6 +40,8 @@ pub struct StyleSheet {
     /// Keeping this index avoids sorting and allocating on every node style
     /// resolution. The public rule list remains in source order.
     cascade: Vec<usize>,
+    /// Important declarations, applied after every normal declaration.
+    cascade_important: Vec<usize>,
 }
 
 impl StyleSheet {
@@ -43,20 +49,52 @@ impl StyleSheet {
     ///
     /// Unknown properties, unsupported selector syntax, and invalid values are
     /// rejected rather than silently ignored. This keeps stylesheet mistakes
-    /// visible while DSS is still intentionally small.
+    /// visible while DSS remains a typed subset of CSS.
     ///
     /// # Errors
     ///
     /// Returns [`DssError`] when `source` is not valid DSS.
     pub fn parse(source: &str) -> Result<Self, DssError> {
-        let rules = parser::Parser::new(source)
-            .parse_rules()?
-            .into_iter()
-            .map(|(selector, style)| StyleRule { selector, style })
-            .collect();
+        let parsed = parser::Parser::new(source).parse_rules()?;
+        let properties = collect_custom_properties(&parsed);
+        let mut rules = Vec::with_capacity(parsed.len());
+        for rule in parsed {
+            let mut style = DssStyle::default();
+            let mut important = DssStyle::default();
+            for declaration in rule.declarations {
+                if declaration.property.starts_with("--") {
+                    if declaration.property.len() == 2 {
+                        return Err(DssError::new(
+                            declaration.position,
+                            "custom properties require a name after `--`",
+                        ));
+                    }
+                    continue;
+                }
+                let value =
+                    variables::substitute(&declaration.value, &properties, declaration.position)?;
+                let target = if declaration.important {
+                    &mut important
+                } else {
+                    &mut style
+                };
+                value::set_property(
+                    target,
+                    &declaration.property,
+                    value.trim(),
+                    declaration.position,
+                )?;
+            }
+            rules.push(StyleRule {
+                selector: rule.selector,
+                style,
+                important,
+            });
+        }
         let mut stylesheet = Self {
             rules,
             cascade: Vec::new(),
+            cascade_important: Vec::new(),
         };
         stylesheet.rebuild_cascade();
         Ok(stylesheet)
@@ -83,15 +121,38 @@ impl StyleSheet {
                 resolved.apply(&rule.style);
             }
         }
+        // `!important` declarations form a second cascade layer: no normal
+        // declaration can override them, regardless of specificity.
+        for &index in &self.cascade_important {
+            let rule = &self.rules[index];
+            if rule.selector.matches(target) {
+                resolved.apply(&rule.important);
+            }
+        }
         resolved
     }
 
     fn rebuild_cascade(&mut self) {
-        self.cascade = (0..self.rules.len()).collect();
-        self.cascade.sort_by_key(|index| {
-            let rule = &self.rules[*index];
-            (rule.selector.specificity(), *index)
-        });
+        let mut normal = Vec::new();
+        let mut important = Vec::new();
+        for (index, rule) in self.rules.iter().enumerate() {
+            if !rule.style.is_empty() {
+                normal.push(index);
+            }
+            if !rule.important.is_empty() {
+                important.push(index);
+            }
+        }
+        let sort = |cascade: &mut Vec<usize>, rules: &[StyleRule]| {
+            cascade.sort_by_key(|index| {
+                let rule = &rules[*index];
+                (rule.selector.specificity(), *index)
+            });
+        };
+        sort(&mut normal, &self.rules);
+        sort(&mut important, &self.rules);
+        self.cascade = normal;
+        self.cascade_important = important;
     }
 
     /// Resolves the sheet into a [`Theme`](crate::Theme) while preserving
@@ -119,6 +180,7 @@ impl FromStr for StyleSheet {
 pub struct StyleRule {
     selector: Selector,
     style: DssStyle,
+    important: DssStyle,
 }
 
 impl StyleRule {
@@ -128,9 +190,36 @@ impl StyleRule {
         &self.selector
     }
 
-    /// Returns the declarations defined by this rule.
+    /// Returns the normal declarations defined by this rule.
     #[must_use]
     pub const fn style(&self) -> &DssStyle {
         &self.style
     }
+
+    /// Returns the declarations this rule marked `!important`.
+    ///
+    /// The runtime applies this layer after every normal declaration, so it is
+    /// exposed mainly for tooling that inspects a parsed stylesheet.
+    #[must_use]
+    pub const fn important_style(&self) -> &DssStyle {
+        &self.important
+    }
+}
+
+/// Collects custom properties into a global token map in source order.
+///
+/// DSS custom properties are stylesheet tokens, not per-selector values: every
+/// definition contributes to the same map and later definitions win. This is a
+/// deliberate simplification over browser CSS that keeps the typed resolution
+/// path free of per-node variable environments.
+fn collect_custom_properties(rules: &[ParsedRule]) -> CustomProperties {
+    let mut properties = HashMap::new();
+    for rule in rules {
+        for declaration in &rule.declarations {
+            if declaration.property.starts_with("--") && declaration.property.len() > 2 {
+                properties.insert(declaration.property.clone(), declaration.value.clone());
+            }
+        }
+    }
+    properties
 }
