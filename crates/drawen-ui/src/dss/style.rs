@@ -31,6 +31,18 @@ pub struct DssStyle {
     pub font_style: Option<FontStyle>,
     /// Surface corner radius from `border-radius`.
     pub corner_radius: Option<f32>,
+    /// Preferred width from `width`.
+    pub width: Option<f32>,
+    /// Preferred height from `height`.
+    pub height: Option<f32>,
+    /// Lower width bound from `min-width`.
+    pub min_width: Option<f32>,
+    /// Lower height bound from `min-height`.
+    pub min_height: Option<f32>,
+    /// Upper width bound from `max-width`.
+    pub max_width: Option<f32>,
+    /// Upper height bound from `max-height`.
+    pub max_height: Option<f32>,
 }
 
 impl DssStyle {
@@ -68,6 +80,24 @@ impl DssStyle {
         if style.corner_radius.is_some() {
             self.corner_radius = style.corner_radius;
         }
+        if style.width.is_some() {
+            self.width = style.width;
+        }
+        if style.height.is_some() {
+            self.height = style.height;
+        }
+        if style.min_width.is_some() {
+            self.min_width = style.min_width;
+        }
+        if style.min_height.is_some() {
+            self.min_height = style.min_height;
+        }
+        if style.max_width.is_some() {
+            self.max_width = style.max_width;
+        }
+        if style.max_height.is_some() {
+            self.max_height = style.max_height;
+        }
     }
 
     /// Fills inheritable properties that this style does not define.
@@ -100,6 +130,12 @@ impl DssStyle {
             && self.font_weight.is_none()
             && self.font_style.is_none()
             && self.corner_radius.is_none()
+            && self.width.is_none()
+            && self.height.is_none()
+            && self.min_width.is_none()
+            && self.min_height.is_none()
+            && self.max_width.is_none()
+            && self.max_height.is_none()
     }
 
     /// Returns `background`, or `fallback` when DSS did not supply it.

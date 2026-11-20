@@ -192,6 +192,39 @@ fn descendant_and_child_selectors_follow_the_retained_tree() {
 }
 
 #[test]
+fn size_properties_bound_layout() {
+    let mut runtime = UiRuntime::with_environment(
+        Stack::new(),
+        environment(
+            ".fixed { width: 40px; height: 12px; } \
+             .bounded { min-width: 30px; max-width: 50px; height: 9px; }",
+        ),
+    );
+    let fixed = runtime
+        .append_child(
+            runtime.root(),
+            Styled::new(BoxWidget::new()).with_class("fixed"),
+        )
+        .expect("root exists");
+    let bounded = runtime
+        .append_child(
+            runtime.root(),
+            Styled::new(BoxWidget::new()).with_class("bounded"),
+        )
+        .expect("root exists");
+    runtime
+        .layout(Constraints::UNBOUNDED)
+        .expect("layout succeeds");
+
+    let fixed = runtime.bounds(fixed).expect("fixed child is live");
+    assert!((fixed.size.width() - 40.0).abs() < f32::EPSILON);
+    assert!((fixed.size.height() - 12.0).abs() < f32::EPSILON);
+    let bounded = runtime.bounds(bounded).expect("bounded child is live");
+    assert!((bounded.size.width() - 30.0).abs() < f32::EPSILON);
+    assert!((bounded.size.height() - 9.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn structural_and_semantic_pseudo_classes_style_children() {
     let mut runtime = UiRuntime::with_environment(
         Stack::new(),

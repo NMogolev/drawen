@@ -24,6 +24,12 @@ pub(super) fn set_property(
         "font-weight" => style.font_weight = Some(parse_font_weight(value, position)?),
         "font-style" => style.font_style = Some(parse_font_style(value, position)?),
         "border-radius" => style.corner_radius = Some(parse_length(value, position)?),
+        "width" => style.width = Some(parse_length(value, position)?),
+        "height" => style.height = Some(parse_length(value, position)?),
+        "min-width" => style.min_width = Some(parse_length(value, position)?),
+        "min-height" => style.min_height = Some(parse_length(value, position)?),
+        "max-width" => style.max_width = Some(parse_length(value, position)?),
+        "max-height" => style.max_height = Some(parse_length(value, position)?),
         _ => {
             return Err(DssError::new(
                 position,

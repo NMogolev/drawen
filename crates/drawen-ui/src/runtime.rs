@@ -309,6 +309,36 @@ fn smoothstep(value: f32) -> f32 {
     value * value * (3.0 - 2.0 * value)
 }
 
+/// Resolves one axis of the DSS width/height properties into layout bounds.
+fn resolve_style_axis(
+    parent_min: f32,
+    parent_max: f32,
+    preferred: Option<f32>,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+) -> (f32, f32) {
+    let mut min = parent_min;
+    let mut max = parent_max;
+    if let Some(preferred) = preferred {
+        min = preferred;
+        max = preferred;
+    }
+    if let Some(minimum) = minimum {
+        min = min.max(minimum);
+    }
+    if let Some(maximum) = maximum {
+        max = max.min(maximum);
+    }
+    // `min-width` wins over `max-width` and over an explicit `width`, as it
+    // does in CSS.
+    if max < min {
+        max = min;
+    }
+    let min = min.clamp(parent_min, parent_max);
+    let max = max.clamp(min, parent_max);
+    (min, max)
+}
+
 // Exact comparisons are intentional: current values are only ever assigned from
 // these exact targets or from clamped arithmetic, so equality marks a settled
 // transition without accumulating a tolerance band.
@@ -1234,12 +1264,47 @@ impl UiRuntime {
         target
     }
 
+    /// Applies DSS size properties to the constraints offered to `id`.
+    ///
+    /// `width`/`height` become tight preferences, `min-*` and `max-*` clamp
+    /// them, and every result stays inside the range the parent actually
+    /// offers so style rules cannot break the layout invariants.
+    fn style_constraints(&self, id: WidgetId, constraints: Constraints) -> Constraints {
+        let Some(style) = self.node(id).map(|node| &node.style) else {
+            return constraints;
+        };
+        let parent_min = constraints.min();
+        let parent_max = constraints.max();
+        let (min_width, max_width) = resolve_style_axis(
+            parent_min.width(),
+            parent_max.width(),
+            style.width,
+            style.min_width,
+            style.max_width,
+        );
+        let (min_height, max_height) = resolve_style_axis(
+            parent_min.height(),
+            parent_max.height(),
+            style.height,
+            style.min_height,
+            style.max_height,
+        );
+        let (Ok(min), Ok(max)) = (
+            Size::new(min_width, min_height),
+            Size::new(max_width, max_height),
+        ) else {
+            return constraints;
+        };
+        Constraints::new(min, max).unwrap_or(constraints)
+    }
+
     fn layout_node(
         &mut self,
         id: WidgetId,
         constraints: Constraints,
         origin: Point,
     ) -> Result<LayoutResult, UiRuntimeError> {
+        let constraints = self.style_constraints(id, constraints);
         let mut widget = self
             .node_mut(id)
             .ok_or(UiRuntimeError::InvalidWidgetId)?

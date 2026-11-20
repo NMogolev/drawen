@@ -246,9 +246,9 @@ fn accepts_crlf_and_unicode_comments() {
 
 #[test]
 fn rejects_unknown_properties_and_invalid_values() {
-    let error = StyleSheet::parse("button { width: 24px; }").expect_err("property is unsupported");
-    assert!(error.message().contains("unsupported property `width`"));
-    assert_eq!(error.position(), 16);
+    let error = StyleSheet::parse("button { margin: 24px; }").expect_err("property is unsupported");
+    assert!(error.message().contains("unsupported property `margin`"));
+    assert_eq!(error.position(), 17);
 
     let error = StyleSheet::parse("button { padding: -1px; }").expect_err("negative padding");
     assert!(error.message().contains("non-negative"));
@@ -516,6 +516,30 @@ fn evaluates_calc_expressions() {
     assert_eq!(style.padding, Some(Insets::new(6.0, 5.0, 6.0, 5.0)));
     assert_eq!(style.spacing, Some(8.0));
     assert_eq!(style.font_size, Some(FontSize::pixels(14.0)));
+}
+
+#[test]
+fn parses_size_properties() {
+    let style = resolve(
+        r"
+            .dialog {
+                width: 320px;
+                height: calc(200px + 20px);
+                min-width: 240px;
+                min-height: 120px;
+                max-width: 480px;
+                max-height: 360px;
+            }
+        ",
+        &StyleTarget::empty().with_class("dialog"),
+    );
+
+    assert_eq!(style.width, Some(320.0));
+    assert_eq!(style.height, Some(220.0));
+    assert_eq!(style.min_width, Some(240.0));
+    assert_eq!(style.min_height, Some(120.0));
+    assert_eq!(style.max_width, Some(480.0));
+    assert_eq!(style.max_height, Some(360.0));
 }
 
 #[test]
