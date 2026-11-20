@@ -1171,22 +1171,30 @@ impl UiRuntime {
     fn style_tree(&mut self) {
         let inherited = self.environment.root_style();
         let root = self.root;
-        self.compute_style_node(root, &inherited);
+        self.compute_style_node(root, &inherited, None);
     }
 
-    fn compute_style_node(&mut self, id: WidgetId, inherited: &DssStyle) {
-        let target = self.style_target_for(id);
+    fn compute_style_node(
+        &mut self,
+        id: WidgetId,
+        inherited: &DssStyle,
+        parent_target: Option<&StyleTarget>,
+    ) {
+        let mut target = self.style_target_for(id);
+        if let Some(parent_target) = parent_target {
+            target = target.with_parent(parent_target);
+        }
         let mut style = self.environment.style_for(&target);
         style.inherit_from(inherited);
         let children = self
             .node(id)
             .map_or_else(Vec::new, |node| node.children.clone());
         if let Some(node) = self.node_mut(id) {
-            node.style_target = target;
+            node.style_target = target.clone();
             node.style = style.clone();
         }
         for child in children {
-            self.compute_style_node(child, &style);
+            self.compute_style_node(child, &style, Some(&target));
         }
     }
 
@@ -1198,11 +1206,30 @@ impl UiRuntime {
             return StyleTarget::empty();
         };
         let mut target = widget.style_target();
+        if let Some(parent) = node.parent.and_then(|parent| self.node(parent))
+            && let Some(index) = parent.children.iter().position(|child| *child == id)
+        {
+            target = target.with_child_position(index, parent.children.len());
+        }
         if self.hovered.values().any(|hovered| *hovered == id) {
             target = target.with_state(PseudoClass::Hover);
         }
         if self.focused == Some(id) {
             target = target.with_state(PseudoClass::Focus);
+        }
+        if self.environment.stylesheet().is_some() {
+            let states = widget.accessibility().states;
+            if states.contains(AccessibilityState::DISABLED) {
+                target = target.with_state(PseudoClass::Disabled);
+            }
+            if states.contains(AccessibilityState::CHECKED)
+                || states.contains(AccessibilityState::MIXED)
+            {
+                target = target.with_state(PseudoClass::Checked);
+            }
+            if states.contains(AccessibilityState::SELECTED) {
+                target = target.with_state(PseudoClass::Selected);
+            }
         }
         target
     }

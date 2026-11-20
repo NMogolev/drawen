@@ -290,6 +290,138 @@ fn empty_sheet_and_universal_selectors_are_valid() {
     assert_eq!(style.foreground, Some(Color::rgba8(1, 2, 3, 255)));
 }
 
+fn nested_target() -> StyleTarget {
+    let stack = StyleTarget::new("stack");
+    let card = StyleTarget::new("box")
+        .with_class("card")
+        .with_child_position(0, 2)
+        .with_parent(&stack);
+    StyleTarget::new("button")
+        .with_class("primary")
+        .with_child_position(1, 2)
+        .with_parent(&card)
+}
+
+#[test]
+fn matches_descendant_and_child_combinators() {
+    let target = nested_target();
+    let cases = [
+        ("button", true),
+        ("box button", true),
+        ("stack button", true),
+        ("stack > button", false),
+        ("box > button", true),
+        ("stack > box > button", true),
+        ("#missing button", false),
+        ("stack > box > button.primary", true),
+        ("stack > box > button.danger", false),
+        ("box .primary", true),
+    ];
+    for (source, expected) in cases {
+        let stylesheet = StyleSheet::parse(&format!("{source} {{ color: #010203; }}"))
+            .unwrap_or_else(|error| panic!("`{source}` must parse: {error}"));
+        let matched = stylesheet.resolve(&target).foreground.is_some();
+        assert_eq!(matched, expected, "selector `{source}`");
+    }
+}
+
+#[test]
+fn matches_structural_pseudo_classes() {
+    let first = StyleTarget::new("button").with_child_position(0, 3);
+    let middle = StyleTarget::new("button").with_child_position(1, 3);
+    let last = StyleTarget::new("button").with_child_position(2, 3);
+    let only = StyleTarget::new("button").with_child_position(0, 1);
+    let detached = StyleTarget::new("button");
+    let cases = [
+        (":first-child", &[true, false, false, true, false]),
+        (":last-child", &[false, false, true, true, false]),
+        (":only-child", &[false, false, false, true, false]),
+        (":nth-child(2)", &[false, true, false, false, false]),
+        (":nth-child(odd)", &[true, false, true, true, false]),
+        (":nth-child(even)", &[false, true, false, false, false]),
+        (":nth-child(2n+1)", &[true, false, true, true, false]),
+        (":nth-child(-n+2)", &[true, true, false, true, false]),
+    ];
+    for (source, expected) in cases {
+        let stylesheet = StyleSheet::parse(&format!("button{source} {{ color: #010203; }}"))
+            .unwrap_or_else(|error| panic!("`{source}` must parse: {error}"));
+        for (target, expected) in [&first, &middle, &last, &only, &detached]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                stylesheet.resolve(target).foreground.is_some(),
+                *expected,
+                "selector `{source}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn matches_negation_and_matches_any_pseudo_classes() {
+    let danger = StyleTarget::new("button").with_class("danger");
+    let primary = StyleTarget::new("button").with_class("primary");
+
+    let style = StyleSheet::parse(
+        r"
+            button:not(.danger) { color: #010101; }
+            button:is(.primary, .secondary) { background: #020202; }
+            button:not(.danger, .primary) { border-radius: 3px; }
+        ",
+    )
+    .expect("valid DSS");
+
+    assert_eq!(
+        style.resolve(&primary).foreground,
+        Some(Color::rgba8(1, 1, 1, 255))
+    );
+    assert_eq!(
+        style.resolve(&primary).background,
+        Some(Color::rgba8(2, 2, 2, 255))
+    );
+    assert_eq!(style.resolve(&primary).corner_radius, None);
+    assert_eq!(
+        style.resolve(&danger).background,
+        None,
+        ":is() must not match an unrelated class"
+    );
+}
+
+#[test]
+fn combinator_rules_keep_css_specificity_and_source_order() {
+    let target = nested_target();
+    let style = resolve(
+        r"
+            button { background: #111111; }
+            box button { background: #222222; }
+            .card .primary { background: #333333; }
+            stack > box > button.primary { background: #444444; }
+        ",
+        &target,
+    );
+    // `.card .primary` has two class components and outranks the later rule,
+    // which only has one class and three type components. Combinators do not
+    // change specificity; their compounds add to it like any other selector.
+    assert_eq!(style.background, Some(Color::rgba8(0x33, 0x33, 0x33, 255)));
+}
+
+#[test]
+fn rejects_malformed_extended_selectors() {
+    for source in [
+        "button > { color: #000; }",
+        "button:not() { color: #000; }",
+        "button:not(.a > .b) { color: #000; }",
+        "button:nth-child(foo) { color: #000; }",
+        "button:nth-child() { color: #000; }",
+        "button:unknown() { color: #000; }",
+        "box > > button { color: #000; }",
+    ] {
+        let error = StyleSheet::parse(source).expect_err(&format!("`{source}` must be rejected"));
+        assert!(!error.message().is_empty(), "`{source}` has a message");
+    }
+}
+
 #[test]
 fn random_utf8_source_never_panics() {
     const ALPHABET: &[char] = &[

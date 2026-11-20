@@ -8,7 +8,7 @@ use drawen_render::{
     FontdueTextShaper, PaintContext, TextStyle,
 };
 use drawen_ui::{LightTheme, StyleTarget, Styled, UiEnvironment, UiRuntime};
-use drawen_widgets::{Button, Checkbox, Stack, Text};
+use drawen_widgets::{Box as BoxWidget, Button, Checkbox, Stack, Text};
 
 fn environment(source: &str) -> UiEnvironment {
     UiEnvironment::from_dss(LightTheme, source).expect("valid DSS")
@@ -115,10 +115,115 @@ fn id_and_class_rules_apply_through_styled() {
         runtime.computed_style(plain).expect("plain button is live"),
         drawen_ui::DssStyle::default()
     );
+    let stack = StyleTarget::new("stack");
     let expected_target = StyleTarget::new("button")
         .with_id("save")
-        .with_class("primary");
+        .with_class("primary")
+        .with_child_position(1, 2)
+        .with_parent(&stack);
     assert_eq!(runtime.style_target(styled), Some(&expected_target));
+}
+
+#[test]
+fn descendant_and_child_selectors_follow_the_retained_tree() {
+    let mut runtime = UiRuntime::with_environment(
+        Stack::new(),
+        environment(
+            "stack > box { border-radius: 4px; } \
+             stack box button { background: #010203; } \
+             stack > button { background: #040506; } \
+             box > button:first-child { color: #070809; }",
+        ),
+    );
+    let card = runtime
+        .append_child(
+            runtime.root(),
+            Styled::new(BoxWidget::new()).with_class("card"),
+        )
+        .expect("root exists");
+    let nested = runtime
+        .append_child(card, Button::new())
+        .expect("card exists");
+    let direct = runtime
+        .append_child(runtime.root(), Button::new())
+        .expect("root exists");
+    runtime
+        .layout(Constraints::UNBOUNDED)
+        .expect("layout succeeds");
+
+    assert_eq!(
+        runtime
+            .computed_style(card)
+            .expect("card is live")
+            .corner_radius,
+        Some(4.0)
+    );
+    assert_eq!(
+        runtime
+            .computed_style(nested)
+            .expect("nested button is live")
+            .foreground,
+        Some(Color::rgba8(7, 8, 9, 255))
+    );
+    assert_eq!(
+        runtime
+            .computed_style(nested)
+            .expect("nested button is live")
+            .background,
+        Some(Color::rgba8(1, 2, 3, 255))
+    );
+    assert_eq!(
+        runtime
+            .computed_style(direct)
+            .expect("direct button is live")
+            .background,
+        Some(Color::rgba8(4, 5, 6, 255))
+    );
+    let target = runtime
+        .style_target(nested)
+        .expect("nested button has a target");
+    assert_eq!(
+        target.child_position().map(|position| position.index()),
+        Some(0)
+    );
+    assert_eq!(target.ancestors().len(), 2);
+    assert_eq!(target.ancestors()[0].type_name(), Some("box"));
+    assert_eq!(target.ancestors()[1].type_name(), Some("stack"));
+}
+
+#[test]
+fn structural_and_semantic_pseudo_classes_style_children() {
+    let mut runtime = UiRuntime::with_environment(
+        Stack::new(),
+        environment(
+            "checkbox:checked { accent-color: #102030; } \
+             checkbox:last-child { border-radius: 9px; } \
+             button:nth-child(2) { background: #0a0b0c; }",
+        ),
+    );
+    let checked = runtime
+        .append_child(runtime.root(), Checkbox::with_checked(true))
+        .expect("root exists");
+    let button = runtime
+        .append_child(runtime.root(), Button::new())
+        .expect("root exists");
+    runtime
+        .layout(Constraints::UNBOUNDED)
+        .expect("layout succeeds");
+
+    let checked_style = runtime.computed_style(checked).expect("checkbox is live");
+    assert_eq!(checked_style.accent, Some(Color::rgba8(16, 32, 48, 255)));
+    assert_eq!(
+        checked_style.corner_radius, None,
+        "the first child is not the last child"
+    );
+    assert_eq!(
+        runtime
+            .computed_style(button)
+            .expect("button is live")
+            .background,
+        Some(Color::rgba8(10, 11, 12, 255))
+    );
 }
 
 #[test]

@@ -1,26 +1,63 @@
-/// A compound DSS selector.
+/// One compound in a DSS selector complex.
 ///
-/// A selector may contain one type name, one id, any number of classes, and
-/// zero or more pseudo-classes. For example, `button.primary:hover` is a
-/// single compound selector. Combinators between nodes are deliberately not
-/// supported yet.
+/// A compound is the part between combinators, such as `button.primary` or
+/// `:not(.danger):hover`. Combinators connect compounds into a right-to-left
+/// matching chain.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Selector {
-    pub(super) is_root: bool,
+pub(super) struct CompoundSelector {
     pub(super) type_name: Option<String>,
     pub(super) id: Option<String>,
     pub(super) classes: Vec<String>,
-    pub(super) pseudo_classes: Vec<PseudoClass>,
+    pub(super) conditions: Vec<Condition>,
 }
 
-impl Selector {
-    /// Returns whether this selector matches `target`.
-    #[must_use]
-    pub fn matches(&self, target: &StyleTarget) -> bool {
-        if self.is_root != target.is_root {
+/// A simple or functional pseudo-class condition inside a compound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Condition {
+    /// A runtime interaction or semantic state.
+    State(PseudoClass),
+    /// The target is the first child of its parent.
+    FirstChild,
+    /// The target is the last child of its parent.
+    LastChild,
+    /// The target is the only child of its parent.
+    OnlyChild,
+    /// The target's one-based child position matches `An+B`.
+    NthChild(NthChild),
+    /// None of the argument compounds matches the target.
+    Not(Vec<CompoundSelector>),
+    /// At least one of the argument compounds matches the target.
+    Is(Vec<CompoundSelector>),
+}
+
+/// An `An+B` child position expression.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct NthChild {
+    a: i32,
+    b: i32,
+}
+
+impl NthChild {
+    pub(super) const fn new(a: i32, b: i32) -> Self {
+        Self { a, b }
+    }
+
+    /// Returns whether the one-based `position` satisfies `An+B`.
+    fn matches(self, position: usize) -> bool {
+        let Ok(position) = i32::try_from(position) else {
             return false;
+        };
+        if self.a == 0 {
+            return position == self.b;
         }
-        if self.is_root {
+        let difference = position - self.b;
+        difference.checked_rem(self.a) == Some(0) && difference / self.a >= 0
+    }
+}
+
+impl CompoundSelector {
+    pub(super) fn matches(&self, target: &StyleTarget) -> bool {
+        if self.is_empty() {
             return true;
         }
         if self
@@ -37,23 +74,175 @@ impl Selector {
         {
             return false;
         }
-        self.classes
+        if !self
+            .classes
             .iter()
             .all(|class| target.classes.iter().any(|candidate| candidate == class))
-            && self
-                .pseudo_classes
-                .iter()
-                .all(|state| target.states.contains(state))
+        {
+            return false;
+        }
+        self.conditions
+            .iter()
+            .all(|condition| condition.matches(target))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.type_name.is_none()
+            && self.id.is_none()
+            && self.classes.is_empty()
+            && self.conditions.is_empty()
+    }
+
+    pub(super) fn specificity(&self) -> (usize, usize, usize) {
+        let mut specificity = (
+            usize::from(self.id.is_some()),
+            self.classes.len(),
+            usize::from(self.type_name.is_some()),
+        );
+        for condition in &self.conditions {
+            match condition {
+                Condition::State(_)
+                | Condition::FirstChild
+                | Condition::LastChild
+                | Condition::OnlyChild
+                | Condition::NthChild(_) => specificity.1 += 1,
+                Condition::Not(compounds) | Condition::Is(compounds) => {
+                    let inner = compounds
+                        .iter()
+                        .map(CompoundSelector::specificity)
+                        .max()
+                        .unwrap_or_default();
+                    specificity = (
+                        specificity.0.saturating_add(inner.0),
+                        specificity.1.saturating_add(inner.1),
+                        specificity.2.saturating_add(inner.2),
+                    );
+                }
+            }
+        }
+        specificity
+    }
+}
+
+impl Condition {
+    fn matches(&self, target: &StyleTarget) -> bool {
+        match self {
+            Self::State(state) => target.states.contains(state),
+            Self::FirstChild => target.position.is_some_and(|position| position.index == 0),
+            Self::LastChild => target
+                .position
+                .is_some_and(|position| position.index + 1 == position.count),
+            Self::OnlyChild => target.position.is_some_and(|position| position.count == 1),
+            Self::NthChild(nth) => target
+                .position
+                .is_some_and(|position| nth.matches(position.index + 1)),
+            Self::Not(compounds) => !compounds.iter().any(|compound| compound.matches(target)),
+            Self::Is(compounds) => compounds.iter().any(|compound| compound.matches(target)),
+        }
+    }
+}
+
+/// A combinator between two compounds of a complex selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Combinator {
+    /// Whitespace: the left compound matches any ancestor.
+    Descendant,
+    /// `>`: the left compound matches the direct parent.
+    Child,
+}
+
+/// Position of a node among the children of its parent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ChildPosition {
+    index: usize,
+    count: usize,
+}
+
+impl ChildPosition {
+    /// Creates a zero-based child position with the number of siblings.
+    #[must_use]
+    pub const fn new(index: usize, count: usize) -> Self {
+        Self { index, count }
+    }
+
+    /// Returns the zero-based index among siblings.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.index
+    }
+
+    /// Returns the number of siblings, including this node.
+    #[must_use]
+    pub const fn count(self) -> usize {
+        self.count
+    }
+}
+
+/// A parsed DSS selector.
+///
+/// A selector is a chain of compounds joined by descendant or child
+/// combinators. The rightmost compound matches the styled node; the remaining
+/// compounds match its ancestors. For example, `toolbar > button.primary`
+/// matches a primary button whose direct parent is a toolbar.
+///
+/// The stylesheet parser normalizes selectors, so custom tooling should treat
+/// the type as an opaque matcher rather than reconstructing source text.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Selector {
+    pub(super) compounds: Vec<CompoundSelector>,
+    pub(super) combinators: Vec<Combinator>,
+    pub(super) is_root: bool,
+    pub(super) specificity: (usize, usize, usize),
+}
+
+impl Selector {
+    /// Returns whether this selector matches `target`.
+    #[must_use]
+    pub fn matches(&self, target: &StyleTarget) -> bool {
+        if self.is_root {
+            return target.is_root;
+        }
+        if target.is_root || self.compounds.is_empty() {
+            return false;
+        }
+        let Some((last, rest)) = self.compounds.split_last() else {
+            return false;
+        };
+        if !last.matches(target) {
+            return false;
+        }
+        let Some(combinators) = self.combinators.get(..self.compounds.len() - 1) else {
+            return false;
+        };
+        let mut ancestors = target.ancestors().iter();
+        for (index, combinator) in combinators.iter().enumerate().rev() {
+            let compound = &rest[index];
+            match combinator {
+                Combinator::Child => {
+                    let Some(ancestor) = ancestors.next() else {
+                        return false;
+                    };
+                    if !compound.matches(ancestor) {
+                        return false;
+                    }
+                }
+                Combinator::Descendant => {
+                    if !ancestors
+                        .by_ref()
+                        .any(|ancestor| compound.matches(ancestor))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Returns the selector specificity as `(ids, classes_and_states, types)`.
     #[must_use]
-    pub fn specificity(&self) -> (usize, usize, usize) {
-        (
-            usize::from(self.id.is_some()),
-            self.classes.len() + self.pseudo_classes.len() + usize::from(self.is_root),
-            usize::from(self.type_name.is_some()),
-        )
+    pub const fn specificity(&self) -> (usize, usize, usize) {
+        self.specificity
     }
 }
 
@@ -69,6 +258,9 @@ pub struct StyleTarget {
     pub(super) id: Option<String>,
     pub(super) classes: Vec<String>,
     pub(super) states: Vec<PseudoClass>,
+    pub(super) position: Option<ChildPosition>,
+    /// Nearest ancestor first.
+    pub(super) ancestors: Vec<StyleTarget>,
 }
 
 impl StyleTarget {
@@ -94,6 +286,8 @@ impl StyleTarget {
             id: None,
             classes: Vec::new(),
             states: Vec::new(),
+            position: None,
+            ancestors: Vec::new(),
         }
     }
 
@@ -127,6 +321,22 @@ impl StyleTarget {
         &self.states
     }
 
+    /// Returns the target's position among its siblings, if the target belongs
+    /// to a retained tree.
+    #[must_use]
+    pub const fn child_position(&self) -> Option<ChildPosition> {
+        self.position
+    }
+
+    /// Returns the nearest-first ancestor metadata usable by combinators.
+    ///
+    /// Ancestor entries are shallow: they describe the ancestor itself and do
+    /// not repeat their own ancestry.
+    #[must_use]
+    pub fn ancestors(&self) -> &[Self] {
+        &self.ancestors
+    }
+
     /// Replaces the target's type name.
     #[must_use]
     pub fn with_type_name(mut self, type_name: impl Into<String>) -> Self {
@@ -143,6 +353,8 @@ impl StyleTarget {
             id: None,
             classes: Vec::new(),
             states: Vec::new(),
+            position: None,
+            ancestors: Vec::new(),
         }
     }
 
@@ -171,9 +383,31 @@ impl StyleTarget {
         }
         self
     }
+
+    /// Records the target's zero-based position and sibling count.
+    #[must_use]
+    pub const fn with_child_position(mut self, index: usize, count: usize) -> Self {
+        self.position = Some(ChildPosition::new(index, count));
+        self
+    }
+
+    /// Prepends `parent` to this target's ancestor chain.
+    ///
+    /// Retained runtimes call this while walking the tree so descendant and
+    /// child selectors can match. The parent's own ancestry is copied, and the
+    /// stored record is shallow, so chains grow linearly with tree depth.
+    #[must_use]
+    pub fn with_parent(mut self, parent: &Self) -> Self {
+        let mut record = parent.clone();
+        record.ancestors = Vec::new();
+        self.ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
+        self.ancestors.push(record);
+        self.ancestors.extend(parent.ancestors.iter().cloned());
+        self
+    }
 }
 
-/// Interaction state supported by DSS pseudo-class selectors.
+/// Interaction and semantic state supported by DSS pseudo-class selectors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PseudoClass {
     /// The pointer is over the target.
@@ -184,4 +418,23 @@ pub enum PseudoClass {
     Focus,
     /// The target cannot be interacted with.
     Disabled,
+    /// The target is a checked toggle or mixed checkbox.
+    Checked,
+    /// The target is selected inside a list, tab bar, or similar container.
+    Selected,
+}
+
+impl PseudoClass {
+    /// Returns the canonical `:` name used in selectors and diagnostics.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Hover => "hover",
+            Self::Pressed => "pressed",
+            Self::Focus => "focus",
+            Self::Disabled => "disabled",
+            Self::Checked => "checked",
+            Self::Selected => "selected",
+        }
+    }
 }
