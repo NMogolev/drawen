@@ -27,11 +27,12 @@ use variables::CustomProperties;
 
 /// A parsed DSS stylesheet.
 ///
-/// DSS uses a deliberately small CSS-compatible subset for UI styling. The
-/// first version supports type, id, class, and state selectors; the `:root`
-/// rule; and typed visual properties. It does not yet support descendant
-/// selectors, variables, or layout properties whose ownership belongs to a
-/// parent widget.
+/// DSS uses a deliberately small CSS-compatible subset for UI styling. It
+/// supports type, id, class, and state selectors; descendant and child
+/// combinators; structural pseudo-classes; `:not()`/`:is()`; custom properties
+/// with `var()`; `calc()`; `!important`; the `:root` rule; typed visual
+/// properties; and size properties that the runtime folds into the constraints
+/// it offers a child.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StyleSheet {
     rules: Vec<StyleRule>,
