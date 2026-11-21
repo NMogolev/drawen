@@ -338,9 +338,10 @@ player. The limits that surprise new applications most often:
 **UI and styling**
 
 - DSS is a deliberately small typed subset: type, id, class, and state
-  selectors. There are no descendant or sibling combinators, variables,
-  `calc()`, media queries, keyframes, animations, or full browser-CSS
-  compatibility. Surface properties do not inherit.
+  selectors, descendant and child combinators, structural pseudo-classes,
+  `var()`, `calc()`, and `!important`. There are no sibling combinators, media
+  queries, keyframes, animations, or full browser-CSS compatibility. Surface
+  properties do not inherit.
 - There is no HTML/CSS DOM or browser layout engine. `drawen-browser` is a
   shared-texture surface and hand-off contract; the actual Servo adapter is
   supplied by the application.
@@ -424,8 +425,8 @@ The short version:
   and `UiRuntime::next_frame_in`.
 - Copy the event-loop shape from `minimal_window` or `stateful_app`. Do not
   invent a second event loop, a React-style hook system, or a virtual DOM.
-- `Button::new()` takes no label; append a `Text` child. DSS has no descendant
-  selectors or animations.
+- `Button::new()` takes no label; append a `Text` child. DSS has no sibling
+  combinators or animations.
 
 The full checklist and a prompt template are in
 [`docs/AI_GUIDE.md`](https://github.com/NMogolev/drawen/blob/main/docs/AI_GUIDE.md).

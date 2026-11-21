@@ -39,7 +39,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `text.set_text("...")` | Rebuild the label from application state, or use `TextField::set_text` for editable text |
 | React hooks, `use_state`, virtual DOM | Plain Rust state; retained widgets are updated explicitly |
 | `Widget::new().build()` | Widgets are values appended with `UiRuntime::append_child` |
-| CSS descendant selectors, animations | DSS compound selectors and typed properties only |
+| CSS sibling selectors, animations | DSS combinators, structural states, and typed properties only |
 | `signal.connect` from any thread | `Signal::subscribe` on the UI thread, returns `drop`-based `Subscription` |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
@@ -97,8 +97,8 @@ adapter wakes the loop through `WindowApplication::attach_waker`),
 Use `UiEnvironment::from_dss(theme, source)` and
 `UiRuntime::with_environment`. Attach identity with
 `Styled::new(widget).with_id(...)` and `.with_class(...)`. The runtime adds
-`:hover` and `:focus`. DSS is not full CSS: no descendant/sibling combinators,
-variables, `calc()`, media queries, keyframes, or animations. See
+`:hover` and `:focus`. DSS is not full CSS: no sibling combinators, media
+queries, keyframes, or animations. See
 [RECIPES.md](RECIPES.md#4-a-stylesheet-with-dss) and [DSS.md](DSS.md).
 
 ### "Play this MP4 and turn on the sound."
@@ -156,7 +156,7 @@ paint to a `DisplayList`, and let `WindowApplication` return `WindowAction`s.
 `Button::new()` takes no label: append a `Text` child. Signals use
 `.subscribe(...)` and the returned `Subscription` must be kept alive. State is
 plain Rust (`Rc<RefCell<_>>`); after a state change call `invalidate_paint()` and
-return `WindowAction::RequestRedraw`. DSS has no descendant selectors,
+return `WindowAction::RequestRedraw`. DSS has no sibling combinators,
 animations, or full browser CSS.
 
 Copy the event loop and media policy from:

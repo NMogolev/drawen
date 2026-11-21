@@ -16,8 +16,9 @@ Non-negotiables:
 - `Button::new()` takes no label. Append a `Text` child.
 - State is plain Rust. On a state change, invalidate paint and return
   `WindowAction::RequestRedraw`; invalidate layout only when geometry changes.
-- DSS is a typed subset: compound type/id/class/state selectors only. No
-  descendant selectors, animations, or full browser CSS.
+- DSS is a typed subset: type/id/class/state selectors, descendant and child
+  combinators, structural pseudo-classes, `var()`/`calc()`, and `!important`.
+  No sibling combinators, animations, or full browser CSS.
 - Media backends are explicit: `Video::open_paleo` (H.264, no audio),
   `Video::open_paleo_audio` (feature `audio`), `Video::open` (external FFmpeg,
   no audio). Background playback after the last window closes requires

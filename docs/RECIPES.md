@@ -203,17 +203,23 @@ runtime.append_child(
 
 What DSS supports:
 
-- compound type, id, class, and state selectors (`button`, `#save`,
-  `.primary`, `:hover`, `:pressed`, `:focus`, `:disabled`, `:root`);
+- type, id, class, and state selectors (`button`, `#save`, `.primary`,
+  `:hover`, `:pressed`, `:focus`, `:disabled`, `:root`);
+- descendant and child combinators (`toolbar button`, `toolbar > button`);
+- structural pseudo-classes (`:first-child`, `:last-child`, `:only-child`,
+  `:nth-child(2n+1)`) and `:not()`/`:is()`;
 - `background`, `color`, `accent-color`, `border`, `padding`, `gap`,
-  `font-family`, `font-size`, `font-weight`, `font-style`, `border-radius`;
+  `font-family`, `font-size`, `font-weight`, `font-style`, `border-radius`,
+  `width`, `height`, `min-*`, and `max-*`;
+- custom properties with `var()`, `calc()`, `!important`, and the CSS Color
+  Level 4 palette including `hsl()`;
 - CSS specificity and source order;
 - inheritance for text properties and `accent-color`.
 
-What it does not support: descendant or sibling combinators, variables,
-`calc()`, percentages, media queries, keyframes, animations, or full browser
-CSS. The runtime owns `:hover` and `:focus` and adds those states to the node's
-target automatically. See [DSS.md](DSS.md).
+What it does not support: sibling combinators, percentages, media queries,
+keyframes, animations, or full browser CSS. The runtime owns `:hover` and
+`:focus` and adds those states to the node's target automatically. See
+[DSS.md](DSS.md).
 
 ## 5. Scrolling and virtual lists
 

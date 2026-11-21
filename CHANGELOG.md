@@ -6,6 +6,23 @@ in the headings because the version itself must stay valid semver; see
 
 ## Unreleased
 
+### Drawen Style Sheets
+
+- DSS selectors now form a complex chain: descendant and child combinators,
+  `:first-child`, `:last-child`, `:only-child`, `:nth-child(An+B)`, `:not(...)`,
+  and `:is(...)`. The runtime records nearest-first ancestors and child positions
+  during the style pass to match them.
+- Accessibility flags mirror into selectors: `disabled`, `checked`/`mixed`, and
+  `selected` resolve as `:disabled`, `:checked`, and `:selected`.
+- Custom properties (`--token`) and `var()` bring nested fallbacks and cycle
+  detection. `calc()` evaluates `px` lengths and unitless numbers.
+- Colors accept the CSS Color Level 4 name table plus `hsl()`/`hsla()` and the
+  modern space-separated `rgb()`/`hsl()` syntax with `/ alpha`.
+- `!important` declarations form a second cascade layer applied after all normal
+  declarations.
+- `width`, `height`, `min-*`, and `max-*` bound a node by clamping the
+  constraints its parent offers. Minimums win over maximums.
+
 ### Window presentation
 
 - Added `WindowPresentation`, a normalized snapshot of the visible, focused,
