@@ -14,12 +14,13 @@ use std::{
 };
 
 use drawen::{
-    Alert, AlertTone, Avatar, AvatarStatus, Badge, BadgeTone, Button, Checkbox, ChildLayout, Color,
-    Constraints, Divider, DockArea, DockAxis, Dropdown, Expander, Image, Insets, LayoutContext,
-    LayoutNode, LayoutResult, ListView, MenuBar, PanelId, Point, ProgressBar, RadioButton,
-    RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner, SplitAxis,
-    Splitter, Subscription, Switch, TabBar, TextEdit, TextField, Theme, Toolbar, UiEnvironment,
-    UiRuntime, Widget, WorkspaceLayout,
+    Alert, AlertTone, AudioPlayer, AudioPlayerLayout, Avatar, AvatarStatus, Badge, BadgeTone,
+    Box as DrawenBox, Button, Checkbox, ChildLayout, Color, Constraints, Divider, DockArea,
+    DockAxis, Dropdown, Expander, Image, Insets, LayoutContext, LayoutNode, LayoutResult, ListView,
+    MenuBar, PanelId, PlayerBehavior, PlayerTheme, Point, ProgressBar, RadioButton, RadioGroup,
+    Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner, SplitAxis, Splitter,
+    Styled, Subscription, Switch, TabBar, Text, TextEdit, TextField, Theme, Toolbar, UiEnvironment,
+    UiRuntime, Video, VideoControls, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, PaintContext, RasterImage, TextLayout, TextStyle},
 };
@@ -34,6 +35,32 @@ const STATUS_HEIGHT: f32 = 28.0;
 const PAGE_PADDING: f32 = 24.0;
 const BASE_FONT_SIZE: f32 = 14.0;
 const BASE_SPACING: f32 = 8.0;
+
+/// Scoped DSS rules used by the dedicated stylesheet page. They deliberately
+/// target only `.dss-sample`, leaving the semantic-theme laboratory untouched.
+const SHOWCASE_DSS: &str = r#"
+    :root {
+        --sample-space: 10px;
+        --sample-radius: 12px;
+        --sample-accent: hsl(168 76% 52%);
+    }
+
+    box.dss-sample {
+        background: rgb(12 24 44 / 0.92);
+        border: calc(var(--sample-space) / 5) solid var(--sample-accent);
+        border-radius: var(--sample-radius);
+        padding: calc(var(--sample-space) * 1.5);
+    }
+
+    .dss-sample > box { padding: var(--sample-space); }
+    .dss-sample button { background: steelblue; padding: 7px calc(var(--sample-space) * 1.5); }
+    .dss-sample button:not(.emphasis) { border: 1px solid rgb(255 255 255 / 0.28); }
+    .dss-sample button:nth-child(2) { background: hsl(38 92% 52%); }
+    .dss-sample button:is(.emphasis, :last-child) { border-radius: calc(var(--sample-radius) * 1.5); }
+    .dss-sample button:last-child { background: rebeccapurple !important; }
+    .dss-sample checkbox:checked { accent-color: var(--sample-accent); }
+    .dss-sample text { color: white; font-size: calc(12px + 2px); }
+"#;
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
     if std::env::args().any(|argument| argument == "--snapshot") {
@@ -52,6 +79,7 @@ fn write_snapshots() {
         "appearance",
         "layout",
         "workspace",
+        "dss",
     ]
     .iter()
     .enumerate()
@@ -419,7 +447,22 @@ struct StyleShowcase {
     size: Size,
     appearance: Rc<RefCell<Appearance>>,
     dirty: Rc<Cell<bool>>,
+    media_import_requested: Rc<Cell<Option<MediaImport>>>,
+    #[cfg(feature = "audio")]
+    media_preview_frame: drawen::WidgetId,
+    #[cfg(feature = "audio")]
+    media_preview: drawen::WidgetId,
+    #[cfg(feature = "audio")]
+    audio_preview_parent: drawen::WidgetId,
+    #[cfg(feature = "audio")]
+    audio_preview: drawen::WidgetId,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy)]
+enum MediaImport {
+    Video,
+    Audio,
 }
 
 impl StyleShowcase {
@@ -427,9 +470,14 @@ impl StyleShowcase {
         let size = valid_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         let appearance = Rc::new(RefCell::new(Appearance::default()));
         let dirty = Rc::new(Cell::new(false));
-        let mut environment = UiEnvironment::new(ShowcaseTheme {
-            appearance: Rc::clone(&appearance),
-        });
+        let media_import_requested = Rc::new(Cell::new(None));
+        let mut environment = UiEnvironment::from_dss(
+            ShowcaseTheme {
+                appearance: Rc::clone(&appearance),
+            },
+            SHOWCASE_DSS,
+        )
+        .expect("showcase DSS is valid");
         environment.use_system_fallback_fonts();
         environment.set_animations_enabled(appearance.borrow().animations);
         let mut runtime = UiRuntime::with_environment(ShowcaseShell, environment);
@@ -466,8 +514,9 @@ impl StyleShowcase {
             "Appearance",
             "Layout",
             "Workspace",
+            "DSS",
         ]);
-        tabs.set_selected(Some(selected_tab.min(4)));
+        tabs.set_selected(Some(selected_tab.min(5)));
         subscriptions.push(
             tabs.changed()
                 .subscribe(|index| println!("TabBar: opened page {}.", index + 1)),
@@ -477,10 +526,21 @@ impl StyleShowcase {
             .expect("showcase root exists");
 
         append_overview_page(&mut runtime, &appearance, tabs);
-        append_components_page(&mut runtime, &mut subscriptions, tabs);
+        let media_previews = append_components_page(
+            &mut runtime,
+            &mut subscriptions,
+            &media_import_requested,
+            tabs,
+        );
+        #[cfg(feature = "audio")]
+        let (media_preview_frame, media_preview, audio_preview_parent, audio_preview) =
+            media_previews;
+        #[cfg(not(feature = "audio"))]
+        let _ = media_previews;
         append_appearance_page(&mut runtime, &mut subscriptions, &appearance, &dirty, tabs);
         append_layout_page(&mut runtime, tabs);
         append_workspace_page(&mut runtime, tabs);
+        append_dss_page(&mut runtime, tabs);
 
         runtime
             .append_child(root, StatusBar::new(Rc::clone(&appearance)))
@@ -491,6 +551,15 @@ impl StyleShowcase {
             size,
             appearance,
             dirty,
+            media_import_requested,
+            #[cfg(feature = "audio")]
+            media_preview_frame,
+            #[cfg(feature = "audio")]
+            media_preview,
+            #[cfg(feature = "audio")]
+            audio_preview_parent,
+            #[cfg(feature = "audio")]
+            audio_preview,
             _subscriptions: subscriptions,
         };
         app.layout(size);
@@ -502,6 +571,65 @@ impl StyleShowcase {
         if let Ok(constraints) = Constraints::tight(size) {
             let _ = self.runtime.layout(constraints);
         }
+    }
+
+    #[cfg(feature = "audio")]
+    fn import_media(&mut self, import: MediaImport) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(match import {
+                MediaImport::Video => "Import video with audio into Drawen Style Lab",
+                MediaImport::Audio => "Import audio into Drawen Style Lab",
+            })
+            .add_filter(
+                match import {
+                    MediaImport::Video => "Video",
+                    MediaImport::Audio => "Audio",
+                },
+                match import {
+                    MediaImport::Video => &["mp4", "mkv", "webm", "mov", "avi"][..],
+                    MediaImport::Audio => &["mp3", "flac", "wav", "ogg", "m4a", "aac"][..],
+                },
+            )
+            .pick_file()
+        else {
+            return;
+        };
+
+        match import {
+            MediaImport::Video => match Video::open_paleo_audio(&path) {
+                Ok(video) => {
+                    self.runtime
+                        .remove_subtree(self.media_preview)
+                        .expect("media preview remains in the showcase tree");
+                    self.media_preview = self
+                        .runtime
+                        .append_child(self.media_preview_frame, video)
+                        .expect("media preview frame remains in the showcase tree");
+                    self.runtime.invalidate_layout();
+                }
+                Err(error) => eprintln!("Could not open {}: {error}", path.display()),
+            },
+            MediaImport::Audio => match AudioPlayer::open(&path) {
+                Ok(player) => {
+                    self.runtime
+                        .remove_subtree(self.audio_preview)
+                        .expect("audio preview remains in the showcase tree");
+                    self.audio_preview = self
+                        .runtime
+                        .append_child(self.audio_preview_parent, player)
+                        .expect("media card remains in the showcase tree");
+                    self.runtime.invalidate_layout();
+                }
+                Err(error) => eprintln!("Could not open {}: {error}", path.display()),
+            },
+        }
+    }
+
+    #[cfg(not(feature = "audio"))]
+    fn import_media(&mut self, _: MediaImport) {
+        eprintln!(
+            "Audio playback is disabled. Run `cargo run -p drawen --example style_showcase --features audio`."
+        );
     }
 }
 
@@ -519,6 +647,9 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                if let Some(import) = self.media_import_requested.replace(None) {
+                    self.import_media(import);
+                }
                 if self.dirty.replace(false) {
                     let animations = self.appearance.borrow().animations;
                     self.runtime
@@ -1525,7 +1656,13 @@ fn append_overview_page(
 fn append_components_page(
     runtime: &mut UiRuntime,
     subscriptions: &mut Vec<Subscription>,
+    media_import_requested: &Rc<Cell<Option<MediaImport>>>,
     tabs: drawen::WidgetId,
+) -> (
+    drawen::WidgetId,
+    drawen::WidgetId,
+    drawen::WidgetId,
+    drawen::WidgetId,
 ) {
     let stack = append_scroll_page(runtime, tabs);
 
@@ -1761,6 +1898,88 @@ fn append_components_page(
             .expect("alert card exists");
     }
 
+    let media_card = append_card(
+        runtime,
+        stack,
+        "Media players",
+        "Video and AudioPlayer expose configurable native controls. These previews use local frames and manual clocks, so they need no decoder or external media file.",
+    );
+    let video_frame = runtime
+        .append_child(media_card, FixedHeight::new(210.0))
+        .expect("media card exists");
+    let media_preview = runtime
+        .append_child(
+            video_frame,
+            Video::with_frame(drawen_logo())
+                .with_title("Drawen release overview")
+                .with_subtitle("Manual frame · configurable overlay")
+                .with_duration(Duration::from_secs(215))
+                .with_position(Duration::from_secs(74))
+                .with_control_set(VideoControls::minimal())
+                .with_behavior(PlayerBehavior::new().with_auto_hide(None))
+                .with_theme(PlayerTheme::new().with_accent(Color::rgba8(94, 234, 212, 255))),
+        )
+        .expect("video frame exists");
+    let import_video = Button::new();
+    subscriptions.push(import_video.activated().subscribe({
+        let media_import_requested = Rc::clone(media_import_requested);
+        move |()| media_import_requested.set(Some(MediaImport::Video))
+    }));
+    let import_video = runtime
+        .append_child(media_card, import_video)
+        .expect("media card exists");
+    append_label(
+        runtime,
+        import_video,
+        "Import video with audio…",
+        0.96,
+        TextTone::Primary,
+    );
+    append_label(
+        runtime,
+        media_card,
+        "Run with `--features audio` to play the chosen video's audio track. The video player then follows the audio-mastered clock.",
+        0.86,
+        TextTone::Muted,
+    );
+    let audio_preview = runtime
+        .append_child(
+            media_card,
+            AudioPlayer::new()
+                .with_title("Night drive")
+                .with_subtitle("AudioPlayer · inline layout")
+                .with_duration(Duration::from_secs(214))
+                .with_position(Duration::from_secs(86))
+                .with_volume(0.7)
+                .with_cover(drawen_logo()),
+        )
+        .expect("media card exists");
+    let import_audio = Button::new();
+    subscriptions.push(import_audio.activated().subscribe({
+        let media_import_requested = Rc::clone(media_import_requested);
+        move |()| media_import_requested.set(Some(MediaImport::Audio))
+    }));
+    let import_audio = runtime
+        .append_child(media_card, import_audio)
+        .expect("media card exists");
+    append_label(
+        runtime,
+        import_audio,
+        "Import audio…",
+        0.96,
+        TextTone::Primary,
+    );
+    runtime
+        .append_child(
+            media_card,
+            AudioPlayer::new()
+                .with_title("Compact queue item")
+                .with_duration(Duration::from_secs(182))
+                .with_position(Duration::from_secs(35))
+                .with_layout(AudioPlayerLayout::Compact),
+        )
+        .expect("media card exists");
+
     let expander_card = append_card(
         runtime,
         stack,
@@ -1790,6 +2009,7 @@ fn append_components_page(
         0.92,
         TextTone::Muted,
     );
+    (video_frame, media_preview, media_card, audio_preview)
 }
 
 // ---------------------------------------------------------------------------
@@ -1961,6 +2181,94 @@ fn append_appearance_page(
 // ---------------------------------------------------------------------------
 // Page content: layout
 // ---------------------------------------------------------------------------
+
+fn append_dss_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    let card = append_card(
+        runtime,
+        stack,
+        "Drawen Style Sheets",
+        "This isolated sample is styled by SHOWCASE_DSS. The rest of the lab continues to use the live semantic theme, so the two styling layers stay easy to compare.",
+    );
+    append_label(
+        runtime,
+        card,
+        "Custom properties · calc() · modern rgb()/hsl() · descendant and child combinators · structural and semantic states · !important",
+        0.9,
+        TextTone::Muted,
+    );
+
+    let sample = runtime
+        .append_child(card, Styled::new(DrawenBox::new()).with_class("dss-sample"))
+        .expect("DSS card exists");
+    let direct_child = runtime
+        .append_child(sample, DrawenBox::new())
+        .expect("DSS sample exists");
+    let controls = runtime
+        .append_child(direct_child, VStack::new(8.0))
+        .expect("DSS direct child exists");
+    let buttons = runtime
+        .append_child(controls, VStack::new(8.0))
+        .expect("DSS controls exist");
+
+    append_dss_button(runtime, buttons, "First child: :not(.emphasis)", None);
+    append_dss_button(
+        runtime,
+        buttons,
+        "Second child: :nth-child(2) + :is(.emphasis)",
+        Some("emphasis"),
+    );
+    append_dss_button(runtime, buttons, "Last child: !important wins", None);
+
+    let checkbox = runtime
+        .append_child(controls, Checkbox::with_checked(true))
+        .expect("DSS controls exist");
+    runtime
+        .append_child(
+            checkbox,
+            Text::styled(
+                "Toggle me: checkbox:checked changes the accent",
+                TextStyle::new(BASE_FONT_SIZE, Color::WHITE),
+            ),
+        )
+        .expect("DSS checkbox exists");
+
+    let explanation = append_card(
+        runtime,
+        stack,
+        "What to inspect",
+        "The outer panel obtains its background, border, radius, and padding from `box.dss-sample`. Its direct child demonstrates `>`. The buttons are descendants: the middle rule wins through :nth-child and :is(), while the final purple background wins because it is !important. Toggle the checkbox to observe the semantic :checked selector.",
+    );
+    append_label(
+        runtime,
+        explanation,
+        "All custom properties are global stylesheet tokens by design; undefined tokens and invalid expressions fail when parsing the sheet rather than being ignored at paint time.",
+        0.9,
+        TextTone::Muted,
+    );
+}
+
+fn append_dss_button(
+    runtime: &mut UiRuntime,
+    parent: drawen::WidgetId,
+    label: &str,
+    class: Option<&str>,
+) {
+    let button = match class {
+        Some(class) => Styled::new(Button::new()).with_class(class),
+        None => Styled::new(Button::new()),
+    };
+    let button = runtime
+        .append_child(parent, button)
+        .expect("DSS controls exist");
+    runtime
+        .append_child(
+            button,
+            Text::styled(label, TextStyle::new(BASE_FONT_SIZE, Color::WHITE)),
+        )
+        .expect("DSS button exists");
+}
 
 fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
     let stack = append_scroll_page(runtime, tabs);

@@ -382,6 +382,7 @@ cargo run -p drawen --example minimal_window
 cargo run -p drawen --example stateful_app
 cargo run -p drawen --example hello_drawen
 cargo run -p drawen --example style_showcase
+cargo run -p drawen --example style_showcase --features audio
 cargo run -p drawen --example workspace
 cargo run -p drawen --example calculator
 cargo run -p drawen --example custom_titlebar
@@ -391,6 +392,9 @@ cargo run -p drawen --example custom_titlebar
 `minimal_window`, `stateful_app`, `hello_drawen`, `calculator`, and
 `custom_titlebar` use the native `winit` adapter. `workspace` demonstrates
 docking, tabs, floating panels, and persisted layout data.
+
+The `audio` invocation enables the Style Lab's local video-with-audio and audio
+file import controls.
 
 ## Documentation
 
