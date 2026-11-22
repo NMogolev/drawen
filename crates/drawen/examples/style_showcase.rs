@@ -430,6 +430,7 @@ impl StyleShowcase {
         let mut environment = UiEnvironment::new(ShowcaseTheme {
             appearance: Rc::clone(&appearance),
         });
+        environment.use_system_fallback_fonts();
         environment.set_animations_enabled(appearance.borrow().animations);
         let mut runtime = UiRuntime::with_environment(ShowcaseShell, environment);
         let root = runtime.root();
@@ -1532,7 +1533,7 @@ fn append_components_page(
         runtime,
         stack,
         "Text",
-        "Single-line and multiline editing. Type in English or Russian — the platform forwards the layout through KeyEvent::text.",
+        "Single-line and multiline editing. Type in any language — missing scripts fall back to the system fonts.",
     );
     let field = TextField::with_text("Hello, Drawen! Edit this text.");
     subscriptions.push(
@@ -1550,7 +1551,7 @@ fn append_components_page(
     );
 
     let editor = TextEdit::with_text(
-        "This is a multiline TextEdit.\nCheck line wrapping, selection, and scrolling.\nEnglish text: The quick brown fox jumps over the lazy dog.\nUnicode text: Ελληνικά · 日本語 · العربية.",
+        "This is a multiline TextEdit.\nCheck line wrapping, selection, and scrolling.\nEnglish text: The quick brown fox jumps over the lazy dog.\nUnicode text: Ελληνικά · 日本語 · العربية · हिन्दी · 한국어.",
     );
     subscriptions.push(
         editor

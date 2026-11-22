@@ -6,6 +6,28 @@ in the headings because the version itself must stay valid semver; see
 
 ## Unreleased
 
+### Fonts
+
+- `FontDatabase::discover_system_fallbacks()` keeps a lazy index of installed
+  fonts. When a registered face lacks a character, the shaper parses candidates
+  on demand, ranked by script group (Han, kana, Hangul, Arabic, Hebrew, Indic,
+  Thai, emoji, or the generic Latin stack) and then by style and weight. At most
+  24 lazily parsed faces and one coverage answer per character are retained.
+- Added `FontdueTextShaper::multilingual()`, which combines Drawen's bundled
+  Ubuntu Light face with that system fallback. Latin, Greek, and Cyrillic keep
+  the deterministic bundled typography; other scripts resolve from the platform.
+- `UiEnvironment::use_system_fallback_fonts()` installs that shaper on an
+  existing runtime. The default environment stays bundled-only so headless tests
+  do not depend on installed fonts.
+- Faces inside font collections (`.ttc`) are now addressable through
+  `FontFace::index()`, `FontFace::from_bytes_with_index()`, and
+  `FontDatabase::add_font_with_index()`. Shaping and rasterization pass the
+  collection index through instead of assuming face zero.
+- Grapheme fallback now requires a face to cover the whole cluster, not just its
+  first character, so combining marks and emoji sequences are not split across
+  fonts. Controls, variation selectors, and other default-ignorable characters
+  are excluded from the coverage check.
+
 ### Drawen Style Sheets
 
 - DSS selectors now form a complex chain: descendant and child combinators,

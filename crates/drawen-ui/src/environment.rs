@@ -237,6 +237,17 @@ impl UiEnvironment {
         self.text_shaper_generation = self.text_shaper_generation.saturating_add(1);
     }
 
+    /// Installs Drawen's bundled face with lazy system font fallback.
+    ///
+    /// The bundled face keeps deterministic typography for Latin, Greek, and
+    /// Cyrillic. Characters outside its coverage are resolved from the
+    /// operating system's installed fonts on demand. Use this for
+    /// user-supplied text that may contain any script; the default environment
+    /// remains bundled-only so headless tests do not depend on installed fonts.
+    pub fn use_system_fallback_fonts(&mut self) {
+        self.set_text_shaper(FontdueTextShaper::multilingual());
+    }
+
     /// Returns the locale requested by the application.
     #[must_use]
     pub fn locale(&self) -> &str {

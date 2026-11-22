@@ -96,7 +96,9 @@ the face exactly.
 
 `FontDatabase::load_system_fonts()` scans the platform's standard font
 directories through `fontdb`; `discover_system_fonts()` adds those faces to an
-existing database while preserving its default. This is the portable
+existing database while preserving its default. Both register every face of a
+font collection with its collection index, so `.ttc` families work with the
+same shaping and rasterization path as single-face files. This is the portable
 enumeration path: it does not depend on `winit`, and applications can still
 prefer Drawen's deterministic bundled face with `set_default_face`.
 
@@ -106,6 +108,63 @@ use drawen::FontDatabase;
 let database = FontDatabase::load_system_fonts();
 assert!(!database.faces().is_empty());
 ```
+
+### Lazy multilingual fallback
+
+Loading every installed font is wasteful when most text uses one family.
+`discover_system_fallbacks()` records the installed faces but defers opening
+and parsing their files. When the shaper encounters a character that no
+registered face covers, the database ranks the installed candidates and parses
+only until it finds one with that character.
+
+Candidates are ranked by script group first — Han, Japanese kana, Hangul,
+Arabic, Hebrew, Indic scripts, Thai, emoji, or the generic Latin stack — and then
+by style and weight distance. A Japanese character therefore reaches
+`Microsoft YaHei`, `PingFang SC`, or `Noto Sans CJK` without parsing unrelated
+Latin faces. The database caches at most 24 lazily parsed faces and one
+coverage answer per character. Registered faces and the default face are never
+changed.
+
+```rust
+use drawen::render::{FontdueTextShaper, TextStyle};
+use drawen::Color;
+
+// Ubuntu Light for Latin, Greek, and Cyrillic; system fonts for everything else.
+let shaper = FontdueTextShaper::multilingual();
+let layout = shaper.layout(
+    "Ελληνικά · 日本語 · العربية · हिन्दी",
+    &TextStyle::new(16.0, Color::BLACK),
+    None,
+);
+```
+
+`FontdueTextShaper::multilingual()` enables this fallback on top of the bundled
+face. For a custom base font, enable it on the database before constructing the
+shaper:
+
+```rust
+use drawen::{FontDatabase, FontdueTextShaper};
+
+let mut database = FontDatabase::bundled();
+database.discover_system_fallbacks();
+let shaper = FontdueTextShaper::from_database(database);
+```
+
+`FontDatabase::fallback_face(character, weight, style)` exposes the same lazy
+lookup directly, and `resolve_for_text(font, text)` returns the request's faces
+plus fallback faces for the characters that actually occur in `text`.
+
+An existing environment can opt in without rebuilding its shaper:
+
+```rust
+use drawen::{LightTheme, UiEnvironment};
+
+let mut environment = UiEnvironment::new(LightTheme);
+environment.use_system_fallback_fonts();
+```
+
+The default environment remains bundled-only so headless tests and snapshots do
+not depend on which fonts happen to be installed.
 
 ## Shaping
 
@@ -141,12 +200,17 @@ exactly which font produced the output.
 HarfRust performs complex OpenType shaping: kerning, ligatures, contextual
 substitutions, mark positioning, and script-specific behavior. The shaper
 splits paragraphs into bidirectional visual runs, shapes each run with the
-appropriate direction, applies per-grapheme fallback across registered faces,
-wraps at grapheme boundaries, and exposes caret, hit-testing, line, and selection
-geometry through `TextLayout` (`caret_x`, `caret_rect`, `byte_at_point`,
-`line_at`, `line_at_y`, `line_ranges`, and `selection_rects`). The bounded
-layout cache reports hits, misses, and evictions through
-`TextShaper::cache_stats()` for frame diagnostics.
+appropriate direction, applies per-grapheme fallback across registered and
+lazily discovered system faces, wraps at grapheme boundaries, and exposes caret,
+hit-testing, line, and selection geometry through `TextLayout` (`caret_x`,
+`caret_rect`, `byte_at_point`, `line_at`, `line_at_y`, `line_ranges`, and
+`selection_rects`). The bounded layout cache reports hits, misses, and
+evictions through `TextShaper::cache_stats()` for frame diagnostics.
+
+Fallback selects a face for the whole grapheme cluster rather than for its first
+character, so combining marks and emoji sequences are not split across fonts.
+Format controls, variation selectors, and other default-ignorable characters do
+not participate in coverage checks.
 
 To install a custom database, build the shaper and give it to the environment:
 
@@ -216,9 +280,11 @@ See [`DSS.md`](DSS.md#supported-properties) for the accepted value grammar.
 ## Current limits
 
 The shaper performs complex OpenType shaping, bidirectional reordering,
-grapheme-aware fallback, newlines, width wrapping, and system font enumeration.
-It does not implement vertical writing modes, synthetic bold or oblique, color
-fonts, or font matching by script metadata; fallback is coverage-driven per
-grapheme. Paragraph and line breaking use a grapheme/whitespace heuristic rather
+grapheme-aware fallback, newlines, width wrapping, eager system font
+enumeration, and lazy system fallback ranked by script. It does not implement
+vertical writing modes, synthetic bold or oblique, or color font layers; color
+emoji are drawn from their monochrome outline when the face provides one.
+Fallback is coverage-driven per grapheme and does not consult OpenType script
+metadata. Paragraph and line breaking use a grapheme/whitespace heuristic rather
 than the full Unicode line-breaking algorithm. These are deliberate boundaries
 of the current text contract.
