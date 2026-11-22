@@ -435,6 +435,7 @@ pub struct FontFace {
     inner: Arc<FontdueFont>,
     descriptor: FontDescriptor,
     data: Arc<[u8]>,
+    index: u32,
     glyph_rasters: Arc<Mutex<GlyphRasterCache>>,
 }
 
@@ -461,14 +462,28 @@ impl FontFace {
     ///
     /// Returns [`FontError`] when `bytes` do not contain a supported font.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, FontError> {
+        Self::from_bytes_with_index(bytes, 0)
+    }
+
+    /// Parses one face from a font collection and infers its family name.
+    ///
+    /// `index` selects a face inside a TrueType/OpenType collection (`.ttc`).
+    /// Plain font files use index `0`. Use
+    /// [`Self::from_bytes_with_descriptor_and_index`] to register a family,
+    /// weight, and style explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontError`] when `bytes` do not contain a supported font or
+    /// the collection does not contain `index`.
+    pub fn from_bytes_with_index(bytes: impl Into<Vec<u8>>, index: u32) -> Result<Self, FontError> {
         let data: Vec<u8> = bytes.into();
-        let font =
-            FontdueFont::from_bytes(data.clone(), FontSettings::default()).map_err(FontError)?;
+        let font = parse_font(&data, index)?;
         let family = font
             .name()
             .map_or_else(|| FontFamily::new("Sans"), FontFamily::new);
         let descriptor = FontDescriptor::new(family, FontWeight::NORMAL, FontStyle::Normal);
-        Ok(Self::from_parts(font, descriptor, data))
+        Ok(Self::from_parts(font, descriptor, data, index))
     }
 
     /// Parses a font and registers it under an explicit descriptor.
@@ -480,17 +495,36 @@ impl FontFace {
         bytes: impl Into<Vec<u8>>,
         descriptor: FontDescriptor,
     ) -> Result<Self, FontError> {
-        let data: Vec<u8> = bytes.into();
-        let font =
-            FontdueFont::from_bytes(data.clone(), FontSettings::default()).map_err(FontError)?;
-        Ok(Self::from_parts(font, descriptor, data))
+        Self::from_bytes_with_descriptor_and_index(bytes, descriptor, 0)
     }
 
-    fn from_parts(font: FontdueFont, descriptor: FontDescriptor, data: Vec<u8>) -> Self {
+    /// Parses one face from a font collection under an explicit descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontError`] when `bytes` do not contain a supported font or
+    /// the collection does not contain `index`.
+    pub fn from_bytes_with_descriptor_and_index(
+        bytes: impl Into<Vec<u8>>,
+        descriptor: FontDescriptor,
+        index: u32,
+    ) -> Result<Self, FontError> {
+        let data: Vec<u8> = bytes.into();
+        let font = parse_font(&data, index)?;
+        Ok(Self::from_parts(font, descriptor, data, index))
+    }
+
+    fn from_parts(
+        font: FontdueFont,
+        descriptor: FontDescriptor,
+        data: Vec<u8>,
+        index: u32,
+    ) -> Self {
         Self {
             inner: Arc::new(font),
             descriptor,
             data: Arc::from(data),
+            index,
             glyph_rasters: Arc::new(Mutex::new(GlyphRasterCache::default())),
         }
     }
@@ -541,6 +575,14 @@ impl FontFace {
     #[must_use]
     pub const fn style(&self) -> FontStyle {
         self.descriptor.style()
+    }
+
+    /// Returns the face index inside its source font collection.
+    ///
+    /// This is `0` for ordinary single-face files.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
     }
 
     /// Returns whether this face contains a glyph for `character`.
@@ -609,9 +651,9 @@ impl FontFace {
             })
     }
 
-    /// Returns whether both handles refer to the same font file.
-    fn same_file(&self, other: &Self) -> bool {
-        self.inner.file_hash() == other.inner.file_hash()
+    /// Returns whether both handles refer to the same face of the same file.
+    fn same_face(&self, other: &Self) -> bool {
+        self.index == other.index && self.inner.file_hash() == other.inner.file_hash()
     }
 
     pub(crate) fn font(&self) -> &FontdueFont {
@@ -632,6 +674,7 @@ impl fmt::Debug for FontFace {
         formatter
             .debug_struct("FontFace")
             .field("descriptor", &self.descriptor)
+            .field("index", &self.index)
             .field("name", &self.inner.name())
             .finish_non_exhaustive()
     }
@@ -639,8 +682,19 @@ impl fmt::Debug for FontFace {
 
 impl PartialEq for FontFace {
     fn eq(&self, other: &Self) -> bool {
-        self.descriptor == other.descriptor && self.same_file(other)
+        self.descriptor == other.descriptor && self.same_face(other)
     }
+}
+
+fn parse_font(data: &[u8], index: u32) -> Result<FontdueFont, FontError> {
+    FontdueFont::from_bytes(
+        data,
+        FontSettings {
+            collection_index: index,
+            ..FontSettings::default()
+        },
+    )
+    .map_err(FontError)
 }
 
 /// A font parsing failure.
@@ -756,9 +810,8 @@ impl FontDatabase {
     ///
     /// Enumeration is delegated to `fontdb`, which scans the platform's
     /// standard font directories without calling into a particular windowing
-    /// toolkit. Faces from font collections after the first are skipped because
-    /// the `fontdue` rasterizer used by Drawen addresses simple TrueType/OpenType
-    /// files directly.
+    /// toolkit. Every face of a font collection is registered with its
+    /// collection index.
     ///
     /// The returned database uses the first discovered face as its default.
     /// Applications that want Drawen's deterministic bundled face should call
@@ -777,9 +830,6 @@ impl FontDatabase {
         let mut system = fontdb::Database::new();
         system.load_system_fonts();
         for face in system.faces() {
-            if face.index != 0 {
-                continue;
-            }
             let Some(bytes) = system.with_face_data(face.id, |data, _| data.to_vec()) else {
                 continue;
             };
@@ -793,7 +843,8 @@ impl FontDatabase {
                 fontdb::Style::Italic => FontStyle::Italic,
                 fontdb::Style::Oblique => FontStyle::Oblique,
             };
-            let _ = self.add_font(FontDescriptor::new(family, weight, style), bytes);
+            let descriptor = FontDescriptor::new(family, weight, style);
+            let _ = self.add_font_with_index(descriptor, bytes, face.index);
         }
     }
 
@@ -827,7 +878,24 @@ impl FontDatabase {
         descriptor: FontDescriptor,
         bytes: impl Into<Vec<u8>>,
     ) -> Result<FontFace, FontError> {
-        let face = FontFace::from_bytes_with_descriptor(bytes, descriptor)?;
+        self.add_font_with_index(descriptor, bytes, 0)
+    }
+
+    /// Parses and registers one face of a font collection.
+    ///
+    /// `index` selects the face inside a TrueType/OpenType collection (`.ttc`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FontError`] when `bytes` do not contain a supported font or
+    /// the collection does not contain `index`.
+    pub fn add_font_with_index(
+        &mut self,
+        descriptor: FontDescriptor,
+        bytes: impl Into<Vec<u8>>,
+        index: u32,
+    ) -> Result<FontFace, FontError> {
+        let face = FontFace::from_bytes_with_descriptor_and_index(bytes, descriptor, index)?;
         self.add_face(face.clone());
         Ok(face)
     }
@@ -1055,5 +1123,23 @@ mod tests {
 
         assert_eq!(family, copy);
         assert_eq!(family.as_str(), "Ubuntu");
+    }
+
+    #[test]
+    fn reports_the_collection_index_of_a_face() {
+        let face = FontFace::from_bytes_with_index(
+            include_bytes!("../assets/Ubuntu-Light.ttf").as_slice(),
+            0,
+        )
+        .expect("bundled font is valid");
+
+        assert_eq!(face.index(), 0);
+        assert!(
+            FontFace::from_bytes_with_index(
+                include_bytes!("../assets/Ubuntu-Light.ttf").as_slice(),
+                1,
+            )
+            .is_err()
+        );
     }
 }

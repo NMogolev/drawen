@@ -1079,7 +1079,7 @@ fn shape_font_run(
     font_index: usize,
     baseline: f32,
 ) -> (Vec<RawShapedGlyph>, f32) {
-    let Ok(font_ref) = FontRef::from_index(face.data(), 0) else {
+    let Ok(font_ref) = FontRef::from_index(face.data(), face.index()) else {
         return (Vec::new(), 0.0);
     };
     let data = ShaperData::new(&font_ref);
