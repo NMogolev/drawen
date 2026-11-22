@@ -19,6 +19,7 @@ use fontdue::{Font as FontdueFont, FontSettings};
 pub const DEFAULT_DPI: f32 = 96.0;
 
 const GLYPH_RASTER_CACHE_CAPACITY: usize = 512;
+const SYSTEM_FACE_CACHE_CAPACITY: usize = 24;
 
 /// A font family name.
 ///
@@ -784,10 +785,191 @@ impl GlyphBitmap {
 /// style and weight are selected; when no family matches, the database default
 /// is used. Every registered face is also available as a per-character
 /// fallback.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// A database can additionally keep a lazy index of the operating system's
+/// installed faces. Those faces are parsed only when a character needs them,
+/// which makes multilingual fallback practical without paying the cost of
+/// loading every installed font up front. See [`Self::discover_system_fallbacks`].
+#[derive(Clone, Debug, Default)]
 pub struct FontDatabase {
     faces: Vec<FontFace>,
     default_face: Option<usize>,
+    system: Option<Arc<SystemFontSet>>,
+}
+
+impl PartialEq for FontDatabase {
+    fn eq(&self, other: &Self) -> bool {
+        self.faces == other.faces
+            && self.default_face == other.default_face
+            && self.system.is_some() == other.system.is_some()
+    }
+}
+
+struct SystemFontSet {
+    database: fontdb::Database,
+    faces: Vec<SystemFace>,
+    cache: Mutex<SystemFallbackCache>,
+}
+
+impl fmt::Debug for SystemFontSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SystemFontSet")
+            .field("faces", &self.faces.len())
+            .field("cached_faces", &self.lock_cache().loaded.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SystemFace {
+    id: fontdb::ID,
+    family: FontFamily,
+    family_key: String,
+    weight: FontWeight,
+    style: FontStyle,
+}
+
+#[derive(Debug, Default)]
+struct SystemFallbackCache {
+    loaded: HashMap<fontdb::ID, FontFace>,
+    loaded_order: VecDeque<fontdb::ID>,
+    coverage: HashMap<char, Option<fontdb::ID>>,
+}
+
+impl SystemFontSet {
+    fn discover() -> Option<Self> {
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        let faces: Vec<SystemFace> = database
+            .faces()
+            .filter_map(|face| {
+                let family = face
+                    .families
+                    .first()
+                    .map_or_else(|| face.post_script_name.clone(), |(name, _)| name.clone());
+                if family.is_empty() {
+                    return None;
+                }
+                Some(SystemFace {
+                    id: face.id,
+                    family: FontFamily::new(family.clone()),
+                    family_key: family.to_lowercase(),
+                    weight: FontWeight::new(face.weight.0).unwrap_or(FontWeight::NORMAL),
+                    style: system_style(face.style),
+                })
+            })
+            .collect();
+        if faces.is_empty() {
+            return None;
+        }
+        Some(Self {
+            database,
+            faces,
+            cache: Mutex::new(SystemFallbackCache::default()),
+        })
+    }
+
+    fn face_for_char(
+        &self,
+        character: char,
+        weight: FontWeight,
+        style: FontStyle,
+    ) -> Option<FontFace> {
+        let cached = self.lock_cache().coverage.get(&character).copied();
+        match cached {
+            Some(Some(id)) => {
+                if let Some(face) = self.loaded_face(id) {
+                    return Some(face);
+                }
+                // The parsed face was evicted; fall through and load it again.
+            }
+            Some(None) => return None,
+            None => {}
+        }
+
+        let group = script_group(character);
+        let mut order: Vec<usize> = (0..self.faces.len()).collect();
+        order.sort_by_key(|&index| {
+            let face = &self.faces[index];
+            (
+                family_script_score(&face.family_key, group),
+                style_distance(face.style, style),
+                weight_distance(face.weight, weight),
+                index,
+            )
+        });
+
+        let mut found = None;
+        for index in order {
+            let face = &self.faces[index];
+            if let Some(loaded) = self.loaded_face(face.id) {
+                if loaded.has_glyph(character) {
+                    found = Some((face.id, loaded));
+                    break;
+                }
+                continue;
+            }
+            let Some((bytes, face_index)) = self
+                .database
+                .with_face_data(face.id, |data, index| (data.to_vec(), index))
+            else {
+                continue;
+            };
+            let descriptor = FontDescriptor::new(face.family.clone(), face.weight, face.style);
+            let Ok(loaded) =
+                FontFace::from_bytes_with_descriptor_and_index(bytes, descriptor, face_index)
+            else {
+                continue;
+            };
+            let covers = loaded.has_glyph(character);
+            self.store_loaded(face.id, loaded.clone());
+            if covers {
+                found = Some((face.id, loaded));
+                break;
+            }
+        }
+
+        let mut cache = self.lock_cache();
+        cache
+            .coverage
+            .insert(character, found.as_ref().map(|(id, _)| *id));
+        drop(cache);
+        found.map(|(_, face)| face)
+    }
+
+    fn loaded_face(&self, id: fontdb::ID) -> Option<FontFace> {
+        self.lock_cache().loaded.get(&id).cloned()
+    }
+
+    fn store_loaded(&self, id: fontdb::ID, face: FontFace) {
+        let mut cache = self.lock_cache();
+        if let Some(existing) = cache.loaded.get_mut(&id) {
+            *existing = face;
+            return;
+        }
+        if cache.loaded.len() == SYSTEM_FACE_CACHE_CAPACITY
+            && let Some(oldest) = cache.loaded_order.pop_front()
+        {
+            cache.loaded.remove(&oldest);
+        }
+        cache.loaded_order.push_back(id);
+        cache.loaded.insert(id, face);
+    }
+
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, SystemFallbackCache> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn system_style(style: fontdb::Style) -> FontStyle {
+    match style {
+        fontdb::Style::Normal => FontStyle::Normal,
+        fontdb::Style::Italic => FontStyle::Italic,
+        fontdb::Style::Oblique => FontStyle::Oblique,
+    }
 }
 
 impl FontDatabase {
@@ -838,14 +1020,47 @@ impl FontDatabase {
                 .first()
                 .map_or_else(|| face.post_script_name.clone(), |(name, _)| name.clone());
             let weight = FontWeight::new(face.weight.0).unwrap_or(FontWeight::NORMAL);
-            let style = match face.style {
-                fontdb::Style::Normal => FontStyle::Normal,
-                fontdb::Style::Italic => FontStyle::Italic,
-                fontdb::Style::Oblique => FontStyle::Oblique,
-            };
-            let descriptor = FontDescriptor::new(family, weight, style);
+            let descriptor = FontDescriptor::new(family, weight, system_style(face.style));
             let _ = self.add_font_with_index(descriptor, bytes, face.index);
         }
+    }
+
+    /// Enables lazy per-character fallback through the operating system's
+    /// installed fonts.
+    ///
+    /// Discovery records family, weight, style, and collection index only;
+    /// font files are opened and parsed on demand when a character is not
+    /// covered by the registered faces. Candidates are ranked by script, then
+    /// by style and weight proximity, so common scripts resolve without
+    /// touching unrelated fonts.
+    ///
+    /// Unlike [`Self::discover_system_fonts`], this does not change the
+    /// registered faces or the default face.
+    pub fn discover_system_fallbacks(&mut self) {
+        self.system = SystemFontSet::discover().map(Arc::new);
+    }
+
+    /// Returns whether lazy system fallback is enabled.
+    #[must_use]
+    pub fn has_system_fallbacks(&self) -> bool {
+        self.system.is_some()
+    }
+
+    /// Returns a lazily loaded system face that covers `character`.
+    ///
+    /// The face is cached for later calls. Returns `None` when system fallback
+    /// is disabled, no installed face covers the character, or the system font
+    /// cannot be parsed by Drawen's rasterizer.
+    #[must_use]
+    pub fn fallback_face(
+        &self,
+        character: char,
+        weight: FontWeight,
+        style: FontStyle,
+    ) -> Option<FontFace> {
+        self.system
+            .as_ref()?
+            .face_for_char(character, weight, style)
     }
 
     /// Creates a database whose default face is `face`.
@@ -981,6 +1196,37 @@ impl FontDatabase {
         resolved
     }
 
+    /// Resolves `font` and extends the result with system fallback faces that
+    /// cover characters missing from the registered faces.
+    ///
+    /// This is [`Self::resolve`] plus lazy coverage-driven fallback for the
+    /// characters that actually occur in `text`. Characters that no installed
+    /// face covers are left to the shaper's replacement policy.
+    #[must_use]
+    pub fn resolve_for_text(&self, font: &Font, text: &str) -> Vec<FontFace> {
+        let mut faces = self.resolve(font);
+        if self.system.is_none() {
+            return faces;
+        }
+
+        let mut missing = Vec::<char>::new();
+        for character in text.chars() {
+            if is_ignorable_for_coverage(character) || missing.contains(&character) {
+                continue;
+            }
+            if faces.iter().any(|face| face.has_glyph(character)) {
+                continue;
+            }
+            missing.push(character);
+        }
+        for character in missing {
+            if let Some(face) = self.fallback_face(character, font.weight(), font.style()) {
+                push_unique(&mut faces, face);
+            }
+        }
+        faces
+    }
+
     fn best_face(
         &self,
         family: &FontFamily,
@@ -1001,8 +1247,264 @@ impl FontDatabase {
 }
 
 fn push_unique(faces: &mut Vec<FontFace>, face: FontFace) {
-    if !faces.iter().any(|existing| existing.same_file(&face)) {
+    if !faces.iter().any(|existing| existing.same_face(&face)) {
         faces.push(face);
+    }
+}
+
+/// Returns whether `character` should be ignored when checking a font's
+/// coverage.
+///
+/// Controls, format characters, and variation selectors do not have visible
+/// glyphs of their own, so requiring a face to cover them would reject the
+/// fonts that shape the surrounding cluster correctly.
+pub(crate) fn is_ignorable_for_coverage(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF0}'..='\u{FFF8}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScriptGroup {
+    Default,
+    Han,
+    Japanese,
+    Korean,
+    Arabic,
+    Hebrew,
+    Indic,
+    Thai,
+    Emoji,
+}
+
+fn script_group(character: char) -> ScriptGroup {
+    match character {
+        '\u{0600}'..='\u{06FF}'
+        | '\u{0750}'..='\u{077F}'
+        | '\u{08A0}'..='\u{08FF}'
+        | '\u{FB50}'..='\u{FDFF}'
+        | '\u{FE70}'..='\u{FEFF}' => ScriptGroup::Arabic,
+        '\u{0590}'..='\u{05FF}' | '\u{FB1D}'..='\u{FB4F}' => ScriptGroup::Hebrew,
+        '\u{0900}'..='\u{0DFF}' | '\u{0F00}'..='\u{0FFF}' => ScriptGroup::Indic,
+        '\u{0E00}'..='\u{0EFF}' => ScriptGroup::Thai,
+        '\u{3040}'..='\u{309F}'
+        | '\u{30A0}'..='\u{30FF}'
+        | '\u{31F0}'..='\u{31FF}'
+        | '\u{FF66}'..='\u{FF9D}' => ScriptGroup::Japanese,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{3130}'..='\u{318F}'
+        | '\u{A960}'..='\u{A97F}'
+        | '\u{AC00}'..='\u{D7AF}' => ScriptGroup::Korean,
+        '\u{3000}'..='\u{303F}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{2FA1F}' => ScriptGroup::Han,
+        '\u{2600}'..='\u{27BF}' | '\u{1F000}'..='\u{1FAFF}' | '\u{FE0F}' => ScriptGroup::Emoji,
+        _ => ScriptGroup::Default,
+    }
+}
+
+fn family_script_score(family: &str, group: ScriptGroup) -> u8 {
+    if group != ScriptGroup::Emoji && is_symbol_family(family) {
+        return 3;
+    }
+    if keywords_for(group)
+        .iter()
+        .any(|keyword| family.contains(keyword))
+    {
+        return 0;
+    }
+    if group != ScriptGroup::Default
+        && keywords_for(ScriptGroup::Default)
+            .iter()
+            .any(|keyword| family.contains(keyword))
+    {
+        return 1;
+    }
+    2
+}
+
+fn is_symbol_family(family: &str) -> bool {
+    [
+        "emoji",
+        "symbol",
+        "dingbat",
+        "wingdings",
+        "webdings",
+        "marlett",
+    ]
+    .iter()
+    .any(|keyword| family.contains(keyword))
+}
+
+const DEFAULT_FAMILY_KEYWORDS: &[&str] = &[
+    "segoe ui",
+    "arial",
+    "helvetica",
+    "noto sans",
+    "noto serif",
+    "dejavu sans",
+    "liberation sans",
+    "ubuntu",
+    "roboto",
+    "cantarell",
+    "inter",
+    "tahoma",
+    "verdana",
+    "calibri",
+    "system-ui",
+];
+const HAN_FAMILY_KEYWORDS: &[&str] = &[
+    "yahei",
+    "jhenghei",
+    "simsun",
+    "simhei",
+    "nsimsun",
+    "song",
+    "ming",
+    "kai",
+    "fangsong",
+    "cjk",
+    "source han",
+    "noto sans sc",
+    "noto sans tc",
+    "noto sans hk",
+    "wenquanyi",
+    "droid sans fallback",
+    "hiragino",
+    "pingfang",
+    "yu gothic",
+    "meiryo",
+    "ms gothic",
+    "ms mincho",
+    "malgun",
+    "gulim",
+    "dotum",
+    "batang",
+    "noto sans kr",
+    "nanum",
+    "apple sd gothic",
+];
+const JAPANESE_FAMILY_KEYWORDS: &[&str] = &[
+    "yu gothic",
+    "yu mincho",
+    "meiryo",
+    "ms gothic",
+    "ms mincho",
+    "hiragino",
+    "osaka",
+    "noto sans jp",
+    "noto serif jp",
+    "cjk jp",
+    "pingfang",
+];
+const KOREAN_FAMILY_KEYWORDS: &[&str] = &[
+    "malgun",
+    "gulim",
+    "dotum",
+    "batang",
+    "gungsuh",
+    "apple sd gothic",
+    "noto sans kr",
+    "noto serif kr",
+    "cjk kr",
+    "nanum",
+];
+const ARABIC_FAMILY_KEYWORDS: &[&str] = &[
+    "arabic",
+    "segoe ui",
+    "tahoma",
+    "arial",
+    "geeza",
+    "amiri",
+    "scheherazade",
+    "noto naskh",
+    "noto kufi",
+    "dejavu sans",
+];
+const HEBREW_FAMILY_KEYWORDS: &[&str] = &[
+    "hebrew",
+    "segoe ui",
+    "arial",
+    "tahoma",
+    "david",
+    "gisha",
+    "frankruehl",
+    "noto rashi",
+];
+const INDIC_FAMILY_KEYWORDS: &[&str] = &[
+    "devanagari",
+    "bengali",
+    "gurmukhi",
+    "gujarati",
+    "tamil",
+    "telugu",
+    "kannada",
+    "malayalam",
+    "sinhala",
+    "oriya",
+    "odia",
+    "nirmala",
+    "mangal",
+    "kokila",
+    "utsaah",
+    "aparajita",
+    "sanskrit",
+    "lohit",
+    "samyak",
+    "noto sans",
+    "noto serif",
+];
+const THAI_FAMILY_KEYWORDS: &[&str] = &[
+    "thai",
+    "leelawadee",
+    "tahoma",
+    "angsana",
+    "browallia",
+    "loma",
+    "garuda",
+    "norasi",
+    "kinnari",
+];
+const EMOJI_FAMILY_KEYWORDS: &[&str] = &[
+    "emoji",
+    "symbola",
+    "segoe ui symbol",
+    "apple color emoji",
+    "noto color emoji",
+    "twemoji",
+];
+
+fn keywords_for(group: ScriptGroup) -> &'static [&'static str] {
+    match group {
+        ScriptGroup::Default => DEFAULT_FAMILY_KEYWORDS,
+        ScriptGroup::Han => HAN_FAMILY_KEYWORDS,
+        ScriptGroup::Japanese => JAPANESE_FAMILY_KEYWORDS,
+        ScriptGroup::Korean => KOREAN_FAMILY_KEYWORDS,
+        ScriptGroup::Arabic => ARABIC_FAMILY_KEYWORDS,
+        ScriptGroup::Hebrew => HEBREW_FAMILY_KEYWORDS,
+        ScriptGroup::Indic => INDIC_FAMILY_KEYWORDS,
+        ScriptGroup::Thai => THAI_FAMILY_KEYWORDS,
+        ScriptGroup::Emoji => EMOJI_FAMILY_KEYWORDS,
     }
 }
 
@@ -1026,6 +1528,7 @@ mod tests {
 
     use super::{
         Font, FontDatabase, FontDescriptor, FontFace, FontFamily, FontSize, FontStyle, FontWeight,
+        ScriptGroup, family_script_score, is_ignorable_for_coverage, script_group,
     };
 
     fn database() -> FontDatabase {
@@ -1140,6 +1643,63 @@ mod tests {
                 1,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn classifies_common_scripts_for_fallback_ranking() {
+        assert_eq!(script_group('A'), ScriptGroup::Default);
+        assert_eq!(script_group('Я'), ScriptGroup::Default);
+        assert_eq!(script_group('Ω'), ScriptGroup::Default);
+        assert_eq!(script_group('س'), ScriptGroup::Arabic);
+        assert_eq!(script_group('ש'), ScriptGroup::Hebrew);
+        assert_eq!(script_group('क'), ScriptGroup::Indic);
+        assert_eq!(script_group('ก'), ScriptGroup::Thai);
+        assert_eq!(script_group('あ'), ScriptGroup::Japanese);
+        assert_eq!(script_group('ア'), ScriptGroup::Japanese);
+        assert_eq!(script_group('한'), ScriptGroup::Korean);
+        assert_eq!(script_group('日'), ScriptGroup::Han);
+        assert_eq!(script_group('🦀'), ScriptGroup::Emoji);
+    }
+
+    #[test]
+    fn ranks_script_specific_families_before_generic_faces() {
+        assert!(
+            family_script_score("microsoft yahei", ScriptGroup::Han)
+                < family_script_score("arial", ScriptGroup::Han)
+        );
+        assert!(
+            family_script_score("noto sans devanagari", ScriptGroup::Indic)
+                < family_script_score("dejavu sans", ScriptGroup::Indic)
+        );
+        assert!(
+            family_script_score("segoe ui emoji", ScriptGroup::Emoji)
+                < family_script_score("segoe ui", ScriptGroup::Emoji)
+        );
+        assert!(
+            family_script_score("wingdings", ScriptGroup::Default)
+                > family_script_score("segoe ui", ScriptGroup::Default)
+        );
+    }
+
+    #[test]
+    fn ignores_format_controls_when_checking_glyph_coverage() {
+        assert!(is_ignorable_for_coverage('\u{200D}'));
+        assert!(is_ignorable_for_coverage('\u{FE0F}'));
+        assert!(is_ignorable_for_coverage('\n'));
+        assert!(!is_ignorable_for_coverage('a'));
+        assert!(!is_ignorable_for_coverage('\u{0301}'));
+    }
+
+    #[test]
+    fn text_resolution_is_plain_resolution_without_system_fallback() {
+        let database = database();
+        let font = Font::from_family("Ubuntu");
+        let text = "Drawen Ελληνικά Кириллица 日本語 العربية";
+
+        assert_eq!(
+            database.resolve(&font),
+            database.resolve_for_text(&font, text)
         );
     }
 }

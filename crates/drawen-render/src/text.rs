@@ -11,7 +11,9 @@ use harfrust::{
 use unicode_bidi::{Level, ParagraphBidiInfo};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::font::{DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace};
+use crate::font::{
+    DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, is_ignorable_for_coverage,
+};
 
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 256;
 const SHAPING_FRACTION_BITS: f32 = 64.0;
@@ -653,6 +655,26 @@ impl FontdueTextShaper {
             .clone()
     }
 
+    /// Creates a shaper with Drawen's bundled face plus lazy system fallback.
+    ///
+    /// Registered faces keep Drawen's deterministic typography for Latin,
+    /// Greek, and Cyrillic. Characters outside their coverage are resolved from
+    /// the operating system's installed fonts on demand, ranked by script,
+    /// style, and weight. This is the recommended constructor for applications
+    /// that display user-supplied multilingual text.
+    #[must_use]
+    pub fn multilingual() -> Self {
+        static MULTILINGUAL: OnceLock<FontdueTextShaper> = OnceLock::new();
+
+        MULTILINGUAL
+            .get_or_init(|| {
+                let mut database = FontDatabase::bundled();
+                database.discover_system_fallbacks();
+                Self::from_database(database)
+            })
+            .clone()
+    }
+
     /// Shapes `text` using this shaper's font database.
     #[must_use]
     pub fn layout(&self, text: &str, style: &TextStyle, width: Option<f32>) -> TextLayout {
@@ -714,7 +736,7 @@ impl FontdueTextShaper {
             return TextLayout::empty(text, style.color);
         }
 
-        let faces = self.database.resolve(&style.font);
+        let faces = self.database.resolve_for_text(&style.font, text);
         if faces.is_empty() {
             return TextLayout::empty(text, style.color);
         }
@@ -963,10 +985,15 @@ fn font_runs(text: &str, range: Range<usize>, faces: &[FontFace]) -> Vec<FontRun
     for grapheme in grapheme_ranges(&text[range.clone()]) {
         let source = range.start + grapheme.start..range.start + grapheme.end;
         let fragment = &text[source.clone()];
-        let font_index = fragment
-            .chars()
-            .filter(|character| !character.is_control())
-            .find_map(|character| faces.iter().position(|face| face.has_glyph(character)));
+        let font_index = faces
+            .iter()
+            .position(|face| grapheme_is_covered(face, fragment))
+            .or_else(|| {
+                fragment
+                    .chars()
+                    .filter(|character| !is_ignorable_for_coverage(*character))
+                    .find_map(|character| faces.iter().position(|face| face.has_glyph(character)))
+            });
         let (font_index, text, replacement) = font_index.map_or_else(
             || (0, "?".repeat(fragment.chars().count()), true),
             |index| (index, fragment.to_owned(), false),
@@ -989,6 +1016,26 @@ fn font_runs(text: &str, range: Range<usize>, faces: &[FontFace]) -> Vec<FontRun
         });
     }
     runs
+}
+
+/// Returns whether `face` covers every visible code point in `fragment`.
+///
+/// A grapheme cluster is shaped as one unit, so choosing a face that only
+/// covers its first character can silently drop combining marks or split an
+/// emoji sequence across fonts. Ignorable controls and variation selectors do
+/// not participate in the check.
+fn grapheme_is_covered(face: &FontFace, fragment: &str) -> bool {
+    let mut saw_visible = false;
+    for character in fragment.chars() {
+        if is_ignorable_for_coverage(character) {
+            continue;
+        }
+        saw_visible = true;
+        if !face.has_glyph(character) {
+            return false;
+        }
+    }
+    saw_visible
 }
 
 #[derive(Clone, Debug)]
