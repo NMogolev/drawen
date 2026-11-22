@@ -1036,7 +1036,9 @@ fn shape_level_run(
             baseline,
         );
         let advance = shaped.1;
-        let start = if rtl { cursor + advance } else { cursor };
+        // HarfRust returns glyphs in visual order for both directions, so a
+        // reversed run still advances left to right from the current pen.
+        let start = cursor;
         for glyph in shaped.0 {
             result.push(ShapedGlyph {
                 x: start + glyph.x,
@@ -1445,5 +1447,37 @@ mod tests {
         );
         assert_ne!(layout.glyph_runs(), []);
         assert_eq!(layout.clusters().len(), 4);
+    }
+
+    #[test]
+    fn places_rtl_runs_after_the_preceding_ltr_text() {
+        let text = "abc العربية";
+        let layout = FontdueTextShaper::ubuntu_light().layout(
+            text,
+            &TextStyle::new(18.0, Color::BLACK),
+            None,
+        );
+        let arabic_start = text.find('ا').expect("the sample contains Arabic");
+        let space = text[..arabic_start]
+            .rfind(' ')
+            .expect("a space precedes the run");
+        let space_right = layout
+            .clusters()
+            .iter()
+            .find(|cluster| cluster.source() == (space..space + 1))
+            .expect("the space has a cluster")
+            .bounds()
+            .right();
+        let arabic_left = layout
+            .clusters()
+            .iter()
+            .filter(|cluster| cluster.source().start >= arabic_start)
+            .map(|cluster| cluster.bounds().origin.x)
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(
+            (arabic_left - space_right).abs() < 0.01,
+            "RTL run starts at {arabic_left}, expected {space_right}"
+        );
     }
 }
