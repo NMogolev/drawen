@@ -40,7 +40,7 @@ const BASE_SPACING: f32 = 8.0;
 
 /// Scoped DSS rules used by the dedicated stylesheet page. They deliberately
 /// target only `.dss-sample`, leaving the semantic-theme laboratory untouched.
-const SHOWCASE_DSS: &str = r#"
+const SHOWCASE_DSS: &str = r"
     :root {
         --sample-space: 10px;
         --sample-radius: 12px;
@@ -62,7 +62,7 @@ const SHOWCASE_DSS: &str = r#"
     .dss-sample button:last-child { background: rebeccapurple !important; }
     .dss-sample checkbox:checked { accent-color: var(--sample-accent); }
     .dss-sample text { color: white; font-size: calc(12px + 2px); }
-"#;
+";
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
     if std::env::args().any(|argument| argument == "--snapshot") {
