@@ -40,7 +40,8 @@ pub use accessibility::{
 pub use column::Column;
 pub use command::{KeyChord, KeyboardCommand};
 pub use dss::{
-    DssError, DssStyle, DssTheme, PseudoClass, Selector, StyleRule, StyleSheet, StyleTarget,
+    ChildPosition, DssError, DssStyle, DssTheme, PseudoClass, Selector, StyleRule, StyleSheet,
+    StyleTarget,
 };
 pub use environment::UiEnvironment;
 pub use event::{EventContext, EventPhase, EventStatus, ResizeEdge, WindowCommand};

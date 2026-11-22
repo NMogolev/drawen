@@ -14,16 +14,18 @@ use std::{
 };
 
 use drawen::{
-    Alert, AlertTone, AudioPlayer, AudioPlayerLayout, Avatar, AvatarStatus, Badge, BadgeTone,
-    Box as DrawenBox, Button, Checkbox, ChildLayout, Color, Constraints, Divider, DockArea,
-    DockAxis, Dropdown, Expander, Image, Insets, LayoutContext, LayoutNode, LayoutResult, ListView,
-    MenuBar, PanelId, PlayerBehavior, PlayerTheme, Point, ProgressBar, RadioButton, RadioGroup,
-    Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner, SplitAxis, Splitter,
-    Styled, Subscription, Switch, TabBar, Text, TextEdit, TextField, Theme, Toolbar, UiEnvironment,
-    UiRuntime, Video, VideoControls, Widget, WorkspaceLayout,
+    Alert, AlertTone, Avatar, AvatarStatus, Badge, BadgeTone, Box as DrawenBox, Button, Checkbox,
+    ChildLayout, Color, Constraints, Divider, DockArea, DockAxis, Dropdown, Expander, Image,
+    Insets, LayoutContext, LayoutNode, LayoutResult, ListView, MenuBar, PanelId, Point,
+    ProgressBar, RadioButton, RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton,
+    Slider, Spinner, SplitAxis, Splitter, Styled, Subscription, Switch, TabBar, Text, TextEdit,
+    TextField, Theme, Toolbar, UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, PaintContext, RasterImage, TextLayout, TextStyle},
 };
+
+#[cfg(feature = "media")]
+use drawen::{AudioPlayer, AudioPlayerLayout, PlayerBehavior, PlayerTheme, Video, VideoControls};
 
 const WINDOW_WIDTH: f32 = 1_320.0;
 const WINDOW_HEIGHT: f32 = 860.0;
@@ -447,6 +449,7 @@ struct StyleShowcase {
     size: Size,
     appearance: Rc<RefCell<Appearance>>,
     dirty: Rc<Cell<bool>>,
+    #[cfg(feature = "media")]
     media_import_requested: Rc<Cell<Option<MediaImport>>>,
     #[cfg(feature = "audio")]
     media_preview_frame: drawen::WidgetId,
@@ -459,6 +462,7 @@ struct StyleShowcase {
     _subscriptions: Vec<Subscription>,
 }
 
+#[cfg(feature = "media")]
 #[derive(Clone, Copy)]
 enum MediaImport {
     Video,
@@ -470,6 +474,7 @@ impl StyleShowcase {
         let size = valid_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         let appearance = Rc::new(RefCell::new(Appearance::default()));
         let dirty = Rc::new(Cell::new(false));
+        #[cfg(feature = "media")]
         let media_import_requested = Rc::new(Cell::new(None));
         let mut environment = UiEnvironment::from_dss(
             ShowcaseTheme {
@@ -529,6 +534,7 @@ impl StyleShowcase {
         let media_previews = append_components_page(
             &mut runtime,
             &mut subscriptions,
+            #[cfg(feature = "media")]
             &media_import_requested,
             tabs,
         );
@@ -551,6 +557,7 @@ impl StyleShowcase {
             size,
             appearance,
             dirty,
+            #[cfg(feature = "media")]
             media_import_requested,
             #[cfg(feature = "audio")]
             media_preview_frame,
@@ -625,7 +632,7 @@ impl StyleShowcase {
         }
     }
 
-    #[cfg(not(feature = "audio"))]
+    #[cfg(all(feature = "media", not(feature = "audio")))]
     fn import_media(&mut self, _: MediaImport) {
         eprintln!(
             "Audio playback is disabled. Run `cargo run -p drawen --example style_showcase --features audio`."
@@ -647,6 +654,7 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                #[cfg(feature = "media")]
                 if let Some(import) = self.media_import_requested.replace(None) {
                     self.import_media(import);
                 }
@@ -1656,7 +1664,7 @@ fn append_overview_page(
 fn append_components_page(
     runtime: &mut UiRuntime,
     subscriptions: &mut Vec<Subscription>,
-    media_import_requested: &Rc<Cell<Option<MediaImport>>>,
+    #[cfg(feature = "media")] media_import_requested: &Rc<Cell<Option<MediaImport>>>,
     tabs: drawen::WidgetId,
 ) -> (
     drawen::WidgetId,
@@ -1898,15 +1906,18 @@ fn append_components_page(
             .expect("alert card exists");
     }
 
+    #[cfg(feature = "media")]
     let media_card = append_card(
         runtime,
         stack,
         "Media players",
         "Video and AudioPlayer expose configurable native controls. These previews use local frames and manual clocks, so they need no decoder or external media file.",
     );
+    #[cfg(feature = "media")]
     let video_frame = runtime
         .append_child(media_card, FixedHeight::new(210.0))
         .expect("media card exists");
+    #[cfg(feature = "media")]
     let media_preview = runtime
         .append_child(
             video_frame,
@@ -1920,14 +1931,18 @@ fn append_components_page(
                 .with_theme(PlayerTheme::new().with_accent(Color::rgba8(94, 234, 212, 255))),
         )
         .expect("video frame exists");
+    #[cfg(feature = "media")]
     let import_video = Button::new();
+    #[cfg(feature = "media")]
     subscriptions.push(import_video.activated().subscribe({
         let media_import_requested = Rc::clone(media_import_requested);
         move |()| media_import_requested.set(Some(MediaImport::Video))
     }));
+    #[cfg(feature = "media")]
     let import_video = runtime
         .append_child(media_card, import_video)
         .expect("media card exists");
+    #[cfg(feature = "media")]
     append_label(
         runtime,
         import_video,
@@ -1935,6 +1950,7 @@ fn append_components_page(
         0.96,
         TextTone::Primary,
     );
+    #[cfg(feature = "media")]
     append_label(
         runtime,
         media_card,
@@ -1942,6 +1958,7 @@ fn append_components_page(
         0.86,
         TextTone::Muted,
     );
+    #[cfg(feature = "media")]
     let audio_preview = runtime
         .append_child(
             media_card,
@@ -1954,14 +1971,18 @@ fn append_components_page(
                 .with_cover(drawen_logo()),
         )
         .expect("media card exists");
+    #[cfg(feature = "media")]
     let import_audio = Button::new();
+    #[cfg(feature = "media")]
     subscriptions.push(import_audio.activated().subscribe({
         let media_import_requested = Rc::clone(media_import_requested);
         move |()| media_import_requested.set(Some(MediaImport::Audio))
     }));
+    #[cfg(feature = "media")]
     let import_audio = runtime
         .append_child(media_card, import_audio)
         .expect("media card exists");
+    #[cfg(feature = "media")]
     append_label(
         runtime,
         import_audio,
@@ -1969,6 +1990,7 @@ fn append_components_page(
         0.96,
         TextTone::Primary,
     );
+    #[cfg(feature = "media")]
     runtime
         .append_child(
             media_card,
@@ -2009,7 +2031,14 @@ fn append_components_page(
         0.92,
         TextTone::Muted,
     );
-    (video_frame, media_preview, media_card, audio_preview)
+    #[cfg(feature = "media")]
+    {
+        (video_frame, media_preview, media_card, audio_preview)
+    }
+    #[cfg(not(feature = "media"))]
+    {
+        (stack, stack, stack, stack)
+    }
 }
 
 // ---------------------------------------------------------------------------

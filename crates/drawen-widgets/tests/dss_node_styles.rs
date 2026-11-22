@@ -7,7 +7,7 @@ use drawen_render::{
     DisplayCommand, DisplayList, FontDatabase, FontDescriptor, FontFace, FontStyle, FontWeight,
     FontdueTextShaper, PaintContext, TextStyle,
 };
-use drawen_ui::{LightTheme, StyleTarget, Styled, UiEnvironment, UiRuntime};
+use drawen_ui::{ChildPosition, LightTheme, StyleTarget, Styled, UiEnvironment, UiRuntime};
 use drawen_widgets::{Box as BoxWidget, Button, Checkbox, Stack, Text};
 
 fn environment(source: &str) -> UiEnvironment {
@@ -182,10 +182,7 @@ fn descendant_and_child_selectors_follow_the_retained_tree() {
     let target = runtime
         .style_target(nested)
         .expect("nested button has a target");
-    assert_eq!(
-        target.child_position().map(|position| position.index()),
-        Some(0)
-    );
+    assert_eq!(target.child_position().map(ChildPosition::index), Some(0));
     assert_eq!(target.ancestors().len(), 2);
     assert_eq!(target.ancestors()[0].type_name(), Some("box"));
     assert_eq!(target.ancestors()[1].type_name(), Some("stack"));

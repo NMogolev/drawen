@@ -16,7 +16,7 @@ mod variables;
 mod tests;
 
 pub use error::DssError;
-pub use selector::{PseudoClass, Selector, StyleTarget};
+pub use selector::{ChildPosition, PseudoClass, Selector, StyleTarget};
 pub use style::DssStyle;
 pub use theme::DssTheme;
 
