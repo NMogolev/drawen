@@ -43,6 +43,7 @@ mod padding;
 mod paleo_session;
 #[cfg(feature = "media")]
 mod player;
+mod popover;
 mod progress_bar;
 mod radio_button;
 mod scroll_view;
@@ -61,6 +62,7 @@ mod text_editor;
 mod text_field;
 mod title_bar;
 mod toolbar;
+mod tooltip;
 #[cfg(feature = "media")]
 mod video;
 #[cfg(feature = "media")]
@@ -103,6 +105,7 @@ pub use player::{
     AudioControls, AudioPlayerLayout, PlayerBehavior, PlayerTheme, PlayerTimeDisplay, RepeatMode,
     VideoControls,
 };
+pub use popover::{Popover, PopoverTrigger};
 pub use progress_bar::ProgressBar;
 pub use radio_button::{RadioButton, RadioGroup};
 pub use scroll_view::{ScrollAxis, ScrollView};
@@ -120,6 +123,7 @@ pub use text_edit::TextEdit;
 pub use text_field::TextField;
 pub use title_bar::{TitleBar, TitleBarStyle, WindowChromeState, WindowControl};
 pub use toolbar::Toolbar;
+pub use tooltip::Tooltip;
 #[cfg(feature = "media")]
 pub use video::Video;
 #[cfg(feature = "media")]
