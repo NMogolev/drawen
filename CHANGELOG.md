@@ -6,6 +6,27 @@ in the headings because the version itself must stay valid semver; see
 
 ## Unreleased
 
+### Overlays
+
+- `UiRuntime` now owns a floating overlay layer. Widgets request an overlay
+  child through `LayoutContext::layout_child_overlay`, and the runtime measures
+  it only while visible, flips it to the opposite side when it would leave the
+  viewport, clamps it inside a configurable margin, paints it above the rest of
+  the tree, and hit tests it first. Overlay children stay normal retained nodes,
+  so bubbling, focus, and accessibility are unchanged.
+- Added `OverlaySide`, `OverlayAlign`, `OverlayPlacement`, `OverlayOptions`,
+  `DismissPolicy`, and `place_overlay` for anchor-relative placement. Light
+  dismissal closes an overlay on an outside primary click, Escape, or window
+  focus loss.
+- Added `Widget::paint_floating`, a post-pass for non-interactive floating
+  paint such as tooltip bubbles.
+- Added `Popover`, a two-child anchor/content container with
+  `PopoverTrigger::{Manual, Primary, Secondary}`, `DismissPolicy`, `opened()` and
+  `closed()` signals, and pointer-anchored opening for context menus.
+- Added `Tooltip`, a one-child anchor wrapper with a delayed fade, placement,
+  reduced-motion handling, and a bubble that is painted above siblings and
+  skipped by hit testing.
+
 ### Fonts
 
 - `FontDatabase::discover_system_fallbacks()` keeps a lazy index of installed

@@ -45,6 +45,9 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
 | `Video` after `--no-default-features` | Enable `media`; `drawen-widgets` also gates media widgets behind `media` |
+| A dropdown that expands inside its parent | `Popover`; the runtime owns an anchored floating overlay layer |
+| `tooltip.attach(widget)` | `Tooltip` is a one-child container; append the anchor as its child |
+| `popover.set_content(...)` | `Popover` has exactly two children: anchor first, floating content second |
 
 ## Q&A
 
@@ -100,6 +103,29 @@ Use `UiEnvironment::from_dss(theme, source)` and
 `:hover` and `:focus`. DSS is not full CSS: no sibling combinators, media
 queries, keyframes, or animations. See
 [RECIPES.md](RECIPES.md#4-a-stylesheet-with-dss) and [DSS.md](DSS.md).
+
+### "Add a tooltip or a dropdown menu."
+
+Do not expand the menu inside the parent. `Tooltip` and `Popover` use the
+runtime's anchored overlay layer, which flips and clamps against the window
+edges and paints above the rest of the tree.
+
+```rust
+let tooltip = runtime.append_child(runtime.root(), Tooltip::new("Refresh"))?;
+let button = runtime.append_child(tooltip, Button::new())?;
+
+let popover = runtime.append_child(
+    runtime.root(),
+    Popover::new().with_trigger(PopoverTrigger::Primary),
+)?;
+let anchor = runtime.append_child(popover, Button::new())?;
+let panel = runtime.append_child(popover, menu)?; // child 1 floats
+```
+
+`Tooltip` takes one child (the anchor). `Popover` takes exactly two: anchor,
+then floating content. Light dismissal (outside primary click, Escape, focus
+loss) is on by default. See
+[RECIPES.md](RECIPES.md#8-tooltips-popovers-and-floating-menus).
 
 ### "Play this MP4 and turn on the sound."
 

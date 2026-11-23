@@ -74,12 +74,13 @@ pub use drawen_director::{
 pub use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, AccessibilityTextSelection, Border, ChildLayout, ChildPosition, Column,
-    DEFAULT_DPI, DarkTheme, DirtyFlags, DssError, DssStyle, DssTheme, EventContext, EventPhase,
-    EventStatus, Font, FontDatabase, FontDescriptor, FontFamily, FontMetrics, FontSize, FontStyle,
-    FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand, LayoutContext, LayoutResult,
-    LightTheme, PseudoClass, ResizeEdge, Row, RuntimeStats, Selector, Signal, StyleRule,
-    StyleSheet, StyleTarget, Styled, Subscription, SurfaceStyle, SystemAppearance, SystemTheme,
-    Theme, UiEnvironment, UiRuntime, UiRuntimeError, Widget, WindowCommand,
+    DEFAULT_DPI, DarkTheme, DirtyFlags, DismissPolicy, DssError, DssStyle, DssTheme, EventContext,
+    EventPhase, EventStatus, Font, FontDatabase, FontDescriptor, FontFamily, FontMetrics, FontSize,
+    FontStyle, FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand, LayoutContext,
+    LayoutResult, LightTheme, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide,
+    PseudoClass, ResizeEdge, Row, RuntimeStats, Selector, Signal, StyleRule, StyleSheet,
+    StyleTarget, Styled, Subscription, SurfaceStyle, SystemAppearance, SystemTheme, Theme,
+    UiEnvironment, UiRuntime, UiRuntimeError, Widget, WindowCommand, place_overlay,
 };
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
@@ -87,11 +88,11 @@ pub use drawen_widgets::{
     Alert, AlertTone, Align, Alignment, Avatar, AvatarStatus, Badge, BadgeTone, Box, Button,
     ButtonStyle, Card, CardStyle, Checkbox, ComboBox, Container, Divider, DividerAxis, DockArea,
     DockAreaError, DockItem, Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, MenuBar,
-    Padding, ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView, SegmentedControl,
-    SelectionMode, SelectionModel, SizedBox, Skeleton, Slider, Spinner, SplitAxis, Splitter, Stack,
-    Switch, TabBar, Text, TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toolbar,
-    VirtualDataSource, VirtualList, VirtualTable, VirtualTableSource, WindowChromeState,
-    WindowControl, WindowFrame,
+    Padding, Popover, PopoverTrigger, ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView,
+    SegmentedControl, SelectionMode, SelectionModel, SizedBox, Skeleton, Slider, Spinner,
+    SplitAxis, Splitter, Stack, Switch, TabBar, Text, TextEdit, TextField, TextInput, TitleBar,
+    TitleBarStyle, Toolbar, Tooltip, VirtualDataSource, VirtualList, VirtualTable,
+    VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
 };
 #[cfg(feature = "media")]
 pub use drawen_widgets::{

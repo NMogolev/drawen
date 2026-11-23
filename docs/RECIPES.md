@@ -411,3 +411,65 @@ Audio is the master clock in `AudioPaleoSession`. If the window is minimized or
 occluded, use `drawen-director` to stop video presentation while keeping audio,
 and opt into background playback explicitly. See [MEDIA.md](MEDIA.md),
 [PALEO.md](PALEO.md), and the background-playback section in the README.
+
+## 8. Tooltips, popovers, and floating menus
+
+Floating surfaces do not expand in place. `UiRuntime` owns an overlay layer:
+a widget requests placement through `LayoutContext::layout_child_overlay`, and
+the runtime measures the content only while it is visible, flips it to the
+opposite side when it would leave the window, clamps it inside the viewport
+margin, paints it above the rest of the tree, and hit tests it first. Overlay
+content stays a normal retained subtree, so bubbling, focus, and accessibility
+keep working.
+
+`Tooltip` wraps one anchor and adds a non-interactive hover hint:
+
+```rust
+use std::time::Duration;
+use drawen::{Button, Color, OverlayPlacement, Text, Tooltip, TextStyle};
+
+let tooltip = Tooltip::new("Refresh")
+    .with_placement(OverlayPlacement::top())
+    .with_delay(Duration::from_millis(400));
+let tooltip = runtime.append_child(runtime.root(), tooltip)?;
+let button = runtime.append_child(tooltip, Button::new())?;
+runtime.append_child(button, Text::styled("Refresh", TextStyle::new(14.0, Color::BLACK)))?;
+```
+
+The bubble is painted through the runtime's floating pass, so toolbars and later
+siblings cannot cover it, and it is skipped by hit testing: moving the pointer
+onto the bubble dismisses it. Reduced motion removes the fade.
+
+`Popover` has exactly two children: the anchor and the floating content.
+
+```rust
+use drawen::{Button, Color, OverlayPlacement, Popover, PopoverTrigger, Text, TextStyle};
+
+let popover = Popover::new()
+    .with_trigger(PopoverTrigger::Primary)
+    .with_placement(OverlayPlacement::bottom());
+let popover = runtime.append_child(runtime.root(), popover)?;
+let anchor = runtime.append_child(popover, Button::new())?;
+runtime.append_child(anchor, Text::styled("Options", TextStyle::new(14.0, Color::BLACK)))?;
+
+// Child 1 is the floating panel, built like any other subtree.
+let panel = runtime.append_child(popover, /* your menu or form */)?;
+```
+
+Light dismissal is on by default: a primary click outside the content and its
+anchor, Escape, or losing window focus asks the popover to close. Use
+`.with_dismiss(DismissPolicy::None)` for surfaces the application closes itself,
+such as a modal dialog or a command palette. `PopoverTrigger::Secondary` opens
+the panel at the pointer, which is the usual context-menu shape.
+`PopoverTrigger::Manual` is the default: the application calls `set_open`,
+`open_at`, or `close` and reacts to the `opened()` and `closed()` signals.
+
+Rules that keep overlays predictable:
+
+- Placement is a request, not a coordinate. Choose a side and an alignment with
+  `OverlayPlacement` and let the runtime flip and clamp.
+- Overlay content is still a normal subtree. Do not also position it absolutely.
+- A closed popover does not lay out its panel, so hidden menus cost no geometry
+  work.
+- Keep overlay trees shallow. They are painted last and hit tested first, but
+  they are not a second window.
