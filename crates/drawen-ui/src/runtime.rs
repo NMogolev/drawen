@@ -10,16 +10,17 @@ use std::{
 
 use drawen_core::{
     Clipboard, Constraints, Diagnostic, DiagnosticReporter, FocusChanged, InputEvent, Key,
-    Modifiers, NamedKey, Point, PointerId, Rect, Size, WidgetId,
+    Modifiers, NamedKey, Point, PointerButton, PointerId, Rect, Size, WidgetId,
 };
 use drawen_render::{
     DisplayList, DisplayListStats, PaintContext, PaintTransition, TextLayoutCacheStats,
 };
 
 use crate::{
-    AccessibilityAction, AccessibilityActions, AccessibilityRole, AccessibilityState, DssStyle,
-    EventContext, EventPhase, EventStatus, KeyboardCommand, LayoutResult, PseudoClass,
-    SemanticTree, SemanticsBuilder, StyleTarget, UiEnvironment, Widget, WindowCommand, event,
+    AccessibilityAction, AccessibilityActions, AccessibilityRole, AccessibilityState,
+    DismissPolicy, DssStyle, EventContext, EventPhase, EventStatus, KeyboardCommand, LayoutResult,
+    OverlayOptions, PseudoClass, SemanticTree, SemanticsBuilder, StyleTarget, UiEnvironment,
+    Widget, WindowCommand, event, overlay,
 };
 use event::{EventEffects, FocusRequest};
 
@@ -225,6 +226,87 @@ impl LayoutContext<'_> {
             .layout_node(id, constraints, self.parent_origin)?;
         Ok((id, result))
     }
+
+    /// Returns the absolute origin assigned to the node currently being laid out.
+    ///
+    /// This is the origin the parent requested, before the node's final size is
+    /// known. Floating widgets use it to translate local anchor rectangles into
+    /// viewport coordinates during measurement.
+    #[must_use]
+    pub const fn origin(&self) -> Point {
+        self.parent_origin
+    }
+
+    /// Returns the window rectangle used for overlay collision detection.
+    ///
+    /// The value is `None` while the runtime is laid out with unbounded
+    /// constraints, which lets headless tests place floating content without a
+    /// window.
+    #[must_use]
+    pub const fn viewport(&self) -> Option<Rect> {
+        self.runtime.viewport
+    }
+
+    /// Measures the child at `index` and lays it out as a floating overlay.
+    ///
+    /// `anchor` is expressed in the parent's local coordinates. The child is
+    /// measured with `constraints`, placed against the anchor using
+    /// `options.placement`, flipped or clamped so it stays inside the runtime
+    /// viewport, and marked for painting above the normal tree. The returned
+    /// origin is relative to the parent and should be passed to
+    /// [`crate::ChildLayout::new`] exactly like [`Self::layout_child`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UiRuntimeError::InvalidWidgetId`] when `index` does not name a
+    /// direct child, or when a child handle became invalid during layout.
+    pub fn layout_child_overlay(
+        &mut self,
+        index: usize,
+        constraints: Constraints,
+        anchor: Rect,
+        options: OverlayOptions,
+    ) -> Result<(WidgetId, LayoutResult, Point), UiRuntimeError> {
+        let id = *self
+            .runtime
+            .node(self.parent)
+            .and_then(|node| node.children.get(index))
+            .ok_or(UiRuntimeError::InvalidWidgetId)?;
+        let absolute_anchor = Rect::new(
+            Point::new(
+                self.parent_origin.x + anchor.origin.x,
+                self.parent_origin.y + anchor.origin.y,
+            ),
+            anchor.size,
+        );
+        let constraints = self
+            .runtime
+            .overlay_constraints(constraints, options.margin);
+        // Register the root before measuring so nested overlays created by the
+        // content are painted after it.
+        self.runtime.overlay_roots.push(id);
+        let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
+        let origin = overlay::place_overlay(
+            absolute_anchor,
+            result.size(),
+            self.runtime.viewport,
+            options,
+        );
+        self.runtime.translate_subtree(id, origin);
+        if let Some(node) = self.runtime.node_mut(id) {
+            node.overlay = Some(OverlayRecord {
+                // Kept in parent-local coordinates so ancestor translation
+                // cannot stale the rectangle used for outside-click tests.
+                anchor,
+                dismiss: options.dismiss,
+            });
+        }
+        let relative = Point::new(
+            origin.x - self.parent_origin.x,
+            origin.y - self.parent_origin.y,
+        );
+        Ok((id, result, relative))
+    }
 }
 
 /// Retained UI runtime responsible for tree ownership, layout, painting, input routing, and focus.
@@ -249,6 +331,8 @@ pub struct UiRuntime {
     window_commands: Vec<WindowCommand>,
     redraw_requested: bool,
     environment: UiEnvironment,
+    overlay_roots: Vec<WidgetId>,
+    viewport: Option<Rect>,
     clipboard: Rc<RefCell<Box<dyn Clipboard>>>,
     stats: FrameDiagnostics,
     pending_damage: Option<Rect>,
@@ -274,6 +358,14 @@ struct Node {
     style_target: StyleTarget,
     style: DssStyle,
     transition: NodeTransition,
+    overlay: Option<OverlayRecord>,
+}
+
+/// Runtime-owned placement and dismissal metadata for a floating overlay root.
+#[derive(Clone, Copy, Debug)]
+struct OverlayRecord {
+    anchor: Rect,
+    dismiss: DismissPolicy,
 }
 
 /// Per-node interaction progress in linear `0.0..=1.0` space.
@@ -307,6 +399,19 @@ impl NodeTransition {
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+fn offset_rect(rect: Rect, offset: Point) -> Rect {
+    Rect::new(
+        Point::new(rect.origin.x + offset.x, rect.origin.y + offset.y),
+        rect.size,
+    )
+}
+
+fn viewport_for(constraints: Constraints) -> Option<Rect> {
+    let max = constraints.max();
+    (max.width().is_finite() && max.height().is_finite() && max.width() > 0.0 && max.height() > 0.0)
+        .then(|| Rect::new(Point::ZERO, max))
 }
 
 /// Resolves one axis of the DSS width/height properties into layout bounds.
@@ -413,6 +518,8 @@ impl UiRuntime {
             window_commands: Vec::new(),
             redraw_requested: true,
             environment,
+            overlay_roots: Vec::new(),
+            viewport: None,
             clipboard: Rc::new(RefCell::new(Box::new(drawen_core::MemoryClipboard::new()))),
             stats: RuntimeStats::default(),
             pending_damage: None,
@@ -833,6 +940,13 @@ impl UiRuntime {
             self.stats.record_layout(Duration::ZERO, true);
             return self.layout.as_ref().ok_or(UiRuntimeError::InvalidLayout);
         }
+        self.overlay_roots.clear();
+        self.viewport = viewport_for(constraints);
+        for slot in &mut self.nodes {
+            if let Some(node) = &mut slot.node {
+                node.overlay = None;
+            }
+        }
         let started = Instant::now();
         match catch_unwind(AssertUnwindSafe(|| {
             self.style_tree();
@@ -863,6 +977,23 @@ impl UiRuntime {
     #[must_use]
     pub const fn last_layout(&self) -> Option<&LayoutResult> {
         self.layout.as_ref()
+    }
+
+    /// Clamps overlay measurement to the current viewport minus `margin`.
+    fn overlay_constraints(&self, constraints: Constraints, margin: f32) -> Constraints {
+        let Some(viewport) = self.viewport else {
+            return constraints;
+        };
+        let margin = margin.max(0.0);
+        let max = Size::new(
+            (viewport.size.width() - margin * 2.0).max(0.0),
+            (viewport.size.height() - margin * 2.0).max(0.0),
+        )
+        .unwrap_or(Size::ZERO);
+        let min = constraints.min();
+        let min = Size::new(min.width().min(max.width()), min.height().min(max.height()))
+            .unwrap_or(Size::ZERO);
+        Constraints::new(min, max).unwrap_or(constraints)
     }
 
     /// Returns the widget currently receiving keyboard input.
@@ -1062,6 +1193,12 @@ impl UiRuntime {
             self.style_tree();
             let mut paint = PaintContext::new(&mut cached);
             self.paint_node(self.root, &mut paint);
+            for id in self.overlay_roots.clone() {
+                if self.is_visible(id) {
+                    self.paint_node(id, &mut paint);
+                }
+            }
+            self.paint_floating(&mut paint);
             self.paint_focus_ring(&mut paint);
         })) {
             Ok(()) => {
@@ -1101,6 +1238,17 @@ impl UiRuntime {
         self.invalidate_paint();
         if matches!(event, InputEvent::WindowFocusChanged(false)) {
             self.cancel_interactions();
+            return EventStatus::Handled;
+        }
+        if let InputEvent::PointerDown(pointer) = event
+            && pointer.button == Some(PointerButton::Primary)
+        {
+            self.dismiss_overlays_at(pointer.position);
+        }
+        if let InputEvent::KeyDown(key) = event
+            && key.key == Key::Named(NamedKey::Escape)
+            && self.dismiss_top_overlay()
+        {
             return EventStatus::Handled;
         }
         if let InputEvent::PointerLeave(pointer) = event {
@@ -1188,6 +1336,110 @@ impl UiRuntime {
             let _ = self.dispatch_synthetic_pointer(target, &event);
         }
         self.set_focus(None);
+        self.dismiss_all_overlays();
+    }
+
+    fn dismiss_all_overlays(&mut self) {
+        let roots = self.overlay_roots.clone();
+        let mut changed = false;
+        for id in roots.into_iter().rev() {
+            if !self.is_visible(id) {
+                continue;
+            }
+            let Some(record) = self.node(id).and_then(|node| node.overlay) else {
+                continue;
+            };
+            if record.dismiss == DismissPolicy::None {
+                continue;
+            }
+            let Some(owner) = self.node(id).and_then(|node| node.parent) else {
+                continue;
+            };
+            changed |= self
+                .node_mut(owner)
+                .and_then(|node| node.widget.as_deref_mut())
+                .is_some_and(Widget::dismiss_overlay);
+        }
+        if changed {
+            self.invalidate_layout();
+        }
+    }
+
+    /// Asks light-dismissible overlays to close after a click at `position`.
+    ///
+    /// A click inside any open overlay is delivered normally and closes
+    /// nothing. A click on an overlay's own anchor is also left to that
+    /// overlay's trigger logic so a toggle can close and reopen it in one step.
+    fn dismiss_overlays_at(&mut self, position: Point) {
+        if self.overlay_roots.iter().copied().any(|id| {
+            self.is_visible(id)
+                && self
+                    .node(id)
+                    .is_some_and(|node| node.bounds.contains(position))
+        }) {
+            return;
+        }
+        let roots = self.overlay_roots.clone();
+        let mut changed = false;
+        for id in roots.into_iter().rev() {
+            if !self.is_visible(id) {
+                continue;
+            }
+            let Some((anchor, dismiss, owner)) = self.node(id).and_then(|node| {
+                node.overlay
+                    .map(|overlay| (overlay.anchor, overlay.dismiss, node.parent))
+            }) else {
+                continue;
+            };
+            let Some(owner) = owner else {
+                continue;
+            };
+            let anchor = self
+                .node(owner)
+                .map_or(anchor, |node| offset_rect(anchor, node.bounds.origin));
+            if dismiss != DismissPolicy::Light || anchor.contains(position) {
+                continue;
+            }
+            changed |= self
+                .node_mut(owner)
+                .and_then(|node| node.widget.as_deref_mut())
+                .is_some_and(Widget::dismiss_overlay);
+        }
+        if changed {
+            self.invalidate_layout();
+        }
+    }
+
+    /// Asks the topmost dismissible overlay to close after Escape.
+    ///
+    /// Returns whether a widget accepted the dismissal. Overlays that own the
+    /// key, such as a text field inside a dialog, can leave their owner's
+    /// policy as [`DismissPolicy::None`] and handle Escape themselves.
+    fn dismiss_top_overlay(&mut self) -> bool {
+        let roots = self.overlay_roots.clone();
+        for id in roots.into_iter().rev() {
+            if !self.is_visible(id) {
+                continue;
+            }
+            let Some(record) = self.node(id).and_then(|node| node.overlay) else {
+                continue;
+            };
+            if record.dismiss == DismissPolicy::None {
+                continue;
+            }
+            let Some(owner) = self.node(id).and_then(|node| node.parent) else {
+                continue;
+            };
+            let dismissed = self
+                .node_mut(owner)
+                .and_then(|node| node.widget.as_deref_mut())
+                .is_some_and(Widget::dismiss_overlay);
+            if dismissed {
+                self.invalidate_layout();
+                return true;
+            }
+        }
+        false
     }
 
     fn clear_hover(&mut self, pointer: &drawen_core::PointerEvent) -> EventStatus {
@@ -1414,14 +1666,48 @@ impl UiRuntime {
         if clips_children {
             context.with_clip(node.bounds, |context| {
                 for child in &node.children {
+                    if self.is_overlay_root(*child) {
+                        continue;
+                    }
                     self.paint_node(*child, context);
                 }
             });
         } else {
             for child in &node.children {
+                if self.is_overlay_root(*child) {
+                    continue;
+                }
                 self.paint_node(*child, context);
             }
         }
+    }
+
+    /// Paints widget-owned content that must float above the retained tree.
+    ///
+    /// Tooltips use this hook instead of owning an overlay subtree: their
+    /// bubble is non-interactive and positioned relative to the node's final
+    /// bounds, but must not be clipped or covered by later siblings.
+    fn paint_floating(&self, context: &mut PaintContext<'_>) {
+        for (index, slot) in self.nodes.iter().enumerate() {
+            let Some(node) = &slot.node else {
+                continue;
+            };
+            let Ok(index) = u32::try_from(index) else {
+                continue;
+            };
+            let id = WidgetId::new(index, slot.generation);
+            if !node.visible || !self.is_visible(id) {
+                continue;
+            }
+            let Some(widget) = node.widget.as_ref() else {
+                continue;
+            };
+            widget.paint_floating(context, &self.environment, node.bounds);
+        }
+    }
+
+    fn is_overlay_root(&self, id: WidgetId) -> bool {
+        self.node(id).is_some_and(|node| node.overlay.is_some())
     }
 
     /// Paints the standard keyboard focus ring around the focused control.
@@ -1620,6 +1906,14 @@ impl UiRuntime {
 
     fn hit_test(&self, position: Point) -> Option<WidgetId> {
         self.layout.as_ref()?;
+        for id in self.overlay_roots.iter().rev().copied() {
+            if !self.is_visible(id) {
+                continue;
+            }
+            if let Some(hit) = self.hit_test_node(id, position) {
+                return Some(hit);
+            }
+        }
         self.hit_test_node(self.root, position)
     }
 
@@ -1629,6 +1923,9 @@ impl UiRuntime {
             return None;
         }
         for child in node.children.iter().rev() {
+            if self.is_overlay_root(*child) {
+                continue;
+            }
             if let Some(hit) = self.hit_test_node(*child, position) {
                 return Some(hit);
             }
@@ -1787,6 +2084,7 @@ impl UiRuntime {
             style_target: StyleTarget::empty(),
             style: DssStyle::default(),
             transition: NodeTransition::default(),
+            overlay: None,
         };
         if let Some(index) = self.free_slots.pop() {
             let slot = &mut self.nodes[usize::try_from(index).expect("u32 fits usize")];
@@ -1816,6 +2114,7 @@ impl UiRuntime {
         }
         self.pointer_capture.retain(|_, captured| *captured != id);
         self.hovered.retain(|_, hovered| *hovered != id);
+        self.overlay_roots.retain(|overlay| *overlay != id);
         if self.focused == Some(id) {
             self.focused = None;
         }
@@ -1856,6 +2155,7 @@ impl UiRuntime {
         self.cached_display_list = None;
         self.pointer_capture.clear();
         self.hovered.clear();
+        self.overlay_roots.clear();
         self.focused = None;
     }
 
@@ -2864,5 +3164,153 @@ mod tests {
         let (hover, _, _) = observed.borrow().last().copied().expect("painted once");
         assert!((hover - 1.0).abs() < f32::EPSILON);
         assert!(runtime.next_frame_in().is_none());
+    }
+
+    struct Solid {
+        size: Size,
+        color: Color,
+        name: &'static str,
+        hits: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Widget for Solid {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(self.size))
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, self.color);
+        }
+
+        fn handle_event(
+            &mut self,
+            context: &mut EventContext<'_>,
+            event: &InputEvent,
+        ) -> EventStatus {
+            if context.phase() == EventPhase::Target && matches!(event, InputEvent::PointerDown(_))
+            {
+                self.hits.borrow_mut().push(self.name);
+                return EventStatus::Handled;
+            }
+            EventStatus::Ignored
+        }
+    }
+
+    struct FloatingProbe;
+
+    impl Widget for FloatingProbe {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let anchor_size = size(10.0, 10.0);
+            let (anchor, _) = context
+                .layout_child(
+                    0,
+                    Constraints::tight(anchor_size).expect("valid tight size"),
+                )
+                .expect("anchor child");
+            let (sibling, _) = context
+                .layout_child(
+                    1,
+                    Constraints::tight(size(50.0, 50.0)).expect("valid tight size"),
+                )
+                .expect("sibling child");
+            let (overlay, _, origin) = context
+                .layout_child_overlay(
+                    2,
+                    Constraints::loose(size(50.0, 50.0)),
+                    Rect::new(Point::ZERO, anchor_size),
+                    super::OverlayOptions::new(
+                        super::overlay::OverlayPlacement::new(
+                            super::overlay::OverlaySide::Bottom,
+                            super::overlay::OverlayAlign::Start,
+                        )
+                        .with_offset(0.0),
+                    )
+                    .with_margin(0.0),
+                )
+                .expect("overlay child");
+            LayoutResult::with_children(
+                constraints.constrain(anchor_size),
+                vec![
+                    ChildLayout::new(anchor, Point::ZERO),
+                    ChildLayout::new(sibling, Point::ZERO),
+                    ChildLayout::new(overlay, origin),
+                ],
+            )
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+    }
+
+    #[test]
+    fn paints_floating_children_above_later_siblings_and_hit_tests_them_first() {
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = UiRuntime::new(FloatingProbe);
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(10.0, 10.0),
+                    color: Color::rgba8(255, 0, 0, 255),
+                    name: "anchor",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("anchor");
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(50.0, 50.0),
+                    color: Color::rgba8(0, 255, 0, 255),
+                    name: "sibling",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("sibling");
+        let overlay = runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(50.0, 50.0),
+                    color: Color::rgba8(0, 0, 255, 255),
+                    name: "overlay",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("overlay");
+
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+
+        assert_eq!(
+            runtime.bounds(overlay),
+            Some(Rect::new(Point::new(0.0, 10.0), size(50.0, 50.0)))
+        );
+        assert_eq!(
+            runtime.dispatch_event(&pointer(Point::new(30.0, 30.0), true)),
+            EventStatus::Handled
+        );
+        assert_eq!(*hits.borrow(), vec!["overlay"]);
+
+        let mut display_list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut display_list))
+            .expect("paint succeeds");
+        let last_fill = display_list.commands().iter().rev().find_map(|command| {
+            if let DisplayCommand::FillRect { color, .. } = command {
+                Some(*color)
+            } else {
+                None
+            }
+        });
+        assert_eq!(last_fill, Some(Color::rgba8(0, 0, 255, 255)));
     }
 }

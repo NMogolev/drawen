@@ -18,6 +18,7 @@ mod dss;
 mod environment;
 mod event;
 mod layout;
+mod overlay;
 mod row;
 mod runtime;
 mod signal;
@@ -46,6 +47,9 @@ pub use dss::{
 pub use environment::UiEnvironment;
 pub use event::{EventContext, EventPhase, EventStatus, ResizeEdge, WindowCommand};
 pub use layout::{ChildLayout, LayoutResult};
+pub use overlay::{
+    DismissPolicy, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide, place_overlay,
+};
 pub use row::Row;
 pub use runtime::{
     DirtyFlags, FrameDiagnostics, LayoutContext, RuntimeStats, UiRuntime, UiRuntimeError,

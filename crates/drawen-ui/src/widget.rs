@@ -36,6 +36,20 @@ pub trait Widget {
     /// The runtime paints descendants after this method returns.
     fn paint(&self, _context: &mut PaintContext<'_>, _environment: &UiEnvironment, _bounds: Rect) {}
 
+    /// Records paint operations that must appear above every normal tree node.
+    ///
+    /// The runtime calls this after the tree and floating overlay subtrees are
+    /// painted, so content can extend beyond `bounds` without being clipped or
+    /// covered by later siblings. Tooltips use this hook for their bubble; the
+    /// painted region is intentionally outside hit testing and focus traversal.
+    fn paint_floating(
+        &self,
+        _context: &mut PaintContext<'_>,
+        _environment: &UiEnvironment,
+        _bounds: Rect,
+    ) {
+    }
+
     /// Records paint operations using the style resolved for this node.
     ///
     /// The default forwards to [`Widget::paint`] for widgets that only use the
@@ -93,6 +107,16 @@ pub trait Widget {
         _event: &InputEvent,
     ) -> EventStatus {
         EventStatus::Ignored
+    }
+
+    /// Closes a light-dismissible overlay owned by this widget.
+    ///
+    /// The runtime calls this when a primary click lands outside the overlay
+    /// subtree and its anchor, or when Escape is pressed. Return `true` when
+    /// the widget changed state and the runtime should rebuild layout and
+    /// paint output.
+    fn dismiss_overlay(&mut self) -> bool {
+        false
     }
 
     /// Returns whether this widget may receive keyboard focus.
@@ -172,6 +196,15 @@ where
         (**self).paint_styled(context, environment, bounds, style);
     }
 
+    fn paint_floating(
+        &self,
+        context: &mut PaintContext<'_>,
+        environment: &UiEnvironment,
+        bounds: Rect,
+    ) {
+        (**self).paint_floating(context, environment, bounds);
+    }
+
     fn advance_animation(&mut self, delta: Duration, settle: bool) -> bool {
         (**self).advance_animation(delta, settle)
     }
@@ -186,6 +219,10 @@ where
 
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
         (**self).handle_event(context, event)
+    }
+
+    fn dismiss_overlay(&mut self) -> bool {
+        (**self).dismiss_overlay()
     }
 
     fn accepts_focus(&self) -> bool {
