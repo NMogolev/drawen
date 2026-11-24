@@ -144,6 +144,16 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    /// Asks the runtime to close the nearest floating overlay that contains
+    /// this widget.
+    ///
+    /// Menus and dialogs use this after an action so the application does not
+    /// need a second pointer event to dismiss the surface. The overlay owner
+    /// still decides whether to close through [`crate::Widget::dismiss_overlay`].
+    pub fn request_overlay_dismiss(&mut self) {
+        self.effects.overlay_dismiss_target = Some(self.current_target);
+    }
+
     /// Requests keyboard focus for the current widget.
     pub fn request_focus(&mut self) {
         self.effects.focus_request = Some(FocusRequest::Set(self.current_target));
@@ -196,6 +206,7 @@ pub(crate) struct EventEffects {
     pub(crate) pointer_capture: HashMap<PointerId, WidgetId>,
     pub(crate) focused: Option<WidgetId>,
     pub(crate) focus_request: Option<FocusRequest>,
+    pub(crate) overlay_dismiss_target: Option<WidgetId>,
     pub(crate) layout_requested: bool,
     pub(crate) redraw_requested: bool,
     pub(crate) window_commands: Vec<WindowCommand>,

@@ -337,6 +337,7 @@ mod tests {
             pointer_capture: HashMap::new(),
             focused: None,
             focus_request: None,
+            overlay_dismiss_target: None,
             layout_requested: false,
             redraw_requested: false,
             window_commands: Vec::new(),

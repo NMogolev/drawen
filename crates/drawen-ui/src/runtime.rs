@@ -1269,6 +1269,7 @@ impl UiRuntime {
             pointer_capture: self.pointer_capture.clone(),
             focused: self.focused,
             focus_request: None,
+            overlay_dismiss_target: None,
             layout_requested: false,
             redraw_requested: false,
             window_commands: Vec::new(),
@@ -1355,10 +1356,14 @@ impl UiRuntime {
             let Some(owner) = self.node(id).and_then(|node| node.parent) else {
                 continue;
             };
-            changed |= self
+            let dismissed = self
                 .node_mut(owner)
                 .and_then(|node| node.widget.as_deref_mut())
                 .is_some_and(Widget::dismiss_overlay);
+            if dismissed {
+                self.release_overlay_focus(id);
+                changed = true;
+            }
         }
         if changed {
             self.invalidate_layout();
@@ -1400,10 +1405,14 @@ impl UiRuntime {
             if dismiss != DismissPolicy::Light || anchor.contains(position) {
                 continue;
             }
-            changed |= self
+            let dismissed = self
                 .node_mut(owner)
                 .and_then(|node| node.widget.as_deref_mut())
                 .is_some_and(Widget::dismiss_overlay);
+            if dismissed {
+                self.release_overlay_focus(id);
+                changed = true;
+            }
         }
         if changed {
             self.invalidate_layout();
@@ -1435,11 +1444,42 @@ impl UiRuntime {
                 .and_then(|node| node.widget.as_deref_mut())
                 .is_some_and(Widget::dismiss_overlay);
             if dismissed {
+                self.release_overlay_focus(id);
                 self.invalidate_layout();
                 return true;
             }
         }
         false
+    }
+
+    /// Dismisses the nearest overlay that contains `target`.
+    ///
+    /// Used by widgets that complete an action inside a menu or dialog and ask
+    /// the runtime to close the surrounding surface without a second click.
+    fn dismiss_overlay_containing(&mut self, target: WidgetId) {
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let Some(node) = self.node(id) else {
+                return;
+            };
+            let is_overlay = node.overlay.is_some();
+            let parent = node.parent;
+            if is_overlay {
+                let Some(owner) = parent else {
+                    return;
+                };
+                let dismissed = self
+                    .node_mut(owner)
+                    .and_then(|node| node.widget.as_deref_mut())
+                    .is_some_and(Widget::dismiss_overlay);
+                if dismissed {
+                    self.release_overlay_focus(id);
+                    self.invalidate_layout();
+                }
+                return;
+            }
+            current = parent;
+        }
     }
 
     fn clear_hover(&mut self, pointer: &drawen_core::PointerEvent) -> EventStatus {
@@ -1805,6 +1845,7 @@ impl UiRuntime {
             pointer_capture: self.pointer_capture.clone(),
             focused: self.focused,
             focus_request: None,
+            overlay_dismiss_target: None,
             layout_requested: false,
             redraw_requested: false,
             window_commands: Vec::new(),
@@ -1962,6 +2003,25 @@ impl UiRuntime {
         true
     }
 
+    /// Returns whether keyboard focus currently sits inside `ancestor`.
+    fn focus_within(&self, ancestor: WidgetId) -> bool {
+        let mut current = self.focused;
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.node(id).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// Moves focus out of an overlay that is about to disappear.
+    fn release_overlay_focus(&mut self, overlay: WidgetId) {
+        if self.focus_within(overlay) {
+            self.set_focus(None);
+        }
+    }
+
     fn dispatch_to(
         &mut self,
         id: WidgetId,
@@ -2024,6 +2084,9 @@ impl UiRuntime {
         if effects.layout_requested {
             self.invalidate_layout();
         }
+        if let Some(target) = effects.overlay_dismiss_target {
+            self.dismiss_overlay_containing(target);
+        }
         let Some(request) = effects.focus_request else {
             return;
         };
@@ -2055,6 +2118,7 @@ impl UiRuntime {
                 pointer_capture: self.pointer_capture.clone(),
                 focused: self.focused,
                 focus_request: None,
+                overlay_dismiss_target: None,
                 layout_requested: false,
                 redraw_requested: false,
                 window_commands: Vec::new(),
