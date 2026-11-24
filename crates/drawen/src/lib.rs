@@ -87,12 +87,12 @@ pub use drawen_widgets::AudioPaleoSession;
 pub use drawen_widgets::{
     Alert, AlertTone, Align, Alignment, Avatar, AvatarStatus, Badge, BadgeTone, Box, Button,
     ButtonStyle, Card, CardStyle, Checkbox, ComboBox, Container, Divider, DividerAxis, DockArea,
-    DockAreaError, DockItem, Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, MenuBar,
-    Padding, Popover, PopoverTrigger, ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView,
-    SegmentedControl, SelectionMode, SelectionModel, SizedBox, Skeleton, Slider, Spinner,
-    SplitAxis, Splitter, Stack, Switch, TabBar, Text, TextEdit, TextField, TextInput, TitleBar,
-    TitleBarStyle, Toolbar, Tooltip, VirtualDataSource, VirtualList, VirtualTable,
-    VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
+    DockAreaError, DockItem, Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, Menu,
+    MenuBar, MenuEntry, Padding, Popover, PopoverTrigger, ProgressBar, RadioButton, RadioGroup,
+    ScrollAxis, ScrollView, SegmentedControl, SelectionMode, SelectionModel, SizedBox, Skeleton,
+    Slider, Spinner, SplitAxis, Splitter, Stack, Switch, TabBar, Text, TextEdit, TextField,
+    TextInput, TitleBar, TitleBarStyle, Toolbar, Tooltip, VirtualDataSource, VirtualList,
+    VirtualTable, VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
 };
 #[cfg(feature = "media")]
 pub use drawen_widgets::{

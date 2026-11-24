@@ -464,6 +464,35 @@ the panel at the pointer, which is the usual context-menu shape.
 `PopoverTrigger::Manual` is the default: the application calls `set_open`,
 `open_at`, or `close` and reacts to the `opened()` and `closed()` signals.
 
+`Menu` supplies the rows for a dropdown or context menu. It is data-driven,
+paints its own surface, and handles pointer and keyboard navigation:
+
+```rust
+use drawen::{Button, Menu, MenuEntry, Popover, PopoverTrigger};
+
+let menu = Menu::new([
+    MenuEntry::item("Duplicate").with_shortcut("Ctrl+D"),
+    MenuEntry::item("Rename").with_shortcut("F2"),
+    MenuEntry::separator(),
+    MenuEntry::item("Move to trash").with_shortcut("Del"),
+]);
+let selected = menu.selected();
+let popover = Popover::new().with_trigger(PopoverTrigger::Primary);
+let popover = runtime.append_child(runtime.root(), popover)?;
+let anchor = runtime.append_child(popover, Button::new())?;
+let menu = runtime.append_child(popover, menu)?;
+
+selected.subscribe(|index| { /* run the action */ });
+// After opened() fires and dispatch_event returns, move focus into the menu
+// with runtime.focus_widget(menu) so the arrow keys reach it.
+```
+
+Use `PopoverTrigger::Secondary` for a context menu: the same menu opens at the
+pointer instead of the anchor's edge. Selecting a row emits `selected(index)` and
+asks the runtime to dismiss the surrounding overlay, so the application does not
+close it manually. Separators and disabled rows are skipped by keyboard
+navigation and never emit.
+
 Rules that keep overlays predictable:
 
 - Placement is a request, not a coordinate. Choose a side and an alignment with

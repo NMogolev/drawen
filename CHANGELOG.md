@@ -26,6 +26,12 @@ in the headings because the version itself must stay valid semver; see
 - Added `Tooltip`, a one-child anchor wrapper with a delayed fade, placement,
   reduced-motion handling, and a bubble that is painted above siblings and
   skipped by hit testing.
+- Added `Menu` and `MenuEntry`, a data-driven vertical action list with
+  separators, shortcuts, disabled rows, pointer and keyboard navigation, and a
+  `selected(index)` signal. Place it in a `Popover` content slot for dropdowns
+  and pointer-anchored context menus.
+- Added `EventContext::request_overlay_dismiss`, so an action inside a menu or
+  dialog can close the surrounding overlay without a second pointer event.
 
 ### Fonts
 

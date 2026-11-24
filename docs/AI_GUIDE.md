@@ -48,6 +48,8 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A dropdown that expands inside its parent | `Popover`; the runtime owns an anchored floating overlay layer |
 | `tooltip.attach(widget)` | `Tooltip` is a one-child container; append the anchor as its child |
 | `popover.set_content(...)` | `Popover` has exactly two children: anchor first, floating content second |
+| `menu.add_item(...)` | `Menu::new([MenuEntry::item("...")])`, placed in a `Popover` content slot |
+| Hand-built context menu | `Popover` with `PopoverTrigger::Secondary` plus a `Menu` |
 
 ## Q&A
 
@@ -114,6 +116,11 @@ edges and paints above the rest of the tree.
 let tooltip = runtime.append_child(runtime.root(), Tooltip::new("Refresh"))?;
 let button = runtime.append_child(tooltip, Button::new())?;
 
+let menu = Menu::new([
+    MenuEntry::item("Duplicate").with_shortcut("Ctrl+D"),
+    MenuEntry::separator(),
+    MenuEntry::item("Move to trash").disabled(),
+]);
 let popover = runtime.append_child(
     runtime.root(),
     Popover::new().with_trigger(PopoverTrigger::Primary),
@@ -123,8 +130,9 @@ let panel = runtime.append_child(popover, menu)?; // child 1 floats
 ```
 
 `Tooltip` takes one child (the anchor). `Popover` takes exactly two: anchor,
-then floating content. Light dismissal (outside primary click, Escape, focus
-loss) is on by default. See
+then floating content. `Menu` supplies data-driven rows and emits
+`selected(index)`; selecting a row also dismisses the surrounding overlay. Light
+dismissal (outside primary click, Escape, focus loss) is on by default. See
 [RECIPES.md](RECIPES.md#8-tooltips-popovers-and-floating-menus).
 
 ### "Play this MP4 and turn on the sound."

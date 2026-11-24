@@ -1,8 +1,9 @@
-//! Anchored overlays: tooltips and a floating menu.
+//! Anchored overlays: tooltips, a dropdown menu, and a context menu.
 //!
-//! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content.
-//! The runtime measures the floating part only while it is open, flips it when
-//! the window edge is too close, and paints it above the rest of the tree.
+//! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content,
+//! and `Menu` supplies the rows. The runtime measures the floating part only
+//! while it is open, flips it when the window edge is too close, and paints it
+//! above the rest of the tree.
 //!
 //! Run it with `cargo run -p drawen --example overlays`.
 
@@ -13,9 +14,9 @@ use std::{
 };
 
 use drawen::{
-    Border, Box, Button, Color, Column, Constraints, Insets, LayoutContext, LayoutResult,
-    OverlayPlacement, Padding, Popover, PopoverTrigger, Rect, Row, Size, SizedBox, Subscription,
-    Text, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
+    Border, Box, Button, Color, Column, Constraints, Insets, LayoutContext, LayoutResult, Menu,
+    MenuEntry, OverlayPlacement, Padding, Popover, PopoverTrigger, Rect, Row, Size, SizedBox,
+    Subscription, Text, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -30,6 +31,10 @@ fn ink() -> Color {
 
 fn muted() -> Color {
     Color::rgba8(96, 105, 115, 255)
+}
+
+fn line() -> Color {
+    Color::rgba8(214, 218, 222, 255)
 }
 
 /// Paints the shared status line without owning any state of its own.
@@ -62,15 +67,15 @@ struct OverlayDemo {
     runtime: UiRuntime,
     size: Size,
     dirty: Rc<Cell<bool>>,
+    pending_focus: Rc<Cell<Option<WidgetId>>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl OverlayDemo {
     fn new() -> Self {
-        let status = Rc::new(RefCell::new(
-            "Hover a button, or open the menu.".to_string(),
-        ));
+        let status = Rc::new(RefCell::new("Hover a button, or open a menu.".to_string()));
         let dirty = Rc::new(Cell::new(false));
+        let pending_focus = Rc::new(Cell::new(None));
         let mut subscriptions = Vec::new();
 
         let mut runtime = UiRuntime::new(Box::new().with_background(Color::WHITE));
@@ -93,13 +98,28 @@ impl OverlayDemo {
         append_text(
             &mut runtime,
             subtitle,
-            "Tooltips and anchored menus live in the runtime overlay layer.",
+            "Tooltips, dropdown menus, and pointer-anchored context menus.",
             13.0,
             muted(),
         );
 
         build_toolbar(&mut runtime, column);
-        build_menu(&mut runtime, column, &status, &dirty, &mut subscriptions);
+        build_dropdown(
+            &mut runtime,
+            column,
+            &status,
+            &dirty,
+            &pending_focus,
+            &mut subscriptions,
+        );
+        build_context_menu(
+            &mut runtime,
+            column,
+            &status,
+            &dirty,
+            &pending_focus,
+            &mut subscriptions,
+        );
 
         let status_row = Padding::new(Insets::new(22.0, 0.0, 0.0, 0.0));
         let status_row = runtime
@@ -114,7 +134,7 @@ impl OverlayDemo {
             )
             .expect("status row accepts one child");
 
-        let size = Size::new(720.0, 420.0).expect("window size is valid");
+        let size = Size::new(720.0, 440.0).expect("window size is valid");
         runtime
             .layout(Constraints::tight(size).expect("window constraints are valid"))
             .expect("layout succeeds");
@@ -123,6 +143,7 @@ impl OverlayDemo {
             runtime,
             size,
             dirty,
+            pending_focus,
             _subscriptions: subscriptions,
         }
     }
@@ -170,17 +191,18 @@ fn build_toolbar(runtime: &mut UiRuntime, column: WidgetId) {
     }
 }
 
-/// Adds a button whose panel floats below it, plus the status subscriptions.
-fn build_menu(
+/// Adds a button whose menu floats below it and moves focus into the menu.
+fn build_dropdown(
     runtime: &mut UiRuntime,
     column: WidgetId,
     status: &Rc<RefCell<String>>,
     dirty: &Rc<Cell<bool>>,
+    pending_focus: &Rc<Cell<Option<WidgetId>>>,
     subscriptions: &mut Vec<Subscription>,
 ) {
-    let menu_row = Padding::new(Insets::new(18.0, 0.0, 0.0, 0.0));
-    let menu_row = runtime
-        .append_child(column, menu_row)
+    let row = Padding::new(Insets::new(18.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
         .expect("column accepts children");
 
     let popover = Popover::new()
@@ -189,50 +211,45 @@ fn build_menu(
     let opened = popover.opened();
     let closed = popover.closed();
     let popover = runtime
-        .append_child(menu_row, popover)
-        .expect("column accepts children");
+        .append_child(row, popover)
+        .expect("row accepts children");
 
     let anchor = runtime
         .append_child(popover, Button::new())
         .expect("popover accepts its anchor");
     append_text(runtime, anchor, "Open menu", 14.0, ink());
 
-    let panel = Box::new()
-        .with_background(Color::rgba8(252, 252, 253, 255))
-        .with_border(Border::new(1.0, Color::rgba8(214, 218, 222, 255)))
-        .with_corner_radius(6.0)
-        .with_padding(Insets::new(6.0, 6.0, 6.0, 6.0));
-    let panel = runtime
-        .append_child(popover, panel)
+    let menu_widget = Menu::new([
+        MenuEntry::item("Duplicate").with_shortcut("Ctrl+D"),
+        MenuEntry::item("Rename").with_shortcut("F2"),
+        MenuEntry::separator(),
+        MenuEntry::item("Move to trash").with_shortcut("Del"),
+    ]);
+    let selected = menu_widget.selected();
+    let menu = runtime
+        .append_child(popover, menu_widget)
         .expect("popover accepts its content");
-    let items = runtime
-        .append_child(panel, Column::new())
-        .expect("panel accepts one child");
-    for (label, message) in [
-        ("Duplicate", "Duplicated the selection"),
-        ("Rename", "Rename requested"),
-        ("Move to trash", "Moved to trash"),
-    ] {
-        let item = Button::new();
-        subscriptions.push(item.activated().subscribe({
-            let status = Rc::clone(status);
-            let dirty = Rc::clone(dirty);
-            move |()| {
-                *status.borrow_mut() = message.to_string();
-                dirty.set(true);
-            }
-        }));
-        let item = runtime
-            .append_child(items, item)
-            .expect("menu accepts items");
-        append_text(runtime, item, label, 14.0, ink());
-    }
 
+    subscriptions.push(selected.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        move |index| {
+            let message = match *index {
+                0 => "Duplicated the selection",
+                1 => "Rename requested",
+                _ => "Moved to trash",
+            };
+            *status.borrow_mut() = message.to_string();
+            dirty.set(true);
+        }
+    }));
     subscriptions.push(opened.subscribe({
         let status = Rc::clone(status);
         let dirty = Rc::clone(dirty);
+        let pending_focus = Rc::clone(pending_focus);
         move |()| {
-            *status.borrow_mut() = "Menu opened. Click outside to dismiss.".to_string();
+            *status.borrow_mut() = "Menu opened. Use the arrow keys and Enter.".to_string();
+            pending_focus.set(Some(menu));
             dirty.set(true);
         }
     }));
@@ -241,6 +258,85 @@ fn build_menu(
         let dirty = Rc::clone(dirty);
         move |()| {
             *status.borrow_mut() = "Menu closed.".to_string();
+            dirty.set(true);
+        }
+    }));
+}
+
+/// Adds a panel that opens a menu at the secondary-click position.
+fn build_context_menu(
+    runtime: &mut UiRuntime,
+    column: WidgetId,
+    status: &Rc<RefCell<String>>,
+    dirty: &Rc<Cell<bool>>,
+    pending_focus: &Rc<Cell<Option<WidgetId>>>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let row = Padding::new(Insets::new(14.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
+        .expect("column accepts children");
+
+    let popover = Popover::new()
+        .with_trigger(PopoverTrigger::Secondary)
+        .with_placement(OverlayPlacement::bottom());
+    let opened = popover.opened();
+    let closed = popover.closed();
+    let popover = runtime
+        .append_child(row, popover)
+        .expect("row accepts children");
+
+    let anchor = Box::new()
+        .with_background(Color::rgba8(246, 247, 249, 255))
+        .with_border(Border::new(1.0, line()))
+        .with_corner_radius(6.0)
+        .with_padding(Insets::new(10.0, 12.0, 10.0, 12.0));
+    let anchor = runtime
+        .append_child(popover, anchor)
+        .expect("popover accepts its anchor");
+    append_text(runtime, anchor, "Right-click this panel", 13.0, muted());
+
+    let menu_widget = Menu::new([
+        MenuEntry::item("Cut").with_shortcut("Ctrl+X"),
+        MenuEntry::item("Copy").with_shortcut("Ctrl+C"),
+        MenuEntry::item("Paste").with_shortcut("Ctrl+V"),
+        MenuEntry::separator(),
+        MenuEntry::item("Select all").with_shortcut("Ctrl+A"),
+    ]);
+    let selected = menu_widget.selected();
+    let menu = runtime
+        .append_child(popover, menu_widget)
+        .expect("popover accepts its content");
+
+    subscriptions.push(selected.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        move |index| {
+            let message = match *index {
+                0 => "Cut",
+                1 => "Copied",
+                2 => "Pasted",
+                _ => "Selected all",
+            };
+            *status.borrow_mut() = message.to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(opened.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_focus = Rc::clone(pending_focus);
+        move |()| {
+            *status.borrow_mut() = "Context menu opened at the pointer.".to_string();
+            pending_focus.set(Some(menu));
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(closed.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            *status.borrow_mut() = "Context menu closed.".to_string();
             dirty.set(true);
         }
     }));
@@ -266,6 +362,9 @@ impl WindowApplication for OverlayDemo {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                if let Some(menu) = self.pending_focus.take() {
+                    let _ = self.runtime.focus_widget(menu);
+                }
                 let state_changed = self.dirty.replace(false);
                 let widget_changed = self.runtime.take_redraw_request();
                 if state_changed {
