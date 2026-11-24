@@ -37,6 +37,7 @@ mod image_viewer;
 mod list_view;
 #[cfg(feature = "media")]
 mod media;
+mod menu;
 mod menu_bar;
 mod padding;
 #[cfg(feature = "media")]
@@ -96,6 +97,7 @@ pub use media::{
     MediaClock, MediaError, MediaFrame, MediaFrameScheduler, MediaMetadata, MediaSession,
     MediaState, MediaUpdate, VideoMetadata,
 };
+pub use menu::{Menu, MenuEntry};
 pub use menu_bar::MenuBar;
 pub use padding::Padding;
 #[cfg(feature = "media")]

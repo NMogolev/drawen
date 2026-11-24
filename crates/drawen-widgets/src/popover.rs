@@ -42,6 +42,7 @@ pub struct Popover {
     placement: OverlayPlacement,
     dismiss: DismissPolicy,
     anchor_size: Size,
+    content_rect: Rect,
     pointer_anchor: Option<Point>,
     opened: Signal<()>,
     closed: Signal<()>,
@@ -57,6 +58,7 @@ impl Popover {
             placement: OverlayPlacement::default(),
             dismiss: DismissPolicy::Light,
             anchor_size: Size::ZERO,
+            content_rect: Rect::ZERO,
             pointer_anchor: None,
             opened: Signal::new(),
             closed: Signal::new(),
@@ -168,12 +170,14 @@ impl Widget for Popover {
     ) -> LayoutResult {
         if context.child_count() == 0 {
             self.anchor_size = Size::ZERO;
+            self.content_rect = Rect::ZERO;
             return LayoutResult::new(constraints.constrain(Size::ZERO));
         }
         let (anchor, anchor_layout) = context
             .layout_child(0, constraints)
             .expect("runtime child index is valid");
         self.anchor_size = anchor_layout.size();
+        self.content_rect = Rect::ZERO;
         let mut children = vec![ChildLayout::new(anchor, Point::ZERO)];
         if self.open && context.child_count() > 1 {
             let anchor_rect = self.pointer_anchor.map_or_else(
@@ -183,7 +187,7 @@ impl Widget for Popover {
             let max = context
                 .viewport()
                 .map_or_else(|| constraints.max(), |viewport| viewport.size);
-            let (panel, _, origin) = context
+            let (panel, panel_layout, origin) = context
                 .layout_child_overlay(
                     1,
                     Constraints::loose(max),
@@ -191,6 +195,7 @@ impl Widget for Popover {
                     OverlayOptions::new(self.placement).with_dismiss(self.dismiss),
                 )
                 .expect("runtime child index is valid");
+            self.content_rect = Rect::new(origin, panel_layout.size());
             children.push(ChildLayout::new(panel, origin));
         }
         LayoutResult::with_children(self.anchor_size, children)
@@ -209,6 +214,7 @@ impl Widget for Popover {
         match event {
             InputEvent::PointerDown(pointer)
                 if self.anchor_contains(pointer.position)
+                    && !self.content_rect.contains(pointer.position)
                     && matches!(
                         self.trigger,
                         PopoverTrigger::Primary | PopoverTrigger::Secondary
@@ -216,12 +222,19 @@ impl Widget for Popover {
             {
                 match (self.trigger, pointer.button) {
                     (PopoverTrigger::Primary, Some(PointerButton::Primary)) => {
-                        context.request_focus();
+                        // A descendant such as the anchor button owns focus
+                        // when the event bubbles here; only take focus when the
+                        // popover itself was clicked.
+                        if context.phase() == EventPhase::Target {
+                            context.request_focus();
+                        }
                         self.toggle(context);
                         EventStatus::Handled
                     }
                     (PopoverTrigger::Secondary, Some(PointerButton::Secondary)) => {
-                        context.request_focus();
+                        if context.phase() == EventPhase::Target {
+                            context.request_focus();
+                        }
                         self.open_at(pointer.position);
                         context.request_layout();
                         EventStatus::Handled
