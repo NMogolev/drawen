@@ -7,7 +7,7 @@ use drawen_core::{
 use drawen_render::{PaintContext, RasterImage};
 use drawen_ui::{
     Accessibility, AccessibilityRole, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutContext, LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 use crate::image::image_size;
@@ -26,9 +26,16 @@ const CHECKER_SIZE: f32 = 16.0;
 /// At a zoom of `1.0` the image is fitted uniformly inside the viewer. Higher
 /// zoom values enlarge it and enable panning; the pan offset is clamped so the
 /// image never drifts completely out of view.
+///
+/// The zoom is a clamped [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&viewer.zoom(), &state.zoom)`. Zoom changes the drawn
+/// image scale and re-clamps the pan, so use `bind_layout` rather than `bind`.
+/// Every write is normalized to the configured zoom range; read the scalar with
+/// `viewer.zoom().get()`. The pan offset is transient interaction state, not a
+/// bindable property.
 pub struct ImageViewer {
     image: Arc<RasterImage>,
-    zoom: f32,
+    zoom: Property<f32>,
     minimum_zoom: f32,
     maximum_zoom: f32,
     pan: Point,
@@ -48,7 +55,7 @@ impl ImageViewer {
     pub fn new(image: RasterImage) -> Self {
         Self {
             image: Arc::new(image),
-            zoom: 1.0,
+            zoom: Self::zoom_property(1.0, DEFAULT_MIN_ZOOM, DEFAULT_MAX_ZOOM),
             minimum_zoom: DEFAULT_MIN_ZOOM,
             maximum_zoom: DEFAULT_MAX_ZOOM,
             pan: Point::ZERO,
@@ -63,16 +70,33 @@ impl ImageViewer {
         }
     }
 
+    /// Builds a zoom property clamped to `minimum..=maximum`, mapping a
+    /// non-finite write to `minimum`.
+    fn zoom_property(value: f32, minimum: f32, maximum: f32) -> Property<f32> {
+        Property::normalized(value, move |zoom: f32| {
+            if zoom.is_finite() {
+                zoom.clamp(minimum, maximum)
+            } else {
+                minimum
+            }
+        })
+    }
+
     /// Returns the displayed image.
     #[must_use]
     pub fn image(&self) -> &RasterImage {
         self.image.as_ref()
     }
 
-    /// Returns the current zoom relative to the fitted image.
-    #[must_use]
-    pub const fn zoom(&self) -> f32 {
-        self.zoom
+    /// Returns the zoom property shared with this viewer.
+    ///
+    /// The stored value is the zoom relative to the fitted image, clamped to the
+    /// configured range. Every write is normalized, including `UiRuntime::bind`
+    /// copies; a non-finite write falls back to the minimum zoom. Bind state with
+    /// `runtime.bind_layout(&viewer.zoom(), &state.zoom)` and read the scalar with
+    /// `viewer.zoom().get()`. The property's `changed` signal fires on every write.
+    pub fn zoom(&self) -> Property<f32> {
+        self.zoom.clone()
     }
 
     /// Returns the inclusive minimum zoom.
@@ -114,22 +138,33 @@ impl ImageViewer {
 
     /// Sets the zoom relative to the fitted image without emitting [`Self::zoom_changed`].
     ///
+    /// Emits `zoom().changed()` when the normalized value differs. When the
+    /// property is watched or bound through the runtime, the change invalidates
+    /// layout so the pan offset is re-clamped.
+    ///
     /// # Panics
     ///
     /// Panics when `zoom` is not finite.
     pub fn set_zoom(&mut self, zoom: f32) {
         assert!(zoom.is_finite(), "image viewer zoom must be finite");
-        self.zoom = zoom.clamp(self.minimum_zoom, self.maximum_zoom);
+        self.zoom.set(zoom);
         self.clamp_pan();
     }
 
     /// Restores the fitted zoom and centers the image.
+    ///
+    /// Emits `zoom().changed()` when the normalized zoom differs, but not
+    /// [`Self::zoom_changed`]. The fitted zoom of `1.0` is clamped to the
+    /// configured range.
     pub fn reset_view(&mut self) {
-        self.zoom = 1.0;
+        self.zoom.set(1.0);
         self.pan = Point::ZERO;
     }
 
     /// Returns this viewer with an explicit zoom range.
+    ///
+    /// This re-normalizes the current zoom into the new range and rebuilds the
+    /// zoom property, so call it before binding `zoom()` to application state.
     ///
     /// # Panics
     ///
@@ -151,7 +186,7 @@ impl ImageViewer {
         );
         self.minimum_zoom = minimum;
         self.maximum_zoom = maximum;
-        self.zoom = self.zoom.clamp(minimum, maximum);
+        self.zoom = Self::zoom_property(self.zoom.get(), minimum, maximum);
         self
     }
 
@@ -161,9 +196,9 @@ impl ImageViewer {
     ///
     /// Panics when `zoom` is not finite.
     #[must_use]
-    pub fn with_zoom(mut self, zoom: f32) -> Self {
+    pub fn with_zoom(self, zoom: f32) -> Self {
         assert!(zoom.is_finite(), "image viewer zoom must be finite");
-        self.zoom = zoom.clamp(self.minimum_zoom, self.maximum_zoom);
+        self.zoom.set(zoom);
         self
     }
 
@@ -204,7 +239,7 @@ impl ImageViewer {
 
     fn displayed_size(&self) -> Size {
         let content = image_size(&self.image);
-        let scale = self.base_scale_for(self.viewport) * self.zoom;
+        let scale = self.base_scale_for(self.viewport) * self.zoom.get();
         Size::new(content.width() * scale, content.height() * scale).unwrap_or(Size::ZERO)
     }
 
@@ -218,7 +253,7 @@ impl ImageViewer {
 
     fn destination(&self, bounds: Rect) -> Rect {
         let content = image_size(&self.image);
-        let scale = self.base_scale_for(bounds.size) * self.zoom;
+        let scale = self.base_scale_for(bounds.size) * self.zoom.get();
         let width = content.width() * scale;
         let height = content.height() * scale;
         Rect::new(
@@ -236,7 +271,7 @@ impl ImageViewer {
 
     fn zoom_at(&mut self, zoom: f32, anchor: Point, context: &mut EventContext<'_>) {
         let base = self.base_scale_for(self.viewport);
-        let old_scale = base * self.zoom;
+        let old_scale = base * self.zoom.get();
         let extent = image_size(&self.image);
         let center = self.local_center();
         let origin = Point::new(
@@ -252,8 +287,9 @@ impl ImageViewer {
             Point::ZERO
         };
 
-        self.zoom = zoom.clamp(self.minimum_zoom, self.maximum_zoom);
-        let new_scale = base * self.zoom;
+        self.zoom.set(zoom);
+        let zoom = self.zoom.get();
+        let new_scale = base * zoom;
         let new_origin = Point::new(
             anchor.x - image_point.x * new_scale,
             anchor.y - image_point.y * new_scale,
@@ -264,7 +300,7 @@ impl ImageViewer {
         );
         self.clamp_pan();
         context.request_redraw();
-        self.zoom_changed.emit(&self.zoom);
+        self.zoom_changed.emit(&zoom);
     }
 
     fn pan_by(&mut self, delta: Point, context: &mut EventContext<'_>) {
@@ -406,7 +442,7 @@ impl Widget for ImageViewer {
                 if delta.abs() <= f32::EPSILON {
                     return EventStatus::Ignored;
                 }
-                let zoom = self.zoom * (-delta * 0.0015).exp();
+                let zoom = self.zoom.get() * (-delta * 0.0015).exp();
                 self.zoom_at(zoom, wheel.position, context);
                 EventStatus::Handled
             }
@@ -438,17 +474,17 @@ impl ImageViewer {
         match &key.key {
             Key::Character(text) => match text.as_str() {
                 "+" | "=" => {
-                    self.zoom_at(self.zoom * ZOOM_STEP, center, context);
+                    self.zoom_at(self.zoom.get() * ZOOM_STEP, center, context);
                     EventStatus::Handled
                 }
                 "-" | "_" => {
-                    self.zoom_at(self.zoom / ZOOM_STEP, center, context);
+                    self.zoom_at(self.zoom.get() / ZOOM_STEP, center, context);
                     EventStatus::Handled
                 }
                 "0" => {
                     self.reset_view();
                     context.request_redraw();
-                    self.zoom_changed.emit(&self.zoom);
+                    self.zoom_changed.emit(&self.zoom.get());
                     EventStatus::Handled
                 }
                 _ => EventStatus::Ignored,
@@ -473,7 +509,7 @@ impl ImageViewer {
                 NamedKey::Home => {
                     self.reset_view();
                     context.request_redraw();
-                    self.zoom_changed.emit(&self.zoom);
+                    self.zoom_changed.emit(&self.zoom.get());
                     EventStatus::Handled
                 }
                 _ => EventStatus::Ignored,
@@ -485,7 +521,7 @@ impl ImageViewer {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use drawen_core::{Modifiers, PointerButtons, PointerEvent, WheelEvent};
@@ -594,8 +630,67 @@ mod tests {
     fn reset_restores_the_fitted_view() {
         let mut viewer = ImageViewer::new(image(10, 10)).with_zoom(4.0);
         viewer.reset_view();
-        assert!((viewer.zoom() - 1.0).abs() <= f32::EPSILON);
+        assert!((viewer.zoom().get() - 1.0).abs() <= f32::EPSILON);
         assert_eq!(viewer.pan(), Point::ZERO);
+    }
+
+    #[test]
+    fn bound_zoom_is_clamped_to_the_range() {
+        let zoom_state = Property::new(2.0_f32);
+        let viewer = ImageViewer::new(image(10, 10)).with_zoom_range(0.5, 4.0);
+        let zoom = viewer.zoom();
+        let mut runtime = UiRuntime::new(viewer);
+        let _binding = runtime.bind_layout(&zoom, &zoom_state);
+        runtime
+            .layout(viewport(Size::new(100.0, 100.0).expect("valid size")))
+            .expect("viewer layout succeeds");
+        assert!((zoom.get() - 2.0).abs() <= f32::EPSILON);
+
+        // A binding copies the source verbatim; the property clamps it.
+        zoom_state.set(10.0);
+        assert!((zoom.get() - 4.0).abs() <= f32::EPSILON);
+
+        zoom_state.set(0.1);
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint after a bound zoom change succeeds");
+        assert!((zoom.get() - 0.5).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn set_zoom_emits_property_changed_but_not_user_zoom_changed() {
+        let viewer = ImageViewer::new(image(10, 10));
+        let zoom = viewer.zoom();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = zoom.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = viewer.zoom_changed().subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(viewer);
+        runtime
+            .layout(viewport(Size::new(100.0, 100.0).expect("valid size")))
+            .expect("viewer layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        zoom.set(2.0);
+        assert_eq!(property_changes.borrow().len(), 1);
+        assert!(user_changes.borrow().is_empty());
+
+        // User wheel zoom emits both.
+        let wheel = InputEvent::Wheel(WheelEvent {
+            position: Point::new(50.0, 50.0),
+            delta: WheelDelta::Pixels(Point::new(0.0, -100.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert_eq!(runtime.dispatch_event(&wheel), EventStatus::Handled);
+        assert_eq!(property_changes.borrow().len(), 2);
+        assert_eq!(user_changes.borrow().len(), 1);
     }
 
     #[test]
