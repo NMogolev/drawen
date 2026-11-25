@@ -128,6 +128,9 @@ in the headings because the version itself must stay valid semver; see
 - `MediaDirector` now includes `WindowAction::RequestRedraw` in the window action
   when a window is restored, so the documented single-director snippet repaints
   the first visible frame without checking the separate `redraw` flag.
+- The winit adapter enables IME on the window, so composition (CJK input,
+  dead-key preedit) reaches editable widgets through `InputEvent::TextPreedit`
+  and `InputEvent::TextInput` instead of being silently disabled.
 
 ### Player widgets
 
@@ -200,6 +203,9 @@ in the headings because the version itself must stay valid semver; see
   work: a fixed-size `TaskPool`, cancellable `TaskHandle`s, `TaskContext`
   progress reporting and cooperative cancellation, and a `UiDispatcher` that
   moves owned results back to the UI thread and wakes the event loop.
+- `UiDispatcher` wake-ups are coalesced: a burst of sends invokes the wake
+  callback once instead of once per value, and receiving re-arms the wake so
+  values sent during a drain are never stranded without a wake-up.
 - `drawen::tasks` re-exports the pool, handles, cancellation token, dispatcher,
   and error types, so applications do not depend on the crate directly.
 
