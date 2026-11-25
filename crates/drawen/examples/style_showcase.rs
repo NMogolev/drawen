@@ -633,6 +633,7 @@ impl StyleShowcase {
     }
 
     #[cfg(all(feature = "media", not(feature = "audio")))]
+    #[allow(clippy::unused_self)] // mirrors the audio-enabled signature
     fn import_media(&mut self, _: MediaImport) {
         eprintln!(
             "Audio playback is disabled. Run `cargo run -p drawen --example style_showcase --features audio`."
