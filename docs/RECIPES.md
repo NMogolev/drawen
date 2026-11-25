@@ -861,5 +861,65 @@ Rules that keep bindings thin:
 - Use `runtime.watch(&property)` for state a widget reads at paint time without
   a widget property to bind. Use `bind_layout` / `watch_layout` when the value
   participates in layout; the next paint re-runs layout automatically.
-- `Button::enabled()` is the first bindable widget property. A disabled button
-  ignores activation, skips focus, and matches `button:disabled` in DSS.
+- Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`, and
+  `Switch::checked()` return `Property<bool>`; `Slider::value()` returns
+  `Property<f32>`. A disabled button ignores activation, skips focus, and
+  matches `button:disabled` in DSS.
+
+### Binding toggles and sliders
+
+The same shape drives every bindable control. For a checkbox, bind the checked
+property and keep the user-only `toggled()` signal for the reverse direction:
+
+```rust
+use drawen::{Checkbox, Property};
+
+let agreed = Property::new(false);
+let checkbox = Checkbox::new();
+let checked = checkbox.checked();
+let toggled = checkbox.toggled();
+let checkbox = runtime.append_child(runtime.root(), checkbox)?;
+
+let _binding = runtime.bind(&checked, &agreed); // state -> widget
+let _subscription = toggled.subscribe(move |value| {
+    agreed.set(*value); // widget -> state
+});
+```
+
+The two directions form a cycle that converges: a user toggle writes `agreed`,
+the binding copies the same value back into `checked`, and the equal write is
+silent. `Slider::value()` works the same way and clamps every copied write to
+`[minimum, maximum]`, so an out-of-range source cannot push the thumb off the
+track:
+
+```rust
+use drawen::{Property, Slider};
+
+let volume = Property::new(0.5_f32);
+let slider = Slider::new(0.0, 1.0);
+let value = slider.value();
+let slider = runtime.append_child(runtime.root(), slider)?;
+
+let _binding = runtime.bind(&value, &volume);
+volume.set(2.0); // clamped to 1.0
+```
+
+Read a scalar with `.get()`: `checkbox.is_checked()`, `slider.value().get()`.
+A property's `changed()` fires on every write; the widget's `toggled()` /
+`changed()` signal fires only on user interaction.
+
+### Migrating from 0.3
+
+The property conversion is a breaking-change batch for 0.4.0:
+
+| 0.3 | 0.4 |
+| --- | --- |
+| `Checkbox::is_checked` / `Switch::is_checked` were `const fn` | still return `bool`, but are no longer `const` |
+| `Slider::value() -> f32` (a `const fn`) | `Slider::value() -> Property<f32>`; read with `slider.value().get()` |
+| `Checkbox::set_checked` / `Switch::set_checked` emitted nothing | emit `checked().changed()` on a real change (still not `toggled()`) |
+| `Slider::set_value` emitted nothing | emits `value().changed()` on a real change (still not the user `changed()`) |
+
+`Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`. The
+user-interaction signals (`toggled()`, `changed()`, `activated()`) are
+unchanged, so existing subscription code keeps compiling; only `const`
+contexts and scalar `Slider::value()` reads need updating.

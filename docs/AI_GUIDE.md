@@ -43,6 +43,9 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `signal.connect` from any thread | `Signal::subscribe` on the UI thread, returns `drop`-based `Subscription` |
 | A `Signal<T>` that stores a value | `Signal` is value-less; `Property<T>` stores a value and emits `changed` |
 | `button.enabled = state.is_valid` | `runtime.bind(&button.enabled(), &state.is_valid)`, keep the `Binding` |
+| `checkbox.checked = state.agreed` | `runtime.bind(&checkbox.checked(), &state.agreed)`; `Switch::checked()` too |
+| `slider.value = state.volume` | `runtime.bind(&slider.value(), &state.volume)`; copies are clamped to the range |
+| Reading a slider value | `slider.value().get()` (`value()` returns `Property<f32>`); `minimum()`/`maximum()` stay `f32` |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
