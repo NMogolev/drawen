@@ -870,10 +870,13 @@ Rules that keep bindings thin:
   equality to reject bad values.
 - Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`,
   `Switch::checked()`, and `Expander::expanded()` return `Property<bool>`;
-  `Slider::value()` and `ProgressBar::progress()` return `Property<f32>`;
-  `TabBar::selected()`, `SegmentedControl::selected()`, and
-  `Dropdown::selected()` return `Property<Option<usize>>`. A disabled button
-  ignores activation, skips focus, and matches `button:disabled` in DSS.
+  `Slider::value()`, `ProgressBar::progress()`, `ImageViewer::zoom()`, and
+  `Splitter::ratio()` return `Property<f32>`; `Spinner::progress()` returns
+  `Property<Option<f32>>` (`None` is indeterminate); `TabBar::selected()`,
+  `SegmentedControl::selected()`, and `Dropdown::selected()` return
+  `Property<Option<usize>>`; `RadioGroup::selected()` returns
+  `Property<Option<T>>`. A disabled button ignores activation, skips focus, and
+  matches `button:disabled` in DSS.
 
 ### Binding toggles and sliders
 
@@ -951,6 +954,48 @@ so a stale source index cannot select a nonexistent tab. The direct setters
 (`set_selected`) still panic on an invalid index, exactly as `Slider::set_value`
 asserts finiteness while its normalizer stays lenient for binding copies.
 
+### Binding spinners, radio groups, zoom, and split ratios
+
+`Spinner::progress()` is a clamped `Property<Option<f32>>`: `None` means
+indeterminate and `Some` is clamped to `0.0..=1.0`, so bind a task fraction with
+`runtime.bind(&spinner.progress(), &state.fraction)`. The animation phase is
+internal animation state, not a bindable property.
+
+`RadioGroup::selected()` is a generic `Property<Option<T>>` shared by every
+button in the group, so one binding drives the whole set:
+
+```rust
+use drawen::{Property, RadioGroup};
+
+let choice = Property::new(Some("small"));
+let group = RadioGroup::new();
+let _binding = runtime.bind(&group.selected(), &choice);
+```
+
+Unlike the widget user signals, `RadioGroup::changed()` fires on every
+`set_selected` that stores a new value, whether from a click or a programmatic
+call; `clear()` stays silent on it. The property's own `changed()` fires on every
+write, including binding copies.
+
+`ImageViewer::zoom()` and `Splitter::ratio()` change geometry (the drawn image
+scale and the pane sizes), so bind them with `bind_layout`; the next paint
+re-measures and, for the viewer, re-clamps the pan offset. Both normalize every
+copied write to their configured range. Configure the viewer's range with
+`with_zoom_range` **before** binding `zoom()`: the builder rebuilds the property
+with the new bounds.
+
+```rust
+use drawen::{ImageViewer, Property, SplitAxis, Splitter};
+
+let zoom = Property::new(1.0_f32);
+let viewer = ImageViewer::new(image).with_zoom_range(0.5, 8.0);
+let _binding = runtime.bind_layout(&viewer.zoom(), &zoom);
+
+let ratio = Property::new(0.5_f32);
+let splitter = Splitter::new(SplitAxis::Horizontal, 0.5);
+let _binding = runtime.bind_layout(&splitter.ratio(), &ratio);
+```
+
 ### Migrating from 0.3
 
 The property conversion is a breaking-change batch for 0.4.0:
@@ -962,12 +1007,21 @@ The property conversion is a breaking-change batch for 0.4.0:
 | `ProgressBar::progress() -> f32` (a `const fn`) | `ProgressBar::progress() -> Property<f32>`; read with `.progress().get()`; `new()` also loses `const` |
 | `Expander::is_expanded` was a `const fn` | still returns `bool`, but is no longer `const`; `with_expanded` loses `const` |
 | `TabBar::selected` / `SegmentedControl::selected` / `Dropdown::selected` were `const fn -> Option<usize>` | return `Property<Option<usize>>`; read with `.selected().get()` |
+| `Spinner::progress() -> Option<f32>` (a `const fn`) | `Spinner::progress() -> Property<Option<f32>>`; read with `.progress().get()` |
+| `RadioGroup::selected() -> Option<T>` | `RadioGroup::selected() -> Property<Option<T>>`; read with `.selected().get()` |
+| `ImageViewer::zoom() -> f32` (a `const fn`) | `ImageViewer::zoom() -> Property<f32>`; read with `.zoom().get()` |
+| `Splitter::ratio() -> f32` (a `const fn`) | `Splitter::ratio() -> Property<f32>`; read with `.ratio().get()` |
 | `Checkbox::set_checked` / `Switch::set_checked` emitted nothing | emit `checked().changed()` on a real change (still not `toggled()`) |
 | `Slider::set_value` emitted nothing | emits `value().changed()` on a real change (still not the user `changed()`) |
 | `ProgressBar::set_progress` / `Expander::set_expanded` / the selection `set_selected` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
+| `Spinner::set_progress` / `ImageViewer::set_zoom` / `ImageViewer::reset_view` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
 
-`Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`. The
-user-interaction signals (`toggled()`, `changed()`, `activated()`) are
-unchanged, so existing subscription code keeps compiling; only `const`
-contexts and scalar reads (`.value()`, `.progress()`, `.selected()`) need
-updating to `.get()`. Setter signatures are unchanged.
+`Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`, as do
+`ImageViewer::minimum_zoom()`, `ImageViewer::maximum_zoom()`, and the viewer's
+pan and checkerboard accessors. The user-interaction signals (`toggled()`,
+`changed()`, `activated()`, `zoom_changed()`, `resized()`) are unchanged, so
+existing subscription code keeps compiling; only `const` contexts and scalar
+reads (`.value()`, `.progress()`, `.selected()`, `.zoom()`, `.ratio()`) need
+updating to `.get()`. Setter signatures are unchanged. `RadioGroup::changed()`
+keeps its 0.3 semantics (fires on every `set_selected`, silent on `clear`); only
+the `selected()` return type changed.

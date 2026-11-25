@@ -50,6 +50,10 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `expander.open = state.open` | `runtime.bind_layout(&expander.expanded(), &state.open)` — expanding changes geometry |
 | `tabs.selected = state.tab` | `runtime.bind_layout(&tabs.selected(), &state.tab)`; `SegmentedControl`/`Dropdown` use `bind` |
 | Reading a selection | `tabs.selected().get()` returns `Option<usize>`; an out-of-range binding copy resolves to `None` |
+| `spinner.progress = state.fraction` | `runtime.bind(&spinner.progress(), &state.fraction)`; `Property<Option<f32>>`, `None` is indeterminate |
+| `radio_group.selected = state.choice` | `runtime.bind(&group.selected(), &state.choice)`; `Property<Option<T>>`, `changed()` fires on every `set_selected` |
+| `viewer.zoom = state.zoom` | `runtime.bind_layout(&viewer.zoom(), &state.zoom)` — zoom changes geometry; call `with_zoom_range` before binding |
+| `splitter.ratio = state.ratio` | `runtime.bind_layout(&splitter.ratio(), &state.ratio)` — the ratio sets the pane sizes |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
