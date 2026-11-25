@@ -15,3 +15,4 @@ workspace = true
 accesskit = "0.24"
 drawen-core = { version = "0.3", path = "../drawen-core" }
 drawen-render = { version = "0.3", path = "../drawen-render" }
+drawen-signals = { version = "0.3", path = "../drawen-signals" }

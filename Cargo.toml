@@ -10,6 +10,7 @@ members = [
     "crates/paleo-player",
     "crates/drawen-core",
     "crates/drawen-render",
+    "crates/drawen-signals",
     "crates/drawen-ui",
     "crates/drawen-widgets",
     "crates/drawen-tasks",

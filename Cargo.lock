@@ -950,6 +950,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "drawen-signals"
+version = "0.3.0"
+
+[[package]]
 name = "drawen-software"
 version = "0.3.0"
 dependencies = [
@@ -968,6 +972,7 @@ dependencies = [
  "accesskit",
  "drawen-core",
  "drawen-render",
+ "drawen-signals",
 ]
 
 [[package]]

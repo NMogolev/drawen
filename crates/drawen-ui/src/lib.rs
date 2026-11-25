@@ -21,7 +21,6 @@ mod layout;
 mod overlay;
 mod row;
 mod runtime;
-mod signal;
 mod style;
 mod styled;
 mod theme;
@@ -40,6 +39,7 @@ pub use accessibility::{
 };
 pub use column::Column;
 pub use command::{KeyChord, KeyboardCommand};
+pub use drawen_signals::{Signal, Subscription};
 pub use dss::{
     ChildPosition, DssError, DssStyle, DssTheme, PseudoClass, Selector, StyleRule, StyleSheet,
     StyleTarget,
@@ -55,7 +55,6 @@ pub use row::Row;
 pub use runtime::{
     DirtyFlags, FrameDiagnostics, LayoutContext, RuntimeStats, UiRuntime, UiRuntimeError,
 };
-pub use signal::{Signal, Subscription};
 pub use style::{Border, SurfaceStyle};
 pub use styled::Styled;
 pub use theme::{DarkTheme, LightTheme, SystemAppearance, SystemTheme, Theme};
