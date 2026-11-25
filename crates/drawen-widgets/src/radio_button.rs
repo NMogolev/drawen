@@ -1,11 +1,9 @@
-use std::{cell::RefCell, rc::Rc};
-
 use drawen_core::{Constraints, InputEvent, Key, NamedKey, Point, PointerButton, Rect, Size};
 use drawen_render::PaintContext;
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, Border, ChildLayout, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutContext, LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const CONTROL_SIZE: f32 = 18.0;
@@ -16,9 +14,14 @@ const DOT_INSET: f32 = 5.0;
 /// A group can have no selection. Selecting one radio button replaces the
 /// group's previous value, ensuring that at most one button in the group is
 /// selected at a time.
+///
+/// The selection is a [`Property`]: bind application state to it with
+/// `runtime.bind(&group.selected(), &state.choice)`. [`Self::changed`] fires
+/// whenever [`Self::set_selected`] stores a new value (whether from a user click
+/// or a programmatic call); [`Self::clear`] stays silent on that signal.
 #[derive(Clone, Debug)]
 pub struct RadioGroup<T> {
-    selected: Rc<RefCell<Option<T>>>,
+    selected: Property<Option<T>>,
     changed: Signal<T>,
 }
 
@@ -30,29 +33,32 @@ where
     #[must_use]
     pub fn new() -> Self {
         Self {
-            selected: Rc::new(RefCell::new(None)),
+            selected: Property::new(None),
             changed: Signal::new(),
         }
     }
 
-    /// Returns the selected value, if any.
-    #[must_use]
-    pub fn selected(&self) -> Option<T> {
-        self.selected.borrow().clone()
+    /// Returns the selection property shared with this group.
+    ///
+    /// The stored value is the selected value, or `None` when nothing is
+    /// selected. Bind application state with
+    /// `runtime.bind(&group.selected(), &state.choice)` and read the scalar with
+    /// `group.selected().get()`. The property's `changed` signal fires on every
+    /// write; [`Self::changed`] fires only through [`Self::set_selected`].
+    pub fn selected(&self) -> Property<Option<T>> {
+        self.selected.clone()
     }
 
     /// Selects `value` and emits [`Self::changed`] when it differs from the current value.
     pub fn set_selected(&self, value: &T) {
-        if self.selected.borrow().as_ref() == Some(value) {
-            return;
+        if self.selected.set(Some(value.clone())) {
+            self.changed.emit(value);
         }
-        *self.selected.borrow_mut() = Some(value.clone());
-        self.changed.emit(value);
     }
 
     /// Clears the selection without emitting [`Self::changed`].
     pub fn clear(&self) {
-        *self.selected.borrow_mut() = None;
+        self.selected.set(None);
     }
 
     /// Returns a signal emitted whenever a radio button selects a new value.
@@ -106,7 +112,7 @@ where
     /// Returns whether this button's value is selected in its group.
     #[must_use]
     pub fn is_selected(&self) -> bool {
-        self.group.selected.borrow().as_ref() == Some(&self.value)
+        self.group.selected.get().as_ref() == Some(&self.value)
     }
 
     /// Returns the group controlled by this radio button.
@@ -338,8 +344,24 @@ mod tests {
         let _ = runtime.dispatch_event(&pointer(19.0, true));
         let _ = runtime.dispatch_event(&pointer(19.0, false));
 
-        assert_eq!(group.selected(), Some(2));
+        assert_eq!(group.selected().get(), Some(2));
         assert_eq!(*changes.borrow(), vec![1, 2]);
+    }
+
+    #[test]
+    fn bound_selected_follows_application_state() {
+        let choice = Property::new(Some(1_u8));
+        let group = RadioGroup::new();
+        let selected = group.selected();
+        let runtime = UiRuntime::new(Column::new());
+        let _binding = runtime.bind(&selected, &choice);
+        assert_eq!(selected.get(), Some(1));
+
+        choice.set(Some(2));
+        assert_eq!(selected.get(), Some(2));
+
+        choice.set(None);
+        assert_eq!(selected.get(), None);
     }
 
     fn pointer(y: f32, down: bool) -> InputEvent {
