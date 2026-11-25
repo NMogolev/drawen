@@ -73,14 +73,15 @@ pub use drawen_director::{
 };
 pub use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
-    AccessibilityState, AccessibilityTextSelection, Border, ChildLayout, ChildPosition, Column,
-    DEFAULT_DPI, DarkTheme, DirtyFlags, DismissPolicy, DssError, DssStyle, DssTheme, EventContext,
-    EventPhase, EventStatus, Font, FontDatabase, FontDescriptor, FontFamily, FontMetrics, FontSize,
-    FontStyle, FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand, LayoutContext,
-    LayoutResult, LightTheme, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide,
-    PseudoClass, ResizeEdge, ResolvedOverlay, Row, RuntimeStats, Selector, Signal, StyleRule,
-    StyleSheet, StyleTarget, Styled, Subscription, SurfaceStyle, SystemAppearance, SystemTheme,
-    Theme, UiEnvironment, UiRuntime, UiRuntimeError, Widget, WindowCommand, place_overlay,
+    AccessibilityState, AccessibilityTextSelection, Binding, Border, ChildLayout, ChildPosition,
+    Column, DEFAULT_DPI, DarkTheme, DirtyFlags, DismissPolicy, DssError, DssStyle, DssTheme,
+    EventContext, EventPhase, EventStatus, Font, FontDatabase, FontDescriptor, FontFamily,
+    FontMetrics, FontSize, FontStyle, FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand,
+    LayoutContext, LayoutResult, LightTheme, OverlayAlign, OverlayOptions, OverlayPlacement,
+    OverlaySide, Property, PropertyDamage, PseudoClass, ResizeEdge, ResolvedOverlay, Row,
+    RuntimeStats, Selector, Signal, StyleRule, StyleSheet, StyleTarget, Styled, Subscription,
+    SurfaceStyle, SystemAppearance, SystemTheme, Theme, UiEnvironment, UiRuntime, UiRuntimeError,
+    Widget, WindowCommand, place_overlay,
 };
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
