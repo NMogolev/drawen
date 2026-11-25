@@ -90,12 +90,17 @@ pub trait Widget {
         false
     }
 
-    /// Returns whether this widget must keep advancing while the window is hidden.
+    /// Returns whether this widget must keep advancing while it is not visible.
     ///
     /// The runtime freezes purely visual animations when the window cannot be
-    /// presented. Media widgets return `true` so their audio clocks and session
-    /// updates keep running; a widget that only changes pixels should leave the
-    /// default `false` and resume from the same state on restore.
+    /// presented or when the widget contributes no pixels: scrolled offscreen,
+    /// clipped away by a scrolling ancestor, inside a collapsed subtree, or
+    /// covered by a modal scrim.
+    /// Media widgets return `true` so their audio clocks and session updates keep
+    /// running, and stateful widgets such as toast queues return `true` so their
+    /// lifetimes keep elapsing. A widget that only changes pixels should leave
+    /// the default `false` and resume from the same state when it becomes
+    /// visible again.
     fn advances_while_hidden(&self) -> bool {
         false
     }

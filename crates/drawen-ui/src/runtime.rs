@@ -741,15 +741,29 @@ impl UiRuntime {
     /// Platform adapters should schedule a redraw after this delay when it is
     /// `Some`. The result becomes `None` once every transition has settled and
     /// no widget reports live animation through [`Widget::is_animating`].
+    /// A live loop that contributes no pixels — scrolled offscreen, clipped
+    /// away, collapsed, or under a modal scrim — does not schedule frames
+    /// unless the widget opts in through [`Widget::advances_while_hidden`].
     /// When animation is disabled while a transition is in flight, this returns
     /// `Some(Duration::ZERO)` so the next paint can snap it to its target.
     #[must_use]
     pub fn next_frame_in(&self) -> Option<Duration> {
-        let widget_animating = self.nodes.iter().any(|slot| {
-            slot.node
-                .as_ref()
-                .and_then(|node| node.widget.as_deref())
-                .is_some_and(Widget::is_animating)
+        let widget_animating = self.nodes.iter().enumerate().any(|(index, slot)| {
+            let Some(node) = &slot.node else {
+                return false;
+            };
+            let Ok(index) = u32::try_from(index) else {
+                return false;
+            };
+            let id = WidgetId::new(index, slot.generation);
+            let Some(widget) = node.widget.as_deref() else {
+                return false;
+            };
+            // An offscreen or collapsed widget must not schedule frames just
+            // because it reports a live loop; only media/state clocks that opt
+            // in keep ticking regardless of visibility.
+            widget.is_animating()
+                && (widget.advances_while_hidden() || self.animation_visible(id))
         });
         if !self.presented {
             // Visual transitions freeze while the window is hidden. Only
@@ -771,6 +785,7 @@ impl UiRuntime {
             };
             let id = WidgetId::new(index, slot.generation);
             node.transition.is_animating(self.transition_targets(id))
+                && self.animation_visible(id)
         });
         if !widget_animating && !transition_animating {
             return None;
@@ -818,15 +833,32 @@ impl UiRuntime {
         let hovered: Vec<WidgetId> = self.hovered.values().copied().collect();
         let focused = self.focused;
         let pressed = self.pressed;
+        // Snapshot per-node visibility before the mutable passes so an offscreen
+        // or collapsed widget freezes its pixels instead of spinning into the
+        // void. `settle` still completes everything for tests and screenshots.
+        let visibility: Vec<bool> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let Ok(index) = u32::try_from(index) else {
+                    return false;
+                };
+                self.animation_visible(WidgetId::new(index, slot.generation))
+            })
+            .collect();
         let mut transition_changed = false;
         if step > 0.0 && (self.presented || settle) {
-            for (index, slot) in self.nodes.iter_mut().enumerate() {
+            for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
                 let Some(node) = &mut slot.node else {
                     continue;
                 };
-                let Ok(index) = u32::try_from(index) else {
+                let Ok(index) = u32::try_from(slot_index) else {
                     continue;
                 };
+                if !settle && !visibility[slot_index] {
+                    continue;
+                }
                 let id = WidgetId::new(index, slot.generation);
                 let hover = if hovered.contains(&id) { 1.0 } else { 0.0 };
                 let press = if pressed == Some(id) { 1.0 } else { 0.0 };
@@ -840,14 +872,20 @@ impl UiRuntime {
         let mut widgets_changed = false;
         let mut widgets_animating = false;
         let presented = self.presented;
-        for slot in &mut self.nodes {
+        for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
             let Some(node) = &mut slot.node else {
                 continue;
             };
             let Some(widget) = &mut node.widget else {
                 continue;
             };
-            if !presented && !settle && !widget.advances_while_hidden() {
+            // Freeze purely visual animation when the window cannot present or
+            // the widget contributes no pixels. Media and state clocks opt back
+            // in through `advances_while_hidden`; `settle` completes everything.
+            if !settle
+                && !widget.advances_while_hidden()
+                && (!presented || !visibility[slot_index])
+            {
                 continue;
             }
             widgets_changed |= widget.advance_animation(delta, settle);
@@ -2204,6 +2242,89 @@ impl UiRuntime {
             }
             current = node.parent;
         }
+        true
+    }
+
+    /// Returns whether the node currently contributes pixels to the frame.
+    ///
+    /// A widget is animation-visible when its retained subtree is laid out
+    /// ([`Self::is_visible`]), its bounds carry positive area, they intersect
+    /// the viewport and every clipping ancestor, and no modal scrim covers
+    /// them. This is the tree-level notion of "on screen": a sticker scrolled
+    /// out of a list, a row inside a collapsed expander, a tab whose content is
+    /// not laid out, or a spinner dimmed behind a modal dialog all report
+    /// `false` even though the window itself is presented. Overlay roots float
+    /// free of ancestor clips, so a popover or modal animates regardless of
+    /// where its owner sits. Purely visual animations freeze while this is
+    /// `false`; widgets that opt in through [`Widget::advances_while_hidden`]
+    /// keep their state or media clock running regardless.
+    fn animation_visible(&self, id: WidgetId) -> bool {
+        if !self.is_visible(id) {
+            return false;
+        }
+        let Some(node) = self.node(id) else {
+            return false;
+        };
+        let bounds = node.bounds;
+        if bounds.is_empty() {
+            return false;
+        }
+        if self.under_scrim(id) {
+            return false;
+        }
+        let mut clip = self.viewport;
+        let mut floating = self.is_overlay_root(id);
+        let mut current = node.parent;
+        while let Some(ancestor_id) = current {
+            let Some(ancestor) = self.node(ancestor_id) else {
+                return false;
+            };
+            if !floating
+                && ancestor
+                    .widget
+                    .as_deref()
+                    .is_some_and(Widget::clips_children)
+            {
+                let region = ancestor.bounds;
+                clip = Some(match clip {
+                    Some(existing) => existing.intersection(region),
+                    None => region,
+                });
+            }
+            if self.is_overlay_root(ancestor_id) {
+                // Above an overlay root the normal-tree clips no longer apply.
+                floating = true;
+            }
+            current = ancestor.parent;
+        }
+        match clip {
+            Some(region) => !bounds.intersection(region).is_empty(),
+            None => true,
+        }
+    }
+
+    /// Returns whether the topmost visible modal's scrim covers the node.
+    ///
+    /// The overlay layer paints roots in open order and fills the viewport
+    /// with a themed scrim before each modal root, so everything painted
+    /// before the topmost modal — the normal tree and surfaces opened earlier
+    /// — is visually blocked. The modal itself and surfaces opened after it
+    /// paint above the scrim and stay animation-visible.
+    fn under_scrim(&self, id: WidgetId) -> bool {
+        let Some(modal) = self.modal_overlay() else {
+            return false;
+        };
+        let Some(modal_position) = self.overlay_roots.iter().position(|root| *root == modal) else {
+            return false;
+        };
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            if let Some(position) = self.overlay_roots.iter().position(|root| *root == node_id) {
+                return position < modal_position;
+            }
+            current = self.node(node_id).and_then(|node| node.parent);
+        }
+        // Normal-tree content paints below every overlay root.
         true
     }
 
@@ -3945,6 +4066,297 @@ mod tests {
             .expect("paint succeeds");
         let (hover, _, _) = observed.borrow().last().copied().expect("painted once");
         assert!((hover - 0.5).abs() < 0.05, "hover progress was {hover}");
+    }
+
+    struct VisibilityLoop {
+        ticks: Rc<Cell<u32>>,
+        media: bool,
+    }
+
+    impl Widget for VisibilityLoop {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(size(40.0, 40.0)))
+        }
+
+        fn advance_animation(&mut self, _delta: std::time::Duration, _settle: bool) -> bool {
+            self.ticks.set(self.ticks.get() + 1);
+            true
+        }
+
+        fn is_animating(&self) -> bool {
+            true
+        }
+
+        fn advances_while_hidden(&self) -> bool {
+            self.media
+        }
+    }
+
+    struct ClipHost {
+        offset: Rc<Cell<f32>>,
+    }
+
+    impl Widget for ClipHost {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let own = constraints.constrain(size(100.0, 100.0));
+            let (child, _) = context
+                .layout_child(0, Constraints::loose(size(40.0, 40.0)))
+                .expect("loop child");
+            LayoutResult::with_children(
+                own,
+                vec![ChildLayout::new(child, Point::new(0.0, self.offset.get()))],
+            )
+        }
+
+        fn clips_children(&self) -> bool {
+            true
+        }
+    }
+
+    struct CollapseHost {
+        open: Rc<Cell<bool>>,
+    }
+
+    impl Widget for CollapseHost {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let own = constraints.constrain(size(100.0, 100.0));
+            let mut children = Vec::new();
+            if self.open.get() && context.child_count() > 0 {
+                let (child, _) = context
+                    .layout_child(0, Constraints::loose(size(40.0, 40.0)))
+                    .expect("loop child");
+                children.push(ChildLayout::new(child, Point::ZERO));
+            }
+            LayoutResult::with_children(own, children)
+        }
+    }
+
+    #[test]
+    fn a_loop_scrolled_out_of_its_clip_freezes_and_resumes() {
+        let ticks = Rc::new(Cell::new(0));
+        let offset = Rc::new(Cell::new(0.0));
+        let mut runtime = UiRuntime::new(ClipHost {
+            offset: Rc::clone(&offset),
+        });
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&ticks),
+                    media: false,
+                },
+            )
+            .expect("loop");
+        let viewport = Constraints::loose(size(200.0, 200.0));
+        runtime.layout(viewport).expect("layout succeeds");
+
+        // On screen inside the clip: frames are scheduled and the loop advances.
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        let on_screen = ticks.get();
+        assert!(on_screen > 0);
+
+        // Scroll the loop past the clipping host while it stays inside the
+        // viewport: the window is presented, but the widget contributes no pixels.
+        offset.set(150.0);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("relayout succeeds");
+        assert!(
+            runtime.next_frame_in().is_none(),
+            "a clipped-away loop must not schedule frames"
+        );
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert_eq!(ticks.get(), on_screen, "a clipped-away loop is frozen");
+
+        // Scrolling it back resumes from the frozen state.
+        offset.set(0.0);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("relayout succeeds");
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert!(ticks.get() > on_screen, "the loop resumes when visible again");
+    }
+
+    #[test]
+    fn a_collapsed_subtree_freezes_its_loops() {
+        let ticks = Rc::new(Cell::new(0));
+        let open = Rc::new(Cell::new(true));
+        let mut runtime = UiRuntime::new(CollapseHost {
+            open: Rc::clone(&open),
+        });
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&ticks),
+                    media: false,
+                },
+            )
+            .expect("loop");
+        let viewport = Constraints::loose(size(200.0, 200.0));
+        runtime.layout(viewport).expect("layout succeeds");
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        let expanded = ticks.get();
+        assert!(expanded > 0);
+
+        // Collapsing drops the child from layout, so it stops animating.
+        open.set(false);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("collapse layout succeeds");
+        assert!(runtime.next_frame_in().is_none());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert_eq!(ticks.get(), expanded, "a collapsed loop is frozen");
+
+        open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("expand layout succeeds");
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert!(ticks.get() > expanded);
+    }
+
+    #[test]
+    fn media_clocks_keep_ticking_while_offscreen() {
+        let ticks = Rc::new(Cell::new(0));
+        let offset = Rc::new(Cell::new(150.0));
+        let mut runtime = UiRuntime::new(ClipHost {
+            offset: Rc::clone(&offset),
+        });
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&ticks),
+                    media: true,
+                },
+            )
+            .expect("media loop");
+        let viewport = Constraints::loose(size(200.0, 200.0));
+        runtime.layout(viewport).expect("layout succeeds");
+
+        // Offscreen, but a media/state clock opts back in: audio must not stop.
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert!(ticks.get() > 0, "media clocks keep running offscreen");
+    }
+
+    struct ScrimHost {
+        open: Rc<Cell<bool>>,
+    }
+
+    impl Widget for ScrimHost {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let own = constraints.constrain(size(200.0, 200.0));
+            let mut children = Vec::new();
+            // The background loops stay in normal layout even while the modal
+            // is open, so only the scrim can freeze them.
+            for index in 0..2 {
+                let (child, _) = context
+                    .layout_child(index, Constraints::loose(size(40.0, 40.0)))
+                    .expect("background loop");
+                children.push(ChildLayout::new(child, Point::ZERO));
+            }
+            if self.open.get() {
+                let (panel, _, origin) = context
+                    .layout_child_modal(
+                        2,
+                        Constraints::loose(size(60.0, 40.0)),
+                        DismissPolicy::None,
+                    )
+                    .expect("modal panel");
+                children.push(ChildLayout::new(panel, origin));
+            }
+            LayoutResult::with_children(own, children)
+        }
+    }
+
+    #[test]
+    fn a_modal_scrim_freezes_visual_loops_but_not_media_clocks() {
+        let visual = Rc::new(Cell::new(0));
+        let media = Rc::new(Cell::new(0));
+        let panel = Rc::new(Cell::new(0));
+        let open = Rc::new(Cell::new(false));
+        let mut runtime = UiRuntime::new(ScrimHost {
+            open: Rc::clone(&open),
+        });
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&visual),
+                    media: false,
+                },
+            )
+            .expect("visual loop");
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&media),
+                    media: true,
+                },
+            )
+            .expect("media loop");
+        runtime
+            .append_child(
+                root,
+                VisibilityLoop {
+                    ticks: Rc::clone(&panel),
+                    media: false,
+                },
+            )
+            .expect("panel loop");
+        let viewport = Constraints::loose(size(200.0, 200.0));
+        runtime.layout(viewport).expect("layout succeeds");
+
+        // Closed: the background loops animate; the panel is not laid out.
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        let visual_before = visual.get();
+        let media_before = media.get();
+        assert!(visual_before > 0);
+        assert!(media_before > 0);
+        assert_eq!(panel.get(), 0, "a closed modal panel is not laid out");
+
+        // Open: the scrim covers the normal tree. Visual loops freeze, media
+        // clocks opt back in, and the modal panel animates above its scrim.
+        open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("modal layout succeeds");
+        assert!(runtime.next_frame_in().is_some());
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert_eq!(visual.get(), visual_before, "a scrim-covered loop is frozen");
+        assert!(
+            media.get() > media_before,
+            "media clocks keep running under a scrim"
+        );
+        assert!(panel.get() > 0, "the modal panel animates above its scrim");
+
+        // Close: the background resumes from the frozen state.
+        open.set(false);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("closed layout succeeds");
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert!(
+            visual.get() > visual_before,
+            "the loop resumes when the scrim closes"
+        );
     }
 
     #[test]
