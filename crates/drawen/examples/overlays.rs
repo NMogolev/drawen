@@ -1,9 +1,10 @@
-//! Anchored overlays: tooltips, a dropdown menu, and a context menu.
+//! Anchored overlays: tooltips, dropdown menus, and a modal dialog.
 //!
 //! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content,
-//! and `Menu` supplies the rows. The runtime measures the floating part only
-//! while it is open, flips it when the window edge is too close, and paints it
-//! above the rest of the tree.
+//! and `Menu` supplies the rows. `Modal` hosts a centered `Dialog` above a scrim
+//! and traps focus inside it. The runtime measures floating and modal content
+//! only while it is open, flips anchored content when the window edge is too
+//! close, and paints both above the rest of the tree.
 //!
 //! Run it with `cargo run -p drawen --example overlays`.
 
@@ -14,9 +15,9 @@ use std::{
 };
 
 use drawen::{
-    Border, Box, Button, Color, Column, Constraints, Insets, LayoutContext, LayoutResult, Menu,
-    MenuEntry, OverlayPlacement, Padding, Popover, PopoverTrigger, Rect, Row, Size, SizedBox,
-    Subscription, Text, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
+    Border, Box, Button, Color, Column, Constraints, Dialog, Insets, LayoutContext, LayoutResult,
+    Menu, MenuEntry, Modal, OverlayPlacement, Padding, Popover, PopoverTrigger, Rect, Row, Size,
+    SizedBox, Subscription, Text, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -67,6 +68,7 @@ struct OverlayDemo {
     runtime: UiRuntime,
     size: Size,
     dirty: Rc<Cell<bool>>,
+    pending_layout: Rc<Cell<bool>>,
     pending_focus: Rc<Cell<Option<WidgetId>>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -75,6 +77,7 @@ impl OverlayDemo {
     fn new() -> Self {
         let status = Rc::new(RefCell::new("Hover a button, or open a menu.".to_string()));
         let dirty = Rc::new(Cell::new(false));
+        let pending_layout = Rc::new(Cell::new(false));
         let pending_focus = Rc::new(Cell::new(None));
         let mut subscriptions = Vec::new();
 
@@ -120,6 +123,15 @@ impl OverlayDemo {
             &pending_focus,
             &mut subscriptions,
         );
+        build_dialog(
+            &mut runtime,
+            column,
+            &status,
+            &dirty,
+            &pending_layout,
+            &pending_focus,
+            &mut subscriptions,
+        );
 
         let status_row = Padding::new(Insets::new(22.0, 0.0, 0.0, 0.0));
         let status_row = runtime
@@ -143,6 +155,7 @@ impl OverlayDemo {
             runtime,
             size,
             dirty,
+            pending_layout,
             pending_focus,
             _subscriptions: subscriptions,
         }
@@ -342,6 +355,127 @@ fn build_context_menu(
     }));
 }
 
+/// Adds a button that opens a centered modal dialog.
+fn build_dialog(
+    runtime: &mut UiRuntime,
+    column: WidgetId,
+    status: &Rc<RefCell<String>>,
+    dirty: &Rc<Cell<bool>>,
+    pending_layout: &Rc<Cell<bool>>,
+    pending_focus: &Rc<Cell<Option<WidgetId>>>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let row = Padding::new(Insets::new(22.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
+        .expect("column accepts children");
+
+    let trigger = Button::new();
+    let activated = trigger.activated();
+    let trigger = runtime
+        .append_child(row, trigger)
+        .expect("row accepts children");
+    append_text(runtime, trigger, "Open dialog", 14.0, ink());
+
+    let modal = Modal::new();
+    let handle = modal.handle();
+    let closed = modal.closed();
+    let modal = runtime
+        .append_child(column, modal)
+        .expect("column accepts children");
+
+    let dialog = runtime
+        .append_child(modal, Dialog::new())
+        .expect("modal accepts one child");
+    let content = runtime
+        .append_child(dialog, Column::new())
+        .expect("dialog accepts one child");
+    append_text(runtime, content, "Delete project?", 18.0, ink());
+
+    let body = Padding::new(Insets::new(8.0, 0.0, 16.0, 0.0));
+    let body = runtime
+        .append_child(content, body)
+        .expect("content accepts children");
+    append_text(
+        runtime,
+        body,
+        "This removes every file in the project. This cannot be undone.",
+        13.0,
+        muted(),
+    );
+
+    let actions = runtime
+        .append_child(content, Row::new())
+        .expect("content accepts children");
+    let cancel = Button::new();
+    let cancel_activated = cancel.activated();
+    let cancel = runtime
+        .append_child(actions, cancel)
+        .expect("row accepts children");
+    append_text(runtime, cancel, "Cancel", 14.0, ink());
+    runtime
+        .append_child(actions, SizedBox::new(Some(10.0), None))
+        .expect("row accepts children");
+    let confirm = Button::new();
+    let confirm_activated = confirm.activated();
+    let confirm = runtime
+        .append_child(actions, confirm)
+        .expect("row accepts children");
+    append_text(runtime, confirm, "Delete", 14.0, ink());
+
+    subscriptions.push(activated.subscribe({
+        let handle = handle.clone();
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        let pending_focus = Rc::clone(pending_focus);
+        move |()| {
+            handle.open();
+            pending_layout.set(true);
+            pending_focus.set(Some(cancel));
+            *status.borrow_mut() = "Dialog opened. Escape or Cancel closes it.".to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(cancel_activated.subscribe({
+        let handle = handle.clone();
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        move |()| {
+            handle.close();
+            pending_layout.set(true);
+            *status.borrow_mut() = "Dialog cancelled.".to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(confirm_activated.subscribe({
+        let handle = handle.clone();
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        move |()| {
+            handle.close();
+            pending_layout.set(true);
+            *status.borrow_mut() = "Project deleted.".to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(closed.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        move |()| {
+            // Escape closes the modal inside the runtime, which already
+            // invalidates layout. Setting the flag is harmless for that path
+            // and required for programmatic closes.
+            pending_layout.set(true);
+            *status.borrow_mut() = "Dialog closed.".to_string();
+            dirty.set(true);
+        }
+    }));
+}
+
 fn append_text(runtime: &mut UiRuntime, parent: WidgetId, text: &str, size: f32, color: Color) {
     runtime
         .append_child(parent, Text::styled(text, TextStyle::new(size, color)))
@@ -362,8 +496,12 @@ impl WindowApplication for OverlayDemo {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
-                if let Some(menu) = self.pending_focus.take() {
-                    let _ = self.runtime.focus_widget(menu);
+                if self.pending_layout.replace(false) {
+                    self.runtime.invalidate_layout();
+                    self.layout(self.size);
+                }
+                if let Some(widget) = self.pending_focus.take() {
+                    let _ = self.runtime.focus_widget(widget);
                 }
                 let state_changed = self.dirty.replace(false);
                 let widget_changed = self.runtime.take_redraw_request();

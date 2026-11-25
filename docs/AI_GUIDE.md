@@ -50,6 +50,8 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `popover.set_content(...)` | `Popover` has exactly two children: anchor first, floating content second |
 | `menu.add_item(...)` | `Menu::new([MenuEntry::item("...")])`, placed in a `Popover` content slot |
 | Hand-built context menu | `Popover` with `PopoverTrigger::Secondary` plus a `Menu` |
+| A centered modal dialog | `Modal` + `Dialog`; the runtime adds the scrim, input blocking, and focus trap |
+| `dialog.show()` that also lays out | `ModalHandle::open()`, then `runtime.invalidate_layout()`; focus after the next layout |
 
 ## Q&A
 
@@ -134,6 +136,28 @@ then floating content. `Menu` supplies data-driven rows and emits
 `selected(index)`; selecting a row also dismisses the surrounding overlay. Light
 dismissal (outside primary click, Escape, focus loss) is on by default. See
 [RECIPES.md](RECIPES.md#8-tooltips-popovers-and-floating-menus).
+
+### "Make a modal dialog."
+
+Use `Modal` as a zero-size host and `Dialog` as the visible panel. The runtime
+centers the panel, paints a themed scrim behind it, blocks pointer input to the
+tree behind it, and traps sequential focus inside it.
+
+```rust
+let modal = Modal::new();
+let handle = modal.handle();
+let modal = runtime.append_child(runtime.root(), modal)?;
+let dialog = runtime.append_child(modal, Dialog::new())?;
+let content = runtime.append_child(dialog, Column::new())?;
+// title, body, and an action row of buttons inside `content`
+```
+
+`handle.open()` / `handle.close()` change the state and emit `opened()` /
+`closed()`, but do not lay out. Call `runtime.invalidate_layout()` afterwards,
+and move focus into the dialog only after the next layout pass. Escape, a click
+on the scrim, or focus loss closes a light modal; pass
+`.with_dismiss(DismissPolicy::None)` to require an explicit button. See
+[RECIPES.md](RECIPES.md#9-modal-dialogs).
 
 ### "Play this MP4 and turn on the sound."
 

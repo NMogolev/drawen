@@ -502,3 +502,57 @@ Rules that keep overlays predictable:
   work.
 - Keep overlay trees shallow. They are painted last and hit tested first, but
   they are not a second window.
+
+## 9. Modal dialogs
+
+A modal is the same overlay layer with three extra guarantees: the runtime paints
+a themed scrim behind it, blocks pointer input to the tree behind it, and keeps
+sequential focus inside it. Build it from two widgets: `Modal` is an invisible
+one-child host, and `Dialog` is the visible panel.
+
+```rust
+use drawen::{Button, Column, Dialog, Modal, Row, Text, TextStyle};
+
+let modal = Modal::new();
+let handle = modal.handle();
+let modal = runtime.append_child(runtime.root(), modal)?;
+
+let dialog = runtime.append_child(modal, Dialog::new())?;
+let content = runtime.append_child(dialog, Column::new())?;
+let title = runtime.append_child(content, Text::styled("Delete project?", TextStyle::new(18.0, ink)))?;
+// ... body text and an action row with Cancel and Delete buttons ...
+let cancel = runtime.append_child(actions, Button::new())?;
+```
+
+Open and close it through the handle. Changing the handle does not lay out the
+panel, so invalidate layout once per change:
+
+```rust
+handle.open();
+runtime.invalidate_layout();
+// On the next frame, after layout, move focus into the dialog:
+let _ = runtime.focus_widget(cancel);
+```
+
+`Dialog` is a single-child surface with padding, rounded corners, a border, and a
+soft shadow. It reports the `Dialog` accessibility role with the modal state.
+The `Modal` host itself is zero-size and skips hit testing, so it does not affect
+the surrounding layout.
+
+Light dismissal is on by default: Escape, a primary click on the scrim, or
+losing window focus closes the modal and emits `closed()`. Use
+`.with_dismiss(DismissPolicy::None)` for a dialog that only its own buttons may
+close. When a light modal closes itself, the runtime clears focus inside it and
+invalidates layout; the application only needs to react to `closed()`.
+
+Rules for modal dialogs:
+
+- Put the `Modal` in the tree once and toggle the handle, rather than adding and
+  removing nodes.
+- Lay out after opening before focusing a control inside it. A closed modal does
+  not lay out its panel, so focus metadata is stale until the next pass.
+- Prefer a `Modal -> Dialog -> Column` structure. The `Dialog` is the panel users
+  see; the `Modal` only supplies centering, the scrim, and the focus trap.
+- Do not nest a second modal inside a modal. Open a popover or menu from inside
+  the dialog instead; the runtime still dismisses those with the dialog.
+

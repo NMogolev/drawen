@@ -32,6 +32,17 @@ in the headings because the version itself must stay valid semver; see
   and pointer-anchored context menus.
 - Added `EventContext::request_overlay_dismiss`, so an action inside a menu or
   dialog can close the surrounding overlay without a second pointer event.
+- Added `LayoutContext::layout_child_modal`. The runtime centers the child in the
+  viewport, paints a themed scrim behind it, blocks pointer input to the tree
+  behind it, and confines sequential focus traversal to the modal subtree. A
+  modal without light dismissal owns Escape instead of letting it close a
+  surface behind it.
+- `Theme::scrim()` returns the backdrop color painted behind a modal. The default
+  is a 40% black tint; returning a transparent color keeps input blocking and the
+  focus trap without dimming.
+- Added `Modal`, a zero-size one-child host with a shared `ModalHandle` and
+  `opened()` / `closed()` signals, and `Dialog`, a padded, rounded, shadowed
+  panel that reports the `Dialog` accessibility role with the modal state.
 
 ### Fonts
 
