@@ -13,11 +13,17 @@ in the headings because the version itself must stay valid semver; see
   it only while visible, flips it to the opposite side when it would leave the
   viewport, clamps it inside a configurable margin, paints it above the rest of
   the tree, and hit tests it first. Overlay children stay normal retained nodes,
-  so bubbling, focus, and accessibility are unchanged.
+  so bubbling, focus, and accessibility are unchanged. Open overlays stack LIFO
+  by open time across relayouts, so a surface opened later paints and hit tests
+  above earlier ones regardless of tree order, and closing an overlay restores
+  focus to the widget that held it when the overlay opened.
 - Added `OverlaySide`, `OverlayAlign`, `OverlayPlacement`, `OverlayOptions`,
-  `DismissPolicy`, and `place_overlay` for anchor-relative placement. Light
-  dismissal closes an overlay on an outside primary click, Escape, or window
-  focus loss.
+  `DismissPolicy`, and `place_overlay` for anchor-relative placement. The flip
+  decision checks only the axis the requested side extends along, so
+  cross-axis overflow is clamped instead of vetoing the flip and covering the
+  anchor. Light dismissal closes an overlay on an outside primary click,
+  Escape, or window focus loss; a click on a modal scrim dismisses the modal
+  even when a still-open surface behind it covers that position.
 - Added `Widget::paint_floating`, a post-pass for non-interactive floating
   paint such as tooltip bubbles.
 - Added `Popover`, a two-child anchor/content container with
@@ -52,8 +58,10 @@ in the headings because the version itself must stay valid semver; see
   transient non-interactive notifications stacked in a window corner. The
   zero-size host paints cards through the floating paint pass, fades them in
   and out, and removes them when their duration elapses via
-  `Widget::advance_animation`. The queue caps at five toasts; `show`,
-  `dismiss`, and `clear` manage it through the shared handle.
+  `Widget::advance_animation`. Durations keep elapsing while the window is
+  hidden, so stale toasts expire in the background instead of appearing on
+  restore. The queue caps at five toasts; `show`, `dismiss`, and `clear` manage
+  it through the shared handle.
 - Added `SplitButton`, a primary action joined to a dropdown arrow. The left
   segment emits `activated()`; the arrow toggles a floating `Menu` supplied as
   the widget's single child, anchored below the button through the overlay
@@ -115,7 +123,8 @@ in the headings because the version itself must stay valid semver; see
 - `UiRuntime::set_presented` freezes interaction transitions and purely visual
   widget animation while hidden; `UiRuntime::tick` advances the runtime without
   building a display list. `Video` and `AudioPlayer` opt into background ticks,
-  while `AnimatedImage` and other visual widgets freeze.
+  and `ToastHost` keeps expiring queued toasts, while `AnimatedImage` and other
+  visual widgets freeze.
 - `MediaDirector` now includes `WindowAction::RequestRedraw` in the window action
   when a window is restored, so the documented single-director snippet repaints
   the first visible frame without checking the separate `redraw` flag.

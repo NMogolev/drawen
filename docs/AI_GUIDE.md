@@ -159,8 +159,9 @@ let content = runtime.append_child(dialog, Column::new())?;
 `closed()`, but do not lay out. Call `runtime.invalidate_layout()` afterwards,
 and move focus into the dialog only after the next layout pass. Escape, a click
 on the scrim, or focus loss closes a light modal; pass
-`.with_dismiss(DismissPolicy::None)` to require an explicit button. See
-[RECIPES.md](RECIPES.md#9-modal-dialogs).
+`.with_dismiss(DismissPolicy::None)` to require an explicit button. When the
+modal closes, focus returns to the widget that held it when the modal opened.
+See [RECIPES.md](RECIPES.md#9-modal-dialogs).
 
 ### "Add a command palette."
 
@@ -198,8 +199,9 @@ let _ = handle.show(Toast::new("Saved").with_tone(ToastTone::Success));
 
 Invalidate paint afterwards, not layout. Toasts fade in, expire after their
 duration, and remove themselves; `next_frame_in()` schedules the frames while
-any toast is queued. They are non-interactive — do not put buttons in them.
-See [RECIPES.md](RECIPES.md#11-toast-notifications).
+any toast is queued. Durations keep elapsing while the window is hidden, so
+stale toasts do not pile up and appear on restore. They are non-interactive —
+do not put buttons in them. See [RECIPES.md](RECIPES.md#11-toast-notifications).
 
 ### "Add a split button with a dropdown."
 
@@ -256,7 +258,7 @@ Common causes:
 - `presentation_changed` does not forward to `UiRuntime::set_presented`, so the
   runtime keeps scheduling visible frames while the window is hidden. With the
   forwarding in place, `next_frame_in()` returns the background interval only
-  for media widgets and `None` for purely visual animation.
+  for media widgets and queued toasts, and `None` for purely visual animation.
 - A long decode or file read runs inside `paint`; paint must only record display
   commands. Move blocking work out of the UI thread.
 - A worker thread tries to mutate the runtime; that is not supported.

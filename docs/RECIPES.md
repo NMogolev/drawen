@@ -417,10 +417,14 @@ and opt into background playback explicitly. See [MEDIA.md](MEDIA.md),
 Floating surfaces do not expand in place. `UiRuntime` owns an overlay layer:
 a widget requests placement through `LayoutContext::layout_child_overlay`, and
 the runtime measures the content only while it is visible, flips it to the
-opposite side when it would leave the window, clamps it inside the viewport
-margin, paints it above the rest of the tree, and hit tests it first. Overlay
-content stays a normal retained subtree, so bubbling, focus, and accessibility
-keep working.
+opposite side when it would leave the window along that side's axis, clamps it
+inside the viewport margin, paints it above the rest of the tree, and hit tests
+it first. Open overlays stack LIFO by open time: the surface opened last paints
+on top and receives hits first, regardless of where its owner sits in the tree,
+and a nested menu always stacks above the modal that contains it. Closing an
+overlay returns keyboard focus to the widget that held it when the overlay
+opened. Overlay content stays a normal retained subtree, so bubbling, focus, and
+accessibility keep working.
 
 `Tooltip` wraps one anchor and adds a non-interactive hover hint:
 
@@ -542,8 +546,10 @@ the surrounding layout.
 Light dismissal is on by default: Escape, a primary click on the scrim, or
 losing window focus closes the modal and emits `closed()`. Use
 `.with_dismiss(DismissPolicy::None)` for a dialog that only its own buttons may
-close. When a light modal closes itself, the runtime clears focus inside it and
-invalidates layout; the application only needs to react to `closed()`.
+close. When a light modal closes itself, the runtime invalidates layout and
+returns focus to the widget that held it when the modal opened; closing through
+the handle restores focus on the next layout pass. The application only needs
+to react to `closed()`.
 
 Rules for modal dialogs:
 
@@ -640,7 +646,9 @@ with `.with_duration(...)`), fades out, and removes itself. Timed dismissal runs
 through `Widget::advance_animation`; while any toast is queued,
 `runtime.next_frame_in()` keeps scheduling frames, so the standard
 `tick`/`next_frame_in` wiring in `WindowApplication` is all the timing support
-an application needs.
+an application needs. Durations keep elapsing while the window is hidden or
+minimized, so stale notifications expire in the background instead of piling up
+and appearing all at once on restore.
 
 The queue keeps at most five toasts and drops the oldest when a sixth arrives.
 `handle.dismiss(id)` removes one early, `handle.clear()` removes all, and
