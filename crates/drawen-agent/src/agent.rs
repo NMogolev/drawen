@@ -7,6 +7,8 @@
 //! input uses. Application signal handlers therefore run exactly as they would
 //! for a human user.
 
+use std::time::Duration;
+
 use drawen_core::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Point, PointerButton, PointerButtons, PointerEvent,
     PointerId, WidgetId,
@@ -14,11 +16,15 @@ use drawen_core::{
 use drawen_ui::{AccessibilityAction, EventStatus, SemanticNode, SemanticTree, UiRuntime};
 
 use crate::command::{modifier_flags, parse_key};
-use crate::snapshot::{normalize, role_name};
+use crate::snapshot::{DEFAULT_MAX_NODES, normalize, role_name};
 use crate::{Command, Snapshot, Target};
 
 /// The agent's synthesized pointer contact, kept apart from real devices.
 const AGENT_POINTER: PointerId = PointerId(u64::MAX);
+/// Upper bound for one `advance` or `wait_until_idle` budget, in milliseconds.
+const MAX_CLOCK_MS: f64 = 60_000.0;
+/// Deterministic clock step: one 60 Hz frame.
+const FRAME_MS: f64 = 1000.0 / 60.0;
 
 /// Observes and drives a [`UiRuntime`] on the UI thread.
 #[derive(Clone, Copy, Debug, Default)]
@@ -33,11 +39,13 @@ impl Agent {
 
     /// Captures the current semantic tree as a plain-data snapshot.
     ///
-    /// Bounds reflect the last layout pass; call after the event loop has laid
-    /// out the tree at least once.
+    /// The observation keeps at most [`DEFAULT_MAX_NODES`] nodes and reports
+    /// `total` and `truncated`; observe a subtree by id to see more of a large
+    /// application. Bounds reflect the last layout pass; call after the event
+    /// loop has laid out the tree at least once.
     #[must_use]
     pub fn observe(&self, runtime: &UiRuntime) -> Snapshot {
-        Snapshot::from_tree(&runtime.semantic_tree())
+        Snapshot::capture(&runtime.semantic_tree(), None, DEFAULT_MAX_NODES)
     }
 
     /// Applies one command and returns the outcome with a fresh snapshot.
@@ -45,14 +53,20 @@ impl Agent {
     /// The reply always carries the post-command observation, so one round
     /// trip is enough for an agent loop: act, then see the result. Layout is
     /// refreshed first when the command invalidated it, so bounds are current.
+    /// An `observe` command's reply carries exactly the requested subtree and
+    /// budget; other commands reply with the default whole-tree observation.
     pub fn execute(&self, runtime: &mut UiRuntime, command: &Command) -> Reply {
         let result = apply(runtime, command);
         let _ = runtime.ensure_layout();
-        let snapshot = Snapshot::from_tree(&runtime.semantic_tree());
+        let (root, max_nodes) = match &result {
+            Ok(Outcome::Observe { root, max_nodes }) => (*root, *max_nodes),
+            _ => (None, DEFAULT_MAX_NODES),
+        };
+        let snapshot = Snapshot::capture(&runtime.semantic_tree(), root, max_nodes);
         match result {
-            Ok(handled) => Reply {
+            Ok(outcome) => Reply {
                 ok: true,
-                handled,
+                handled: matches!(outcome, Outcome::Acted(true)),
                 error: None,
                 snapshot: Some(snapshot),
             },
@@ -66,6 +80,17 @@ impl Agent {
     }
 }
 
+/// What one command did, plus the observation its reply should carry.
+enum Outcome {
+    /// An interaction or clock command; the flag is its `handled` result.
+    Acted(bool),
+    /// A pure observation request with its own scope and budget.
+    Observe {
+        root: Option<WidgetId>,
+        max_nodes: usize,
+    },
+}
+
 /// The outcome of one [`Agent::execute`] call.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
@@ -75,7 +100,8 @@ pub struct Reply {
     /// Whether the runtime or a widget actually handled the interaction.
     ///
     /// `ok` with `handled == false` means the target exists but declined the
-    /// action, for example a disabled button.
+    /// action, for example a disabled button, or that `wait_until_idle` timed
+    /// out before the animations settled.
     pub handled: bool,
     /// Human-readable failure reason when `ok` is false.
     #[cfg_attr(feature = "json", serde(skip_serializing_if = "Option::is_none"))]
@@ -98,9 +124,32 @@ impl Reply {
     }
 }
 
-fn apply(runtime: &mut UiRuntime, command: &Command) -> Result<bool, String> {
+fn apply(runtime: &mut UiRuntime, command: &Command) -> Result<Outcome, String> {
     match command {
-        Command::Observe => Ok(false),
+        Command::Observe { target, max_nodes } => {
+            let budget = max_nodes.unwrap_or(DEFAULT_MAX_NODES);
+            if budget == 0 {
+                return Err("max_nodes must be at least 1".to_owned());
+            }
+            let root = match target {
+                Some(target) => Some(resolve(&runtime.semantic_tree(), target)?),
+                None => None,
+            };
+            Ok(Outcome::Observe {
+                root,
+                max_nodes: budget,
+            })
+        }
+        Command::Advance { ms } => advance(runtime, *ms).map(Outcome::Acted),
+        Command::WaitUntilIdle { timeout_ms } => {
+            wait_until_idle(runtime, *timeout_ms).map(Outcome::Acted)
+        }
+        _ => apply_action(runtime, command).map(Outcome::Acted),
+    }
+}
+
+fn apply_action(runtime: &mut UiRuntime, command: &Command) -> Result<bool, String> {
+    match command {
         Command::Click { target } => semantic(runtime, target, &AccessibilityAction::Click),
         Command::Toggle { target } => semantic(runtime, target, &AccessibilityAction::Toggle),
         Command::Focus { target } => semantic(runtime, target, &AccessibilityAction::Focus),
@@ -140,6 +189,48 @@ fn apply(runtime: &mut UiRuntime, command: &Command) -> Result<bool, String> {
             runtime.dispatch_event(&InputEvent::TextInput(text.clone())),
         )),
         Command::ClickAt { x, y } => click_at(runtime, *x, *y),
+        Command::Observe { .. } | Command::Advance { .. } | Command::WaitUntilIdle { .. } => {
+            unreachable!("observation and clock commands are handled by apply")
+        }
+    }
+}
+
+/// Steps the animation clock deterministically in 60 Hz frames.
+fn advance(runtime: &mut UiRuntime, ms: f64) -> Result<bool, String> {
+    if !ms.is_finite() || !(0.0..=MAX_CLOCK_MS).contains(&ms) {
+        return Err(format!("advance ms must be within 0..=60000, got {ms}"));
+    }
+    let mut remaining = ms;
+    while remaining > 0.0 {
+        let step = remaining.min(FRAME_MS);
+        let _ = runtime.tick(Duration::from_secs_f64(step / 1000.0));
+        remaining -= step;
+    }
+    Ok(true)
+}
+
+/// Advances time until no animation frames remain scheduled, or the budget
+/// runs out. A live loop (an indeterminate spinner, playing media) never
+/// settles; the timeout reports that instead of spinning forever.
+fn wait_until_idle(runtime: &mut UiRuntime, timeout_ms: Option<f64>) -> Result<bool, String> {
+    let budget = timeout_ms.unwrap_or(5_000.0);
+    if !budget.is_finite() || !(0.0..=MAX_CLOCK_MS).contains(&budget) {
+        return Err(format!(
+            "wait_until_idle timeout_ms must be within 0..=60000, got {budget}"
+        ));
+    }
+    let _ = runtime.ensure_layout();
+    let mut remaining = budget;
+    loop {
+        if runtime.next_frame_in().is_none() {
+            return Ok(true);
+        }
+        if remaining <= 0.0 {
+            return Ok(false);
+        }
+        let step = remaining.min(FRAME_MS);
+        let _ = runtime.tick(Duration::from_secs_f64(step / 1000.0));
+        remaining -= step;
     }
 }
 
@@ -196,7 +287,7 @@ fn query(tree: &SemanticTree, role: Option<&str>, label: Option<&str>) -> Result
             .iter()
             .filter(|node| {
                 node.label()
-                    .is_some_and(|label| label.eq_ignore_ascii_case(wanted))
+                    .is_some_and(|label| label.to_lowercase() == wanted.to_lowercase())
             })
             .collect();
         if exact.len() == 1 {
@@ -468,5 +559,200 @@ mod tests {
             .find(|node| node.role == "text_field")
             .expect("field");
         assert_eq!(field.value.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn observe_subtree_returns_only_that_branch() {
+        let mut demo = demo_app();
+        let agent = Agent::new();
+        let reply = agent.execute(
+            &mut demo.runtime,
+            &Command::Observe {
+                target: Some(Target::Name("Save".to_owned())),
+                max_nodes: None,
+            },
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(!reply.handled);
+        let snapshot = reply.snapshot.expect("observation");
+        assert_eq!(snapshot.total, 2); // the button and its label
+        assert_eq!(snapshot.nodes.len(), 2);
+        assert_eq!(snapshot.nodes[0].role, "button");
+        assert_eq!(snapshot.nodes[0].parent, None);
+        assert!(!snapshot.truncated);
+    }
+
+    #[test]
+    fn observe_respects_an_explicit_budget() {
+        let mut demo = demo_app();
+        let agent = Agent::new();
+        let reply = agent.execute(
+            &mut demo.runtime,
+            &Command::Observe {
+                target: None,
+                max_nodes: Some(2),
+            },
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        let snapshot = reply.snapshot.expect("observation");
+        assert_eq!(snapshot.nodes.len(), 2);
+        assert!(snapshot.truncated);
+        assert!(snapshot.total > 2);
+
+        let zero = agent.execute(
+            &mut demo.runtime,
+            &Command::Observe {
+                target: None,
+                max_nodes: Some(0),
+            },
+        );
+        assert!(!zero.ok);
+    }
+
+    #[test]
+    fn focus_on_a_disabled_button_is_declined() {
+        let mut runtime = UiRuntime::new(DrawenBox::new());
+        let button = Button::new().with_enabled(false);
+        let button = runtime
+            .append_child(runtime.root(), button)
+            .expect("root exists");
+        runtime
+            .append_child(
+                button,
+                Text::styled("Disabled", TextStyle::new(14.0, Color::BLACK)),
+            )
+            .expect("button exists");
+        runtime
+            .layout(
+                Constraints::tight(Size::new(320.0, 200.0).expect("valid size")).expect("valid"),
+            )
+            .expect("layout succeeds");
+
+        let reply = Agent::new().execute(
+            &mut runtime,
+            &Command::Focus {
+                target: Target::Name("Disabled".to_owned()),
+            },
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(!reply.handled, "a disabled widget must decline focus");
+    }
+
+    #[test]
+    fn advance_settles_the_focus_transition() {
+        let mut demo = demo_app();
+        let agent = Agent::new();
+        let focus = agent.execute(
+            &mut demo.runtime,
+            &Command::Focus {
+                target: Target::Name("Save".to_owned()),
+            },
+        );
+        assert!(focus.ok && focus.handled);
+        assert!(
+            demo.runtime.next_frame_in().is_some(),
+            "the focus transition should be in flight"
+        );
+        let reply = agent.execute(&mut demo.runtime, &Command::Advance { ms: 1000.0 });
+        assert!(reply.ok && reply.handled, "{:?}", reply.error);
+        assert!(
+            demo.runtime.next_frame_in().is_none(),
+            "the transition should have settled"
+        );
+    }
+
+    #[test]
+    fn advance_rejects_bad_durations() {
+        let mut demo = demo_app();
+        let agent = Agent::new();
+        for ms in [-1.0, f64::NAN, f64::INFINITY, 60_001.0] {
+            let reply = agent.execute(&mut demo.runtime, &Command::Advance { ms });
+            assert!(!reply.ok, "ms={ms} should be rejected");
+        }
+    }
+
+    #[test]
+    fn wait_until_idle_settles_a_static_tree() {
+        let mut demo = demo_app();
+        let reply = Agent::new().execute(
+            &mut demo.runtime,
+            &Command::WaitUntilIdle { timeout_ms: None },
+        );
+        assert!(reply.ok && reply.handled, "{:?}", reply.error);
+    }
+
+    /// A widget whose animation loop never ends, like an indeterminate spinner.
+    struct LiveLoop;
+
+    impl drawen::Widget for LiveLoop {
+        fn layout(
+            &mut self,
+            _: &mut drawen::LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> drawen::LayoutResult {
+            drawen::LayoutResult::new(
+                constraints.constrain(Size::new(10.0, 10.0).expect("valid size")),
+            )
+        }
+
+        fn is_animating(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn wait_until_idle_times_out_on_a_live_loop() {
+        let mut runtime = UiRuntime::new(DrawenBox::new());
+        runtime
+            .append_child(runtime.root(), LiveLoop)
+            .expect("root exists");
+        runtime
+            .layout(
+                Constraints::tight(Size::new(320.0, 200.0).expect("valid size")).expect("valid"),
+            )
+            .expect("layout succeeds");
+        let reply = Agent::new().execute(
+            &mut runtime,
+            &Command::WaitUntilIdle {
+                timeout_ms: Some(50.0),
+            },
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(!reply.handled, "a live loop never settles");
+    }
+
+    #[test]
+    fn unicode_names_match_case_insensitively() {
+        let mut runtime = UiRuntime::new(DrawenBox::new());
+        let clicks = Rc::new(Cell::new(0_u32));
+        let button = Button::new();
+        let subscription = button.activated().subscribe({
+            let clicks = Rc::clone(&clicks);
+            move |()| clicks.set(clicks.get() + 1)
+        });
+        let button = runtime
+            .append_child(runtime.root(), button)
+            .expect("root exists");
+        runtime
+            .append_child(
+                button,
+                Text::styled("Сохранить", TextStyle::new(14.0, Color::BLACK)),
+            )
+            .expect("button exists");
+        runtime
+            .layout(
+                Constraints::tight(Size::new(320.0, 200.0).expect("valid size")).expect("valid"),
+            )
+            .expect("layout succeeds");
+
+        let reply = Agent::new().execute(
+            &mut runtime,
+            &Command::Click {
+                target: Target::Name("сохранить".to_owned()),
+            },
+        );
+        assert!(reply.ok && reply.handled, "{:?}", reply.error);
+        assert_eq!(clicks.get(), 1);
+        drop(subscription);
     }
 }

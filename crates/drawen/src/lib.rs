@@ -163,7 +163,9 @@ pub mod platform {
 pub mod agent {
     #[cfg(feature = "agent-serve")]
     pub use drawen_agent::AgentServer;
-    pub use drawen_agent::{Agent, Command, Modifier, Reply, Snapshot, SnapshotNode, Target};
+    pub use drawen_agent::{
+        Agent, Command, DEFAULT_MAX_NODES, Modifier, Reply, Snapshot, SnapshotNode, Target,
+    };
 }
 
 /// Worker-thread execution, cancellation, and the UI-thread bridge.

@@ -6,9 +6,14 @@
 //! and the application drains them with [`AgentServer::drain`] exactly like
 //! any other worker delivery. The widget tree never leaves the UI thread.
 //!
-//! The listener binds `127.0.0.1` only. The protocol has no authentication,
-//! so any local process can drive the UI; keep it on loopback and enable it
-//! only while an agent is supposed to control the application.
+//! The listener binds `127.0.0.1` only. The protocol has no authentication:
+//! the agent has the same authority as a human at the keyboard. Do not enable
+//! this in a session you would not hand the keyboard to.
+//!
+//! Several connections may be open at once. Every command from every
+//! connection is serialized onto the UI thread in arrival order; within one
+//! connection commands are strictly sequential. Replies are strictly
+//! request-response — the server never pushes unsolicited messages.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

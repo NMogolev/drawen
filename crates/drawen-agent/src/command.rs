@@ -5,12 +5,15 @@
 //!
 //! ```json
 //! {"op":"observe"}
+//! {"op":"observe","target":7,"max_nodes":50}
 //! {"op":"click","target":"Save"}
 //! {"op":"click","target":{"role":"button","label":"Save"}}
 //! {"op":"set_value","target":3,"value":"Grace"}
 //! {"op":"press_key","key":"enter","modifiers":["ctrl"]}
 //! {"op":"type_text","text":"hello"}
 //! {"op":"click_at","x":120.0,"y":90.0}
+//! {"op":"advance","ms":250.0}
+//! {"op":"wait_until_idle","timeout_ms":2000.0}
 //! ```
 
 use drawen_core::{Key, Modifiers, NamedKey};
@@ -18,8 +21,10 @@ use drawen_core::{Key, Modifiers, NamedKey};
 /// How a command names its target widget.
 ///
 /// Resolution prefers an exact accessible name, then a unique case-insensitive
-/// substring. An ambiguous query fails with the candidate list instead of
-/// guessing, so the agent can disambiguate by id.
+/// substring. Case-insensitivity uses Unicode lowercasing, not full case
+/// folding (`ß` does not match `ss`); prefer exact names or ids for tricky
+/// non-ASCII labels. An ambiguous query fails with the candidate list instead
+/// of guessing, so the agent can disambiguate by id.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "json", serde(untagged))]
@@ -57,8 +62,26 @@ pub enum Modifier {
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "json", serde(tag = "op", rename_all = "snake_case"))]
 pub enum Command {
-    /// Return the current snapshot without changing anything.
-    Observe,
+    /// Return a snapshot without changing anything.
+    ///
+    /// Without a target the observation covers the whole tree, bounded by
+    /// [`crate::DEFAULT_MAX_NODES`]. With a target it covers only that widget's
+    /// subtree, which keeps large applications inside the agent's context
+    /// budget; ids stay global, so listed nodes remain directly targetable.
+    Observe {
+        /// Observation root; the whole tree when absent.
+        #[cfg_attr(
+            feature = "json",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
+        target: Option<Target>,
+        /// Node budget for this observation; the default when absent.
+        #[cfg_attr(
+            feature = "json",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
+        max_nodes: Option<usize>,
+    },
     /// Activate a control as if it were clicked.
     Click {
         /// Widget to activate.
@@ -119,9 +142,11 @@ pub enum Command {
     ///
     /// Named keys: `backspace`, `enter`, `escape`, `tab`, `space`, `arrowleft`
     /// (or `left`), `arrowright`, `arrowup`, `arrowdown`, `home`, `end`,
-    /// `pageup`, `pagedown`, `delete`. Any single character is a text key.
+    /// `pageup`, `pagedown`, `delete`. Any single Unicode scalar value is a
+    /// text key; multi-scalar sequences such as combining marks or joined
+    /// emoji go through [`Self::TypeText`] instead.
     PressKey {
-        /// Key name or single character.
+        /// Key name or single Unicode scalar value.
         key: String,
         /// Modifiers held during the press.
         #[cfg_attr(feature = "json", serde(default))]
@@ -141,6 +166,31 @@ pub enum Command {
         x: f32,
         /// Logical y coordinate in the window's content area.
         y: f32,
+    },
+    /// Advance the animation clock by a fixed amount, deterministically.
+    ///
+    /// A click reply arrives immediately even when the UI is mid-transition
+    /// (a toast fading in, an expander opening). Advancing time settles those
+    /// transitions before the next observation, so the agent reads stable
+    /// state instead of chasing transient frames. Time is stepped in 60 Hz
+    /// increments and capped at 60 seconds per command.
+    Advance {
+        /// Milliseconds to advance; must be finite and in `0..=60000`.
+        ms: f64,
+    },
+    /// Advance time until no animation frames remain scheduled.
+    ///
+    /// Returns `handled = true` when the tree settled within the budget and
+    /// `handled = false` on timeout, for example while an indeterminate
+    /// spinner keeps looping. The budget defaults to 5 seconds and is capped
+    /// at 60 seconds.
+    WaitUntilIdle {
+        /// Budget in milliseconds; finite, non-negative, at most 60000.
+        #[cfg_attr(
+            feature = "json",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
+        timeout_ms: Option<f64>,
     },
 }
 
@@ -245,5 +295,37 @@ mod json_tests {
                 value: "Ada".to_owned(),
             }
         );
+
+        let bare: Command = serde_json::from_str(r#"{"op":"observe"}"#).expect("observe parses");
+        assert_eq!(
+            bare,
+            Command::Observe {
+                target: None,
+                max_nodes: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&bare).expect("observe serializes"),
+            r#"{"op":"observe"}"#
+        );
+
+        let subtree: Command =
+            serde_json::from_str(r#"{"op":"observe","target":7,"max_nodes":50}"#)
+                .expect("subtree observe parses");
+        assert_eq!(
+            subtree,
+            Command::Observe {
+                target: Some(Target::Id(7)),
+                max_nodes: Some(50)
+            }
+        );
+
+        let advance: Command =
+            serde_json::from_str(r#"{"op":"advance","ms":250.0}"#).expect("advance parses");
+        assert_eq!(advance, Command::Advance { ms: 250.0 });
+
+        let idle: Command =
+            serde_json::from_str(r#"{"op":"wait_until_idle"}"#).expect("idle parses");
+        assert_eq!(idle, Command::WaitUntilIdle { timeout_ms: None });
     }
 }

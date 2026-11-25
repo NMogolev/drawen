@@ -1332,9 +1332,11 @@ impl UiRuntime {
 
     /// Performs an action requested by an assistive technology.
     ///
-    /// Focus requests are handled by the runtime. Other actions are offered to
-    /// the target widget. Returns whether the runtime or widget handled the
-    /// action.
+    /// Focus requests are handled by the runtime; the result reports whether
+    /// focus actually landed on the target, so a disabled or non-focusable
+    /// widget declines just like any other refused action. Other actions are
+    /// offered to the target widget. Returns whether the runtime or widget
+    /// handled the action.
     pub fn perform_accessibility_action(
         &mut self,
         node: WidgetId,
@@ -1344,8 +1346,7 @@ impl UiRuntime {
             return false;
         }
         if matches!(action, AccessibilityAction::Focus) {
-            let _ = self.focus_widget(node);
-            return true;
+            return self.focus_widget(node).is_ok() && self.focused == Some(node);
         }
         let handled = self
             .node_mut(node)

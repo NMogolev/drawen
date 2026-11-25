@@ -12,6 +12,11 @@
 //!
 //! [`Agent`] borrows the runtime per call. Every reply carries a fresh
 //! snapshot, so one round trip is a complete agent step: act, then see.
+//! Observations are bounded by [`DEFAULT_MAX_NODES`] and report `total` and
+//! `truncated`; `{"op":"observe","target":<id>}` narrows the view to a subtree
+//! so a large application never floods the model's context. `advance` and
+//! `wait_until_idle` step the animation clock deterministically, so replies
+//! show settled state instead of mid-transition frames.
 //!
 //! ```
 //! use drawen::{Button, Color, Constraints, Size, Text, UiRuntime, render::TextStyle};
@@ -68,4 +73,4 @@ pub use agent::{Agent, Reply};
 pub use command::{Command, Modifier, Target};
 #[cfg(feature = "serve")]
 pub use serve::AgentServer;
-pub use snapshot::{Snapshot, SnapshotNode, role_name};
+pub use snapshot::{DEFAULT_MAX_NODES, Snapshot, SnapshotNode, role_name};

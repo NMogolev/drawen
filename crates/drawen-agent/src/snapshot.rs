@@ -5,13 +5,22 @@
 //! bounds. It renders either as compact JSON (feature `json`) or as an indented
 //! text outline that costs few tokens in a model prompt.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use drawen_core::WidgetId;
 use drawen_ui::{
     AccessibilityActions, AccessibilityRole, AccessibilityState, SemanticNode, SemanticTree,
 };
+
+/// Default node budget for one observation.
+///
+/// A virtualized list or a deeply nested form can expose thousands of semantic
+/// nodes; an unbounded snapshot would spend the agent's whole context window on
+/// the UI. Observations keep the first [`DEFAULT_MAX_NODES`] nodes in tree order
+/// and report `total` and `truncated` so the agent can narrow the observation
+/// with `{"op":"observe","target":<id>}` instead of reading the root again.
+pub const DEFAULT_MAX_NODES: usize = 200;
 
 /// One semantic node in a [`Snapshot`].
 ///
@@ -70,23 +79,73 @@ pub struct SnapshotNode {
 }
 
 /// An owned, thread-safe snapshot of the laid-out semantic tree.
+///
+/// Observations are bounded: `nodes` holds at most the requested budget, while
+/// `total` counts every node in the observed scope and `truncated` says whether
+/// the budget cut some off. Ids stay global arena indices even for subtree
+/// observations, so commands can target any listed node directly.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 pub struct Snapshot {
     /// Arena index of the focused widget, if any.
     #[cfg_attr(feature = "json", serde(skip_serializing_if = "Option::is_none"))]
     pub focus: Option<u32>,
-    /// Every semantic node in depth-first tree order.
+    /// Arena index of the observation root; the tree root for whole-tree views.
+    #[cfg_attr(feature = "json", serde(skip_serializing_if = "Option::is_none"))]
+    pub root: Option<u32>,
+    /// Node count in the observed scope before the budget was applied.
+    pub total: usize,
+    /// Whether the node budget omitted part of the observed scope.
+    #[cfg_attr(feature = "json", serde(default, skip_serializing_if = "is_false"))]
+    pub truncated: bool,
+    /// Semantic nodes in depth-first tree order, at most the requested budget.
     pub nodes: Vec<SnapshotNode>,
 }
 
+#[cfg(feature = "json")]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Snapshot {
-    /// Captures a semantic tree as plain data.
+    /// Captures a whole semantic tree as plain data, without a node budget.
     #[must_use]
     pub fn from_tree(tree: &SemanticTree) -> Self {
+        Self::capture(tree, None, usize::MAX)
+    }
+
+    /// Captures an observation rooted at `root` (or the whole tree when `None`),
+    /// keeping at most `max_nodes` nodes in depth-first tree order.
+    ///
+    /// `total` counts the full scope and `truncated` reports the cut, so an
+    /// agent can switch to subtree observations instead of re-reading a large
+    /// root. Child links are pruned to the nodes actually included.
+    #[must_use]
+    pub fn capture(tree: &SemanticTree, root: Option<WidgetId>, max_nodes: usize) -> Self {
+        let scope = scope_ids(tree, root);
+        let total = scope.len();
+        let included: HashSet<u32> = scope.iter().take(max_nodes).map(|id| id.index()).collect();
+        let nodes = scope
+            .iter()
+            .take(max_nodes)
+            .filter_map(|id| tree.node(*id))
+            .map(|node| {
+                let mut snapshot = SnapshotNode::from_node(node);
+                snapshot.children.retain(|child| included.contains(child));
+                if root == Some(node.id()) {
+                    snapshot.parent = None;
+                }
+                snapshot
+            })
+            .collect();
         Self {
             focus: tree.focused().map(WidgetId::index),
-            nodes: tree.nodes().iter().map(SnapshotNode::from_node).collect(),
+            root: root
+                .or_else(|| tree.nodes().first().map(SemanticNode::id))
+                .map(WidgetId::index),
+            total,
+            truncated: total > included.len(),
+            nodes,
         }
     }
 
@@ -99,22 +158,29 @@ impl Snapshot {
     /// Renders the token-efficient text outline.
     ///
     /// ```text
-    /// focus=#3
+    /// focus=#3 total=6
     /// #0 window "Settings" @(0,0,640,480)
     ///   #1 group "Profile" @(8,8,624,200)
     ///     #2 label "Name" @(16,16,40,20)
     ///     #3 text_field "Name" value="Ada" [focus,set_value] @(16,40,200,28)
     ///     #4 button "Save" [focus,click] @(16,80,80,28)
     /// ```
+    ///
+    /// A truncated observation adds the word `truncated` to the header.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         match self.focus {
             Some(id) => {
-                let _ = writeln!(out, "focus=#{id}");
+                let _ = write!(out, "focus=#{id}");
             }
-            None => out.push_str("focus=none\n"),
+            None => out.push_str("focus=none"),
         }
+        let _ = write!(out, " total={}", self.total);
+        if self.truncated {
+            out.push_str(" truncated");
+        }
+        out.push('\n');
         let mut depths: HashMap<u32, usize> = HashMap::new();
         for node in &self.nodes {
             let depth = node
@@ -159,6 +225,23 @@ impl Snapshot {
         }
         out
     }
+}
+
+/// Collects the observed scope in depth-first tree order.
+fn scope_ids(tree: &SemanticTree, root: Option<WidgetId>) -> Vec<WidgetId> {
+    let Some(root) = root else {
+        return tree.nodes().iter().map(SemanticNode::id).collect();
+    };
+    let mut ids = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let Some(node) = tree.node(id) else {
+            continue;
+        };
+        ids.push(id);
+        stack.extend(node.children().iter().rev().copied());
+    }
+    ids
 }
 
 impl SnapshotNode {
@@ -288,12 +371,11 @@ pub(crate) fn normalize(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use drawen::{Button, Color, Constraints, Size, Text, UiRuntime, render::TextStyle};
+    use drawen::{Button, Color, Column, Constraints, Size, Text, UiRuntime, render::TextStyle};
 
-    use super::Snapshot;
+    use super::{DEFAULT_MAX_NODES, Snapshot};
 
-    #[test]
-    fn text_outline_lists_roles_labels_and_actions() {
+    fn button_app() -> UiRuntime {
         let mut runtime = UiRuntime::new(drawen::Box::new());
         let button = runtime
             .append_child(runtime.root(), Button::new())
@@ -309,12 +391,76 @@ mod tests {
                 Constraints::tight(Size::new(320.0, 200.0).expect("valid size")).expect("valid"),
             )
             .expect("layout succeeds");
+        runtime
+    }
 
+    #[test]
+    fn text_outline_lists_roles_labels_and_actions() {
+        let runtime = button_app();
         let snapshot = Snapshot::from_tree(&runtime.semantic_tree());
         let text = snapshot.to_text();
-        assert!(text.starts_with("focus=none\n"), "{text}");
+        assert!(text.starts_with("focus=none total="), "{text}");
         assert!(text.contains("button \"Save\""), "{text}");
         assert!(text.contains("click"), "{text}");
         assert!(text.contains("@("), "{text}");
+        assert!(!snapshot.truncated);
+    }
+
+    #[test]
+    fn a_budget_truncates_and_reports_the_full_total() {
+        let mut runtime = UiRuntime::new(drawen::Box::new());
+        let column = runtime
+            .append_child(runtime.root(), Column::new())
+            .expect("root exists");
+        for index in 0..30 {
+            runtime
+                .append_child(
+                    column,
+                    Text::styled(format!("Row {index}"), TextStyle::new(14.0, Color::BLACK)),
+                )
+                .expect("column exists");
+        }
+        runtime
+            .layout(
+                Constraints::tight(Size::new(320.0, 900.0).expect("valid size")).expect("valid"),
+            )
+            .expect("layout succeeds");
+
+        let tree = runtime.semantic_tree();
+        let full = Snapshot::from_tree(&tree);
+        assert_eq!(full.total, full.nodes.len());
+        assert!(!full.truncated);
+
+        let cut = Snapshot::capture(&tree, None, 5);
+        assert!(cut.truncated);
+        assert_eq!(cut.total, full.total);
+        assert_eq!(cut.nodes.len(), 5);
+        assert!(cut.to_text().starts_with("focus=none total="));
+        assert!(cut.to_text().contains(" truncated\n"));
+        // Child links never point at omitted nodes.
+        for node in &cut.nodes {
+            for child in &node.children {
+                assert!(cut.node(*child).is_some());
+            }
+        }
+        assert!(DEFAULT_MAX_NODES > 0);
+    }
+
+    #[test]
+    fn a_subtree_observation_keeps_global_ids() {
+        let runtime = button_app();
+        let tree = runtime.semantic_tree();
+        let button = tree
+            .nodes()
+            .iter()
+            .find(|node| super::role_name(node.role()) == "button")
+            .expect("button is in the tree");
+        let subtree = Snapshot::capture(&tree, Some(button.id()), usize::MAX);
+        assert_eq!(subtree.root, Some(button.id().index()));
+        assert_eq!(subtree.total, 2); // the button and its label
+        assert_eq!(subtree.nodes.len(), 2);
+        assert_eq!(subtree.nodes[0].id, button.id().index());
+        assert_eq!(subtree.nodes[0].parent, None);
+        assert!(!subtree.truncated);
     }
 }
