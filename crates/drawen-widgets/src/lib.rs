@@ -28,6 +28,7 @@ mod box_widget;
 mod button;
 mod card;
 mod checkbox;
+mod dialog;
 mod divider;
 mod dock_area;
 mod dropdown;
@@ -39,6 +40,7 @@ mod list_view;
 mod media;
 mod menu;
 mod menu_bar;
+mod modal;
 mod padding;
 #[cfg(feature = "media")]
 mod paleo_session;
@@ -85,6 +87,7 @@ pub use box_widget::Box;
 pub use button::{Button, ButtonStyle};
 pub use card::{Card, CardStyle};
 pub use checkbox::Checkbox;
+pub use dialog::Dialog;
 pub use divider::{Divider, DividerAxis};
 pub use dock_area::{DockArea, DockAreaError, DockItem};
 pub use dropdown::Dropdown;
@@ -99,6 +102,7 @@ pub use media::{
 };
 pub use menu::{Menu, MenuEntry};
 pub use menu_bar::MenuBar;
+pub use modal::{Modal, ModalHandle};
 pub use padding::Padding;
 #[cfg(feature = "media")]
 pub use paleo_session::PaleoSession;
