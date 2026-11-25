@@ -858,9 +858,16 @@ Rules that keep bindings thin:
 - Bound and watched properties wake the runtime themselves: the change drains
   into `take_redraw_request`, `tick`, and `paint`. An event loop whose painted
   state is all properties can drop the manual dirty flag from recipe 3.
-- Use `runtime.watch(&property)` for state a widget reads at paint time without
-  a widget property to bind. Use `bind_layout` / `watch_layout` when the value
-  participates in layout; the next paint re-runs layout automatically.
+- Drawen does not auto-track dependencies: reading `prop.get()` in `paint` or
+  `layout` subscribes nothing. Use `runtime.watch(&property)` for state a widget
+  reads at paint time without a widget property to bind. Use `bind_layout` /
+  `watch_layout` when the value participates in layout; layout damage implies
+  paint damage, so `watch_layout` is also correct for a value that affects both
+  geometry and appearance, and the next paint re-runs layout automatically.
+- Deduplication is exact `PartialEq`. A float property never dedups `NaN` and
+  treats `0.0`/`-0.0` as equal; keep its domain sanitized with
+  `Property::normalized` (as `Slider::value` does) rather than relying on
+  equality to reject bad values.
 - Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`, and
   `Switch::checked()` return `Property<bool>`; `Slider::value()` returns
   `Property<f32>`. A disabled button ignores activation, skips focus, and

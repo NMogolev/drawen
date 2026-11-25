@@ -100,7 +100,10 @@ geometry changes.
 Do not invent a reactive dependency graph, hooks, or a global store. A
 `Signal<T>` is a synchronous notification channel, not an observable framework.
 For a direct state-to-widget link, use `Property<T>` and `UiRuntime::bind`: a
-one-way synchronous copy that invalidates paint, not a dependency graph. See
+one-way synchronous copy that invalidates paint, not a dependency graph. Drawen
+does **not** track dependencies automatically: reading `prop.get()` inside
+`paint` or `layout` subscribes nothing. You explicitly `watch` / `watch_layout`
+a property (or `bind` it) to declare that it affects the output. See
 [RECIPES.md](RECIPES.md#13-property-bindings) and
 [`bound_app.rs`](../crates/drawen/examples/bound_app.rs).
 

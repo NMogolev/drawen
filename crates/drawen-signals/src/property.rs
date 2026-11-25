@@ -77,6 +77,13 @@ struct Inner<T> {
 /// normalizer before storing it, so a widget can keep its value inside a valid
 /// domain (a slider clamps to its range) even when the write comes from a
 /// binding, which copies the source value verbatim.
+///
+/// Deduplication is exact `PartialEq`. For floating-point values that means
+/// `NaN` never equals itself (a `NaN` write always emits) and `0.0` equals
+/// `-0.0` (such a write is silent). Distinct animation frames therefore still
+/// emit, while repeated identical writes stay silent. Keep a float property's
+/// domain sanitized with [`Self::normalized`] rather than relying on equality
+/// to reject bad values.
 #[must_use = "a property handle keeps its shared value alive"]
 pub struct Property<T> {
     inner: Rc<Inner<T>>,
@@ -223,7 +230,7 @@ impl<T> fmt::Debug for Property<T> {
 /// target property. Dropping it disconnects the copy immediately, exactly
 /// like dropping a [`Subscription`]; the target keeps its last value and any
 /// damage watch installed for it.
-#[must_use = "dropping a binding disconnects it immediately"]
+#[must_use = "store this to keep the binding alive; dropping it disconnects the copy immediately"]
 pub struct Binding {
     subscription: Subscription,
 }

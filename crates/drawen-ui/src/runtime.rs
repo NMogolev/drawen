@@ -701,6 +701,9 @@ impl UiRuntime {
     /// Use this for values a widget reads during [`Widget::layout`], such as
     /// content that changes an intrinsic size. The next [`Self::paint`]
     /// re-runs layout automatically when the retained layout was cleared.
+    /// Layout damage implies paint damage, so this is also correct for a value
+    /// that affects both geometry and appearance; use [`Self::watch`] only for
+    /// paint-only values.
     pub fn watch_layout<T: Clone + PartialEq + 'static>(&self, property: &Property<T>) {
         property.watch(&self.property_damage, true);
     }
