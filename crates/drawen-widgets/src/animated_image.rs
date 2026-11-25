@@ -483,6 +483,54 @@ mod tests {
     }
 
     #[test]
+    fn a_sticker_scrolled_out_of_view_stops_requesting_frames() {
+        use drawen_core::{InputEvent, Modifiers, Point, WheelDelta, WheelEvent};
+        use drawen_ui::{Column, EventStatus};
+
+        use crate::{ScrollView, SizedBox};
+
+        let mut runtime = UiRuntime::new(ScrollView::vertical());
+        let root = runtime.root();
+        let column = runtime.append_child(root, Column::new()).expect("column");
+        runtime
+            .append_child(column, SizedBox::new(Some(40.0), Some(300.0)))
+            .expect("spacer");
+        let sticker_box = runtime
+            .append_child(column, SizedBox::new(Some(40.0), Some(40.0)))
+            .expect("sticker box");
+        runtime
+            .append_child(
+                sticker_box,
+                AnimatedImage::new(vec![frame(1), frame(2), frame(3)]),
+            )
+            .expect("sticker");
+        let viewport = Constraints::tight(Size::new(100.0, 100.0).expect("valid size"))
+            .expect("valid viewport");
+        runtime.layout(viewport).expect("layout succeeds");
+
+        // The sticker sits at content y=300, far below the 100px scroll viewport:
+        // the window is presented, but the sticker contributes no pixels.
+        assert!(
+            runtime.next_frame_in().is_none(),
+            "an offscreen sticker must not schedule animation frames"
+        );
+
+        // Scroll it into view; frames resume as a property of the tree, with no
+        // author discipline required.
+        let wheel = InputEvent::Wheel(WheelEvent {
+            position: Point::new(50.0, 50.0),
+            delta: WheelDelta::Pixels(Point::new(0.0, -240.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert_eq!(runtime.dispatch_event(&wheel), EventStatus::Handled);
+        runtime.layout(viewport).expect("scroll layout succeeds");
+        assert!(
+            runtime.next_frame_in().is_some(),
+            "a visible sticker schedules animation frames"
+        );
+    }
+
+    #[test]
     fn non_looping_animations_finish_on_the_last_frame() {
         let mut animation = AnimatedImage::new(vec![frame(1), frame(2)]).with_looping(false);
         animation.advance(Duration::from_millis(100));
