@@ -8,10 +8,10 @@ use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
-use crate::text_editor::TextEditor;
+use crate::text_editor::{TextEditor, normalize};
 
 const DEFAULT_WIDTH: f32 = 120.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
@@ -26,8 +26,15 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 /// horizontal scrolling when the value is wider than the control. Text is
 /// committed through [`InputEvent::TextInput`], which keeps keyboard layout and
 /// input-method handling in the platform adapter.
+///
+/// The text is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&field.text(), &state.text)`. Text changes the control's
+/// size, so use `bind_layout`. A binding copy replaces the text and resets the
+/// caret and undo history; user edits keep the caret and update the property.
+/// Read the scalar with `field.text().get()`.
 pub struct TextField {
     editor: TextEditor,
+    text: Property<String>,
     changed: Signal<String>,
     focused: bool,
     preedit: Option<TextPreedit>,
@@ -50,8 +57,13 @@ impl TextField {
     /// Creates a text field with `text` as its initial value.
     #[must_use]
     pub fn with_text(text: impl Into<String>) -> Self {
+        let editor = TextEditor::with_text(false, text);
+        let text_property = Property::normalized(editor.text().to_owned(), |text: String| {
+            normalize(false, &text)
+        });
         Self {
-            editor: TextEditor::with_text(false, text),
+            editor,
+            text: text_property,
             changed: Signal::new(),
             focused: false,
             preedit: None,
@@ -65,18 +77,24 @@ impl TextField {
         }
     }
 
-    /// Returns the current UTF-8 text.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        self.editor.text()
+    /// Returns the text property shared with this field.
+    ///
+    /// The stored value is the current text with line breaks stripped. Every
+    /// write is normalized, including `UiRuntime::bind` copies. Bind state with
+    /// `runtime.bind_layout(&field.text(), &state.text)` and read the scalar with
+    /// `field.text().get()`. The property's `changed` signal fires on every write;
+    /// [`Self::changed`] fires only on user edits.
+    pub fn text(&self) -> Property<String> {
+        self.text.clone()
     }
 
     /// Replaces the current text and places the caret at its end.
     ///
-    /// This does not emit [`Self::changed`]; use the signal for edits initiated
-    /// by the user.
+    /// Emits `text().changed()` when the normalized text differs, but not
+    /// [`Self::changed`]; use that signal for edits initiated by the user.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.editor.set_text(text);
+        self.text.set(self.editor.text().to_owned());
         self.preedit = None;
         self.scroll_x = 0.0;
     }
@@ -108,6 +126,20 @@ impl TextField {
     #[must_use]
     pub fn changed(&self) -> Signal<String> {
         self.changed.clone()
+    }
+
+    /// Applies an external property write (for example a binding copy) to the
+    /// editor, resetting the caret and undo history. User edits keep the editor
+    /// and the property equal, so this is a no-op for them and preserves the caret.
+    fn reconcile_text(&mut self) {
+        // Compare without cloning; only an external write (a binding copy or a
+        // direct `set`) diverges from the editor, and only then do we clone.
+        if self.text.with(|stored| stored != self.editor.text()) {
+            let text = self.text.get();
+            self.editor.set_text(text);
+            self.preedit = None;
+            self.scroll_x = 0.0;
+        }
     }
 
     fn text_origin(&self) -> Point {
@@ -205,6 +237,7 @@ impl TextField {
             context.request_redraw();
             return true;
         }
+        self.text.set(self.editor.text().to_owned());
         self.changed.emit(&self.editor.text().to_owned());
         context.request_layout();
         true
@@ -247,6 +280,7 @@ impl Widget for TextField {
         context: &mut LayoutContext<'_>,
         constraints: Constraints,
     ) -> LayoutResult {
+        self.reconcile_text();
         let style = context.style();
         let environment = context.environment();
         let font = environment.font_for(&style);
@@ -333,6 +367,7 @@ impl Widget for TextField {
         if context.phase() != EventPhase::Target {
             return EventStatus::Ignored;
         }
+        self.reconcile_text();
         match event {
             InputEvent::PointerDown(pointer) => {
                 if pointer.button != Some(PointerButton::Primary) {
@@ -584,4 +619,86 @@ fn empty_layout() -> TextLayout {
         &TextStyle::new(1.0, Color::BLACK),
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use drawen_render::{DisplayList, PaintContext};
+    use drawen_ui::UiRuntime;
+
+    use super::*;
+
+    fn viewport() -> Constraints {
+        Constraints::tight(Size::new(200.0, 40.0).expect("valid size")).expect("valid constraints")
+    }
+
+    #[test]
+    fn bound_text_follows_application_state() {
+        let state = Property::new("hello".to_string());
+        let field = TextField::with_text("hello");
+        let text = field.text();
+        let mut runtime = UiRuntime::new(field);
+        let _binding = runtime.bind_layout(&text, &state);
+        runtime.layout(viewport()).expect("field layout succeeds");
+        assert_eq!(text.get(), "hello");
+
+        // A binding copy replaces the text; the next paint reconciles the editor.
+        state.set("world!".to_string());
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint after a bound text change succeeds");
+        assert_eq!(text.get(), "world!");
+
+        // Line breaks are stripped for a single-line field, even on a bind copy.
+        state.set("a\nb".to_string());
+        assert_eq!(text.get(), "ab");
+    }
+
+    #[test]
+    fn set_text_emits_property_changed_but_not_user_changed() {
+        let field = TextField::new();
+        let text = field.text();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = text.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(value.clone())
+        });
+        let _user = field.changed().subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(value.clone())
+        });
+        let mut runtime = UiRuntime::new(field);
+        runtime.layout(viewport()).expect("field layout succeeds");
+        runtime.focus_widget(runtime.root()).expect("field focuses");
+
+        // A programmatic write emits the property signal, never the user one.
+        text.set("abc".to_string());
+        assert_eq!(property_changes.borrow().len(), 1);
+        assert!(user_changes.borrow().is_empty());
+
+        // User input emits both.
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("d".into()));
+        assert_eq!(property_changes.borrow().len(), 2);
+        assert_eq!(user_changes.borrow().len(), 1);
+        assert_eq!(text.get(), "abcd");
+    }
+
+    #[test]
+    fn user_edit_preserves_the_caret_while_syncing_the_property() {
+        let mut field = TextField::with_text("hello");
+        field.set_cursor(2);
+        let text = field.text();
+        let mut runtime = UiRuntime::new(field);
+        runtime.layout(viewport()).expect("field layout succeeds");
+        runtime.focus_widget(runtime.root()).expect("field focuses");
+
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("X".into()));
+        // Inserting at the caret (not appending) proves the user edit preserved
+        // the caret instead of reconciling it to the end of the text.
+        assert_eq!(text.get(), "heXllo");
+    }
 }

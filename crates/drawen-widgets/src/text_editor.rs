@@ -294,7 +294,7 @@ impl TextEditor {
     }
 }
 
-fn normalize(multiline: bool, text: &str) -> String {
+pub(crate) fn normalize(multiline: bool, text: &str) -> String {
     if multiline {
         text.replace("\r\n", "\n").replace('\r', "\n")
     } else {
