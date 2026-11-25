@@ -12,10 +12,10 @@ readme.workspace = true
 workspace = true
 
 [target.'cfg(windows)'.dependencies]
-drawen-servo-windows = { version = "0.2", path = "../drawen-servo-windows" }
+drawen-servo-windows = { version = "0.3", path = "../drawen-servo-windows" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-drawen-servo-linux = { version = "0.2", path = "../drawen-servo-linux" }
+drawen-servo-linux = { version = "0.3", path = "../drawen-servo-linux" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-drawen-servo-macos = { version = "0.2", path = "../drawen-servo-macos" }
+drawen-servo-macos = { version = "0.3", path = "../drawen-servo-macos" }

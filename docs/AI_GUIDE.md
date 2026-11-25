@@ -232,7 +232,7 @@ See [RECIPES.md](RECIPES.md#12-a-split-button).
 Choose the backend explicitly:
 
 ```rust
-let video = Video::open_paleo("clip.mp4")?;        // "media"; pure Rust, H.264, no audio
+let video = Video::open_paleo("clip.mp4")?;        // "media"; pure Rust: H.264/HEVC/VP9/AV1, no audio
 let video = Video::open_paleo_audio("clip.mp4")?;  // "audio" (implies "media")
 let video = Video::open("clip.mp4")?;              // "media"; external ffmpeg/ffprobe, no audio
 let audio = AudioPlayer::open("song.flac")?;       // "audio"; music player with cover art
@@ -276,7 +276,7 @@ Common causes:
 Paste this before asking a model for Drawen code:
 
 ```text
-Use Drawen 0.1. Application code depends on the `drawen` facade, plus
+Use Drawen 0.3. Application code depends on the `drawen` facade, plus
 `drawen-platform-winit` for a native window. Do not use drawen-ui or
 drawen-widgets directly.
 
@@ -310,6 +310,6 @@ Copy the event loop and media policy from:
   persistence.
 - [`background_tasks.rs`](../crates/drawen/examples/background_tasks.rs) —
   worker pool, progress, and UI delivery.
-- [`RECIPES.md`](RECIPES.md) — the seven application patterns.
+- [`RECIPES.md`](RECIPES.md) — the twelve application patterns.
 - [`MEDIA.md`](MEDIA.md) — sessions, clocks, backends, lifecycle policy.
 - [`THREADING.md`](THREADING.md) — task pools, cancellation, and the UI bridge.

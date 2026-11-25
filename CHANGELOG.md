@@ -4,7 +4,7 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
-## Unreleased
+## 0.3.0 - 2026-11-25
 
 ### Overlays
 
@@ -107,6 +107,10 @@ in the headings because the version itself must stay valid semver; see
   first character, so combining marks and emoji sequences are not split across
   fonts. Controls, variation selectors, and other default-ignorable characters
   are excluded from the coverage check.
+- Fixed RTL run placement: HarfRust returns glyphs in visual order for both
+  directions, so a reversed run now advances left to right from the current pen
+  and right-to-left text lands at the correct position inside a mixed-direction
+  line.
 
 ### Drawen Style Sheets
 
@@ -203,6 +207,104 @@ in the headings because the version itself must stay valid semver; see
 - `MediaSession` gained default volume and mute methods; `PaleoSession` and
   `AudioPaleoSession` implement them.
 
+### Paleo
+
+- Added `paleo-player`, a one-object playback engine. `Player::open` owns the
+  container reader, the codec-selected decoder, the audio device, the bounded
+  picture queue, and the master clock, so applications no longer assemble
+  `Media` plus a decoder plus `AudioOutput`. `PlayerOptions` covers audio/video
+  enable, autoplay, looping, rate, volume, mute, device, and latency;
+  `PlayerInfo` reports tracks and per-stream codec gaps; `update(now)` performs
+  one bounded demux/decode step on the calling thread and reports position,
+  state, and frame transitions; `frame()` borrows the current RGBA picture
+  without copying. The player never spawns threads or calls platform APIs.
+- Added the pure-Rust `paleo-hevc`, `paleo-vp9`, and `paleo-av1` decoding
+  backends and the `paleo-video` codec selector. Video decoding is pluggable
+  through the `paleo::VideoDecoder` contract with a shared `paleo::VideoFrame`
+  (tightly packed RGBA) and a deterministic `paleo::yuv` conversion module;
+  `paleo-h264` moves onto that contract and re-exports the frame type.
+  `Video::open_paleo` and the audio-mastered session now play H.264, HEVC,
+  VP9, and AV1 instead of H.264 only.
+- A track whose codec has no backend is no longer fatal: the player skips it,
+  records the reason in `PlayerInfo::video_error` / `PlayerInfo::audio_error`,
+  and still plays the other track. With audio disabled the file opens
+  video-only, so an unsupported audio codec does not block a silent view.
+- Opus in Ogg, Matroska, and MP4 now decodes through the pure-Rust
+  `symphonia-opus` backend behind the default `paleo` `opus` feature,
+  registered so Symphonia's own decoders keep their normal tier.
+- `PaleoSession` is rebuilt on `Player` and gained `open_audio` and a
+  recoverable `warning()` report; `AudioPaleoSession` is now a delegating
+  wrapper over the shared session. Rate changes suspend audio and resync with
+  a seek when returning to `1x`.
+- Fixed video seek synchronization: video decodes from the keyframe at or
+  before the target and drops pictures before the target, so stale pre-seek
+  pictures cannot fill the bounded queue while audio starts at the requested
+  position. The last presented frame stays visible until the seek target is
+  ready, including after a backward seek.
+- Audio queue tails are preserved: a converted PCM block that does not fit the
+  device ring keeps its unqueued tail for a later update instead of being
+  dropped, so no audio is lost at ring boundaries.
+
+### Tasks
+
+- `UiDispatcher` wake-ups are coalesced: a burst of sends invokes the wake
+  callback once instead of once per value, and receiving re-arms the wake so
+  values sent during a drain are never stranded without a wake-up.
+
+### Documentation
+
+- `RECIPES.md` grows to twelve patterns: tooltips, popovers, and floating
+  menus; modal dialogs; the command palette; toast notifications; and the
+  split button join the original seven. The virtual-list recipe now covers
+  chat-style variable-height rows, autocomplete, and IME caret positioning.
+- `AI_GUIDE.md` and `AGENTS.md` cover the overlay widgets, presentation-aware
+  background ticking, and the multicodec Paleo backends. `DSS.md` documents
+  the extended language; `MEDIA.md` and `PALEO.md` document the player, the
+  backends, and the seek policy.
+- The style showcase demonstrates the media players, a DSS sample, and
+  multilingual system-font fallback, and still builds without the media
+  features.
+
+### Packaging
+
+- Five new crates join the published set: `paleo-video`, `paleo-player`,
+  `paleo-hevc`, `paleo-vp9`, and `paleo-av1`.
+- `drawen-widgets` now depends only on `paleo-player`: its `media` feature
+  links the player with the pure-Rust backends instead of `paleo` plus
+  `paleo-h264` directly, and `audio` enables `paleo-player/device`.
+
+### Breaking changes
+
+Verified with `cargo semver-checks check-release --baseline-rev v0.2.0
+--all-features --release-type patch` against every crate published in 0.2.0:
+
+- `drawen-render`: `FontdueTextShaper` and `FontDatabase` are no longer
+  `UnwindSafe` / `RefUnwindSafe` (`auto_trait_impl_removed`); the lazy system
+  fallback index introduced interior mutability.
+- `drawen-ui`: `DssStyle` gained the public `width`, `height`, `min_width`,
+  `min_height`, `max_width`, and `max_height` fields
+  (`constructible_struct_adds_field`), so exhaustive struct literals must add
+  them or switch to `Default` plus field assignment. `PseudoClass` gained the
+  `Checked` and `Selected` variants (`enum_variant_added`); the enum is not
+  `#[non_exhaustive]`, so exhaustive matches must add the new arms.
+- `drawen-widgets`: `PaleoSession` and `AudioPaleoSession` are no longer
+  `Send` (`auto_trait_impl_removed`) because the shared player owns
+  non-`Send` device state; keep sessions on the thread that opens them.
+  `Text` is no longer `UnwindSafe` / `RefUnwindSafe` through its prepared
+  layout. `Video::is_looping`, `Video::with_looping`, and
+  `Video::with_controls` are no longer `const`
+  (`inherent_method_const_removed`); they delegate to the shared player core.
+- `paleo-h264`: `VideoFrame` is now a re-export of `paleo::VideoFrame`
+  instead of a locally defined type (`struct_missing`). The import path keeps
+  resolving, but the type is foreign to `paleo-h264` now, so orphan-rule
+  trait impls on it must move to `paleo`.
+- Default presentation behavior changed: visible but unfocused windows are
+  capped at 30 fps (override `WindowApplication::inactive_frame_interval` to
+  opt out), hidden windows tick at the 100 ms background interval instead of
+  presenting frames, and purely visual animation freezes while a widget is
+  hidden, offscreen, or under a modal scrim. Media clocks and toast lifetimes
+  keep running through `Widget::advances_while_hidden`.
+
 ## 0.2.0 - 2026-11-17
 
 ### GPU renderer
@@ -257,9 +359,6 @@ in the headings because the version itself must stay valid semver; see
   work: a fixed-size `TaskPool`, cancellable `TaskHandle`s, `TaskContext`
   progress reporting and cooperative cancellation, and a `UiDispatcher` that
   moves owned results back to the UI thread and wakes the event loop.
-- `UiDispatcher` wake-ups are coalesced: a burst of sends invokes the wake
-  callback once instead of once per value, and receiving re-arms the wake so
-  values sent during a drain are never stranded without a wake-up.
 - `drawen::tasks` re-exports the pool, handles, cancellation token, dispatcher,
   and error types, so applications do not depend on the crate directly.
 

@@ -245,7 +245,7 @@ does the conversion for the pure-Rust backends, so each one only has to name its
 pixel layout and matrix. A build that needs one codec can drop the rest:
 
 ```toml
-paleo-video = { version = "0.2", default-features = false, features = ["h264"] }
+paleo-video = { version = "0.3", default-features = false, features = ["h264"] }
 ```
 
 `paleo-video::codecs` and `supports` report what the build can decode, and an

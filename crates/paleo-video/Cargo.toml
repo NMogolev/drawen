@@ -19,8 +19,8 @@ vp9 = ["dep:paleo-vp9"]
 av1 = ["dep:paleo-av1"]
 
 [dependencies]
-paleo = { version = "0.2", path = "../paleo" }
-paleo-av1 = { version = "0.2", path = "../paleo-av1", optional = true }
-paleo-h264 = { version = "0.2", path = "../paleo-h264", optional = true }
-paleo-hevc = { version = "0.2", path = "../paleo-hevc", optional = true }
-paleo-vp9 = { version = "0.2", path = "../paleo-vp9", optional = true }
+paleo = { version = "0.3", path = "../paleo" }
+paleo-av1 = { version = "0.3", path = "../paleo-av1", optional = true }
+paleo-h264 = { version = "0.3", path = "../paleo-h264", optional = true }
+paleo-hevc = { version = "0.3", path = "../paleo-hevc", optional = true }
+paleo-vp9 = { version = "0.3", path = "../paleo-vp9", optional = true }

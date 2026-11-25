@@ -19,10 +19,17 @@ Non-negotiables:
 - DSS is a typed subset: type/id/class/state selectors, descendant and child
   combinators, structural pseudo-classes, `var()`/`calc()`, and `!important`.
   No sibling combinators, animations, or full browser CSS.
-- Media backends are explicit: `Video::open_paleo` (H.264, no audio),
-  `Video::open_paleo_audio` (feature `audio`), `Video::open` (external FFmpeg,
-  no audio). Background playback after the last window closes requires
-  `MediaDirector::with_background_playback(true)`.
+- Media backends are explicit: `Video::open_paleo` (pure Rust: H.264, HEVC,
+  VP9, AV1; no audio), `Video::open_paleo_audio` (feature `audio`),
+  `Video::open` (external FFmpeg, no audio). Background playback after the
+  last window closes requires `MediaDirector::with_background_playback(true)`.
+- Forward `WindowPresentation` to `UiRuntime::set_presented` from
+  `presentation_changed` and implement `tick` with `UiRuntime::tick`, so a
+  hidden window advances media clocks without painting. Purely visual
+  animation freezes while hidden or offscreen; do not force frames for it.
+- Floating surfaces (`Tooltip`, `Popover`, `Menu`, `Modal`, `ToastHost`) use
+  the runtime's overlay layer. Do not expand them inside their parent or
+  paint them by hand above siblings.
 - Off-thread work goes through `drawen::tasks` (`TaskPool` + `UiDispatcher`).
   Workers own plain data and never capture widgets, signals, or subscriptions;
   the UI thread drains delivered values in `window_event`.

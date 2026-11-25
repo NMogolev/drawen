@@ -12,7 +12,7 @@ readme.workspace = true
 workspace = true
 
 [dependencies]
-paleo = { version = "0.2", path = "../paleo" }
+paleo = { version = "0.3", path = "../paleo" }
 # Pin the decoder exactly: its streaming API is young and the packet bridge in
 # this crate is written against this release. The `asm` feature is off, so this
 # build path is pure Rust; the maintained assembly kernels need NASM.
