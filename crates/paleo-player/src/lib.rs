@@ -422,8 +422,6 @@ impl Player {
 
         self.video_queue.clear();
         self.video_trim_from = self.info.video_enabled.then_some(target);
-        self.frame = None;
-        self.frame_version = self.frame_version.wrapping_add(1);
         self.eof = false;
         self.flushed = false;
 
@@ -721,17 +719,15 @@ impl Player {
 
     /// Inserts a picture in presentation order.
     fn queue_frame(&mut self, frame: VideoFrame) {
-        if self
-            .video_trim_from
-            .is_some_and(|target| frame_is_before_target(frame.pts(), target))
-        {
+        let gate = gate_video_frame(frame.pts(), &mut self.video_trim_from);
+        if gate == VideoFrameGate::Drop {
             return;
         }
-        self.video_trim_from = None;
-        if self
-            .frame
-            .as_ref()
-            .is_some_and(|current| frame.pts() <= current.pts())
+        if gate == VideoFrameGate::Normal
+            && self
+                .frame
+                .as_ref()
+                .is_some_and(|current| frame.pts() <= current.pts())
         {
             return;
         }
@@ -804,21 +800,49 @@ fn frame_is_before_target(pts: Duration, target: Duration) -> bool {
     pts < target
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoFrameGate {
+    Drop,
+    FirstAfterSeek,
+    Normal,
+}
+
+fn gate_video_frame(pts: Duration, trim_from: &mut Option<Duration>) -> VideoFrameGate {
+    let Some(target) = *trim_from else {
+        return VideoFrameGate::Normal;
+    };
+    if frame_is_before_target(pts, target) {
+        return VideoFrameGate::Drop;
+    }
+    *trim_from = None;
+    VideoFrameGate::FirstAfterSeek
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn seek_discards_video_before_the_target() {
+    fn seek_gate_discards_old_video_and_accepts_the_first_new_frame() {
         let target = Duration::from_secs(60);
+        let mut trim_from = Some(target);
 
+        assert_eq!(
+            gate_video_frame(Duration::from_millis(59_999), &mut trim_from),
+            VideoFrameGate::Drop
+        );
+        assert_eq!(trim_from, Some(target));
+        assert_eq!(
+            gate_video_frame(target, &mut trim_from),
+            VideoFrameGate::FirstAfterSeek
+        );
+        assert_eq!(trim_from, None);
+        assert_eq!(
+            gate_video_frame(Duration::from_millis(60_001), &mut trim_from),
+            VideoFrameGate::Normal
+        );
         assert!(frame_is_before_target(
             Duration::from_millis(59_999),
-            target
-        ));
-        assert!(!frame_is_before_target(target, target));
-        assert!(!frame_is_before_target(
-            Duration::from_millis(60_001),
             target
         ));
     }
