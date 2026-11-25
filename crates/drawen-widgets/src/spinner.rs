@@ -3,7 +3,7 @@ use std::f32::consts::TAU;
 use drawen_core::{Affine, Color, Constraints, Point, Rect, Size};
 use drawen_render::PaintContext;
 use drawen_ui::{
-    Accessibility, AccessibilityRole, DssStyle, LayoutContext, LayoutResult, StyleTarget,
+    Accessibility, AccessibilityRole, DssStyle, LayoutContext, LayoutResult, Property, StyleTarget,
     UiEnvironment, Widget,
 };
 
@@ -17,10 +17,15 @@ const MIN_SEGMENTS: usize = 2;
 /// highlights the completed portion of the ring and leaves a faint track;
 /// indeterminate progress fades segments around the ring using [`Self::phase`]
 /// as a normalized rotation.
+///
+/// The progress is a clamped [`Property`]: bind application state to it with
+/// `runtime.bind(&spinner.progress(), &state.fraction)`, where `None` means
+/// indeterminate and `Some` is clamped to `0.0..=1.0`. The animation phase is
+/// internal animation state, not a bindable property.
 pub struct Spinner {
     diameter: f32,
     segments: usize,
-    progress: Option<f32>,
+    progress: Property<Option<f32>>,
     phase: f32,
     color: Option<Color>,
     track_color: Option<Color>,
@@ -33,7 +38,15 @@ impl Spinner {
         Self {
             diameter: DEFAULT_DIAMETER,
             segments: DEFAULT_SEGMENTS,
-            progress: None,
+            progress: Property::normalized(None, |progress: Option<f32>| {
+                progress.map(|value| {
+                    if value.is_finite() {
+                        value.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+            }),
             phase: 0.0,
             color: None,
             track_color: None,
@@ -64,10 +77,16 @@ impl Spinner {
         self.segments
     }
 
-    /// Returns the normalized progress value, or `None` when indeterminate.
-    #[must_use]
-    pub const fn progress(&self) -> Option<f32> {
-        self.progress
+    /// Returns the progress property shared with this spinner.
+    ///
+    /// The stored value is `None` for indeterminate progress, or `Some` fraction
+    /// clamped to `0.0..=1.0`. Every write is normalized, including
+    /// `UiRuntime::bind` copies; a non-finite `Some` falls back to `0.0`. Bind
+    /// state with `runtime.bind(&spinner.progress(), &state.fraction)` and read
+    /// the scalar with `spinner.progress().get()`. The property's `changed`
+    /// signal fires on every write.
+    pub fn progress(&self) -> Property<Option<f32>> {
+        self.progress.clone()
     }
 
     /// Returns the normalized animation phase in `0.0..1.0`.
@@ -106,16 +125,18 @@ impl Spinner {
 
     /// Makes the spinner determinate, or indeterminate when `progress` is `None`.
     ///
+    /// Emits `progress().changed()` when the normalized value differs. When the
+    /// property is watched or bound through the runtime, the change invalidates
+    /// paint.
+    ///
     /// # Panics
     ///
     /// Panics when `progress` is `Some` and non-finite.
     pub fn set_progress(&mut self, progress: Option<f32>) {
         if let Some(progress) = progress {
             assert!(progress.is_finite(), "spinner progress must be finite");
-            self.progress = Some(progress.clamp(0.0, 1.0));
-        } else {
-            self.progress = None;
         }
+        self.progress.set(progress);
     }
 
     /// Sets the normalized animation phase, wrapping it into `0.0..1.0`.
@@ -200,7 +221,7 @@ impl Widget for Spinner {
                 size(thickness, segment_length),
             );
 
-            if let Some(progress) = self.progress {
+            if let Some(progress) = self.progress.get() {
                 let coverage = (progress * count_f32 - usize_to_f32(index)).clamp(0.0, 1.0);
                 let track = track_color.with_alpha(track_color.alpha * 0.35);
                 context.with_transform(transform, |context| {
@@ -229,7 +250,7 @@ impl Widget for Spinner {
 
     fn accessibility(&self) -> Accessibility {
         let accessibility = Accessibility::new(AccessibilityRole::ProgressIndicator);
-        match self.progress {
+        match self.progress.get() {
             Some(progress) => accessibility.with_numeric_value(f64::from(progress), 0.0, 1.0),
             None => accessibility.with_states(drawen_ui::AccessibilityState::BUSY),
         }
@@ -249,6 +270,8 @@ fn usize_to_f32(value: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use drawen_render::{DisplayCommand, DisplayList};
     use drawen_ui::{LightTheme, Theme, UiRuntime};
 
@@ -356,12 +379,54 @@ mod tests {
     #[test]
     fn clamps_progress_and_wraps_the_phase() {
         let mut spinner = Spinner::with_progress(2.0);
-        assert_eq!(spinner.progress(), Some(1.0));
+        assert_eq!(spinner.progress().get(), Some(1.0));
         spinner.set_progress(Some(-0.5));
-        assert_eq!(spinner.progress(), Some(0.0));
+        assert_eq!(spinner.progress().get(), Some(0.0));
         spinner.set_phase(1.25);
         assert!((spinner.phase() - 0.25).abs() <= f32::EPSILON);
         spinner.advance_phase(0.5);
         assert!((spinner.phase() - 0.75).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn bound_progress_is_clamped_and_none_is_indeterminate() {
+        let fraction = Property::new(Some(0.25_f32));
+        let spinner = Spinner::new();
+        let progress = spinner.progress();
+        let mut runtime = UiRuntime::new(spinner);
+        let _binding = runtime.bind(&progress, &fraction);
+        runtime
+            .layout(Constraints::tight(size(24.0, 24.0)).expect("valid constraints"))
+            .expect("spinner layout succeeds");
+        assert_eq!(progress.get(), Some(0.25));
+
+        // A binding copies the source verbatim; the property clamps it.
+        fraction.set(Some(2.0));
+        assert_eq!(progress.get(), Some(1.0));
+
+        fraction.set(None);
+        assert_eq!(progress.get(), None);
+    }
+
+    #[test]
+    fn set_progress_emits_property_changed() {
+        let spinner = Spinner::new();
+        let progress = spinner.progress();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = progress.subscribe({
+            let changes = Rc::clone(&changes);
+            move |value| changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(spinner);
+        runtime
+            .layout(Constraints::tight(size(24.0, 24.0)).expect("valid constraints"))
+            .expect("spinner layout succeeds");
+
+        progress.set(Some(0.5));
+        assert_eq!(*changes.borrow(), vec![Some(0.5)]);
+
+        // An equal write is silent.
+        progress.set(Some(0.5));
+        assert_eq!(changes.borrow().len(), 1);
     }
 }
