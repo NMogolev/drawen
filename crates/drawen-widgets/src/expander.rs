@@ -5,7 +5,7 @@ use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, Border, ChildLayout, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, PseudoClass, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutContext, LayoutResult, Property, PseudoClass, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const MIN_HEADER_HEIGHT: f32 = 30.0;
@@ -18,9 +18,14 @@ const TRAILING_PADDING: f32 = 12.0;
 /// The expander keeps its body child retained while collapsed but excludes it
 /// from layout, painting, hit testing, and focus traversal. Pointer clicks and
 /// Space or Enter atomically toggle the section and emit [`Self::toggled`].
+///
+/// The expansion state is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&expander.expanded(), &state.open)`, because expanding
+/// changes the section's geometry. User interaction additionally emits
+/// [`Self::toggled`].
 pub struct Expander {
     title: String,
-    expanded: bool,
+    expanded: Property<bool>,
     toggled: Signal<bool>,
     pressed_pointer: Option<PointerId>,
     header_pressed: bool,
@@ -35,7 +40,7 @@ impl Expander {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
-            expanded: false,
+            expanded: Property::new(false),
             toggled: Signal::new(),
             pressed_pointer: None,
             header_pressed: false,
@@ -47,8 +52,8 @@ impl Expander {
 
     /// Returns this expander with an initial expansion state.
     #[must_use]
-    pub const fn with_expanded(mut self, expanded: bool) -> Self {
-        self.expanded = expanded;
+    pub fn with_expanded(self, expanded: bool) -> Self {
+        self.expanded.set(expanded);
         self
     }
 
@@ -58,17 +63,31 @@ impl Expander {
         &self.title
     }
 
-    /// Returns whether the section is expanded.
-    #[must_use]
-    pub const fn is_expanded(&self) -> bool {
-        self.expanded
+    /// Returns the expansion property shared with this expander.
+    ///
+    /// Expanding changes the section's geometry, so bind application state with
+    /// `runtime.bind_layout(&expander.expanded(), &state.open)` to invalidate
+    /// layout (and therefore paint) on every change. The property's `changed`
+    /// signal fires on every write, including programmatic ones;
+    /// [`Self::toggled`] fires only on user interaction.
+    pub fn expanded(&self) -> Property<bool> {
+        self.expanded.clone()
     }
 
-    /// Sets the expansion state without emitting [`Self::toggled`].
+    /// Returns whether the section is expanded.
+    #[must_use]
+    pub fn is_expanded(&self) -> bool {
+        self.expanded.get()
+    }
+
+    /// Sets the expansion state.
     ///
-    /// The caller is responsible for requesting a layout pass after the change.
+    /// Emits `expanded().changed()` when the value differs, but not
+    /// [`Self::toggled`], which is reserved for user interaction. The caller is
+    /// responsible for requesting a layout pass after the change, or bind the
+    /// property with `bind_layout` so the runtime invalidates layout itself.
     pub fn set_expanded(&mut self, expanded: bool) {
-        self.expanded = expanded;
+        self.expanded.set(expanded);
     }
 
     /// Returns a signal emitted when user interaction changes the expansion state.
@@ -88,16 +107,17 @@ impl Expander {
     }
 
     fn toggle(&mut self, context: &mut EventContext<'_>) {
-        self.expanded = !self.expanded;
-        self.toggled.emit(&self.expanded);
+        let expanded = !self.expanded.get();
+        self.expanded.set(expanded);
+        self.toggled.emit(&expanded);
         context.request_layout();
     }
 
     fn set_expanded_without_context(&mut self, expanded: bool) -> bool {
-        if self.expanded == expanded {
+        if self.expanded.get() == expanded {
             return false;
         }
-        self.expanded = expanded;
+        self.expanded.set(expanded);
         self.toggled.emit(&expanded);
         true
     }
@@ -142,7 +162,7 @@ impl Widget for Expander {
             } else {
                 f32::INFINITY
             };
-            let body_constraints = if self.expanded {
+            let body_constraints = if self.expanded.get() {
                 Constraints::loose(size(width, remaining))
             } else {
                 Constraints::tight(Size::ZERO).expect("zero constraints are valid")
@@ -150,13 +170,13 @@ impl Widget for Expander {
             let (id, layout) = context
                 .layout_child(0, body_constraints)
                 .expect("runtime child index is valid");
-            if self.expanded {
+            if self.expanded.get() {
                 body_height = layout.size().height();
             }
             children.push(ChildLayout::with_visibility(
                 id,
                 Point::new(0.0, self.header_height),
-                self.expanded,
+                self.expanded.get(),
             ));
         }
 
@@ -215,7 +235,7 @@ impl Widget for Expander {
             bar_thickness / 2.0,
             icon_color,
         );
-        if !self.expanded {
+        if !self.expanded.get() {
             context.fill_rounded_rect(
                 Rect::new(
                     Point::new(center.x - bar_thickness / 2.0, center.y - icon_size / 2.0),
@@ -237,7 +257,7 @@ impl Widget for Expander {
             );
         }
 
-        if self.expanded && bounds.size.height() > self.header_height {
+        if self.expanded.get() && bounds.size.height() > self.header_height {
             let divider = theme
                 .muted_foreground()
                 .with_alpha(theme.muted_foreground().alpha * 0.25);
@@ -314,7 +334,7 @@ impl Widget for Expander {
             .with_label(self.title.clone())
             .with_states(AccessibilityState::FOCUSABLE)
             .with_actions(AccessibilityActions::FOCUS | AccessibilityActions::CLICK);
-        if self.expanded {
+        if self.expanded.get() {
             accessibility = accessibility
                 .with_states(AccessibilityState::EXPANDED)
                 .with_actions(AccessibilityActions::COLLAPSE);
@@ -326,7 +346,7 @@ impl Widget for Expander {
 
     fn accessibility_action(&mut self, action: &AccessibilityAction) -> bool {
         match action {
-            AccessibilityAction::Click => self.set_expanded_without_context(!self.expanded),
+            AccessibilityAction::Click => self.set_expanded_without_context(!self.expanded.get()),
             AccessibilityAction::Expand => self.set_expanded_without_context(true),
             AccessibilityAction::Collapse => self.set_expanded_without_context(false),
             _ => false,
@@ -343,6 +363,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use drawen_core::{Modifiers, PointerButtons, PointerEvent, PointerId, Size};
+    use drawen_render::DisplayList;
     use drawen_ui::UiRuntime;
 
     use crate::SizedBox;
@@ -377,6 +398,70 @@ mod tests {
         assert_eq!(*values.borrow(), vec![true]);
         assert!(expanded.height() > collapsed.height());
         assert!((expanded.height() - collapsed.height() - 20.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn bound_expanded_follows_application_state() {
+        let open = Property::new(false);
+        let section = Expander::new("Advanced");
+        let expanded = section.expanded();
+        let mut runtime = UiRuntime::new(section);
+        runtime
+            .append_child(runtime.root(), SizedBox::new(Some(60.0), Some(20.0)))
+            .expect("expander root exists");
+        let _binding = runtime.bind_layout(&expanded, &open);
+        let constraints = Constraints::loose(Size::new(120.0, 200.0).expect("valid constraints"));
+        runtime
+            .layout(constraints)
+            .expect("collapsed expander layout succeeds");
+        let root = runtime.root();
+        let collapsed = runtime
+            .bounds(root)
+            .expect("root is laid out")
+            .size
+            .height();
+        assert!(!expanded.get());
+
+        // Expanding changes geometry; paint drains the layout damage and re-measures.
+        open.set(true);
+        assert!(expanded.get());
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("expanded expander paint succeeds");
+        let grown = runtime
+            .bounds(root)
+            .expect("root is laid out")
+            .size
+            .height();
+        assert!(grown > collapsed);
+    }
+
+    #[test]
+    fn set_expanded_emits_changed_but_not_toggled() {
+        let section = Expander::new("Advanced");
+        let expanded = section.expanded();
+        let toggled = section.toggled();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = expanded.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = toggled.subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(section);
+        runtime
+            .layout(Constraints::loose(
+                Size::new(120.0, 200.0).expect("valid constraints"),
+            ))
+            .expect("expander layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        expanded.set(true);
+        assert_eq!(*property_changes.borrow(), vec![true]);
+        assert!(user_changes.borrow().is_empty());
     }
 
     fn pointer(down: bool, position: Point) -> InputEvent {
