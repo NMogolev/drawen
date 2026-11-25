@@ -180,6 +180,7 @@ pub struct Player {
     volume: f32,
     muted: bool,
     video_queue: VecDeque<VideoFrame>,
+    video_trim_from: Option<Duration>,
     frame: Option<VideoFrame>,
     frame_version: u64,
     reported_version: u64,
@@ -275,6 +276,7 @@ impl Player {
             volume: clamp_volume(options.volume),
             muted: options.muted,
             video_queue: VecDeque::new(),
+            video_trim_from: None,
             frame: None,
             frame_version: 0,
             reported_version: 0,
@@ -403,8 +405,9 @@ impl Player {
 
     /// Moves the playhead to `position`, clamped to the known duration.
     ///
-    /// Video starts decoding at the keyframe at or before the target, so the
-    /// first picture after a seek is never a smear of stale references. When the
+    /// Video starts decoding at the keyframe at or before the target, then drops
+    /// pictures before the target. This avoids filling the bounded picture queue
+    /// with stale frames while audio starts at the requested position. When the
     /// player is paused, the picture at the new position is still decoded so a
     /// scrubber can show it.
     ///
@@ -418,6 +421,9 @@ impl Player {
         let target = self.timeline.position();
 
         self.video_queue.clear();
+        self.video_trim_from = self.info.video_enabled.then_some(target);
+        self.frame = None;
+        self.frame_version = self.frame_version.wrapping_add(1);
         self.eof = false;
         self.flushed = false;
 
@@ -716,6 +722,13 @@ impl Player {
     /// Inserts a picture in presentation order.
     fn queue_frame(&mut self, frame: VideoFrame) {
         if self
+            .video_trim_from
+            .is_some_and(|target| frame_is_before_target(frame.pts(), target))
+        {
+            return;
+        }
+        self.video_trim_from = None;
+        if self
             .frame
             .as_ref()
             .is_some_and(|current| frame.pts() <= current.pts())
@@ -784,5 +797,29 @@ fn clamp_volume(volume: f32) -> f32 {
         volume.clamp(0.0, 1.0)
     } else {
         1.0
+    }
+}
+
+fn frame_is_before_target(pts: Duration, target: Duration) -> bool {
+    pts < target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_discards_video_before_the_target() {
+        let target = Duration::from_secs(60);
+
+        assert!(frame_is_before_target(
+            Duration::from_millis(59_999),
+            target
+        ));
+        assert!(!frame_is_before_target(target, target));
+        assert!(!frame_is_before_target(
+            Duration::from_millis(60_001),
+            target
+        ));
     }
 }

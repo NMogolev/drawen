@@ -268,8 +268,9 @@ Paleo audio ──► PcmConverter ──► AudioOutput ring ──► device
   cannot race ahead of the device and reach end-of-stream early.
 - Seeking searches back for the preceding keyframe, repositions audio and video
   together, resets the converter and output clock to the requested position, and
-  trims audio decoded before the target. The decoder resumes at a random-access
-  point, so the preview is at or before the target.
+  trims audio and video decoded before the target. The decoder resumes at a
+  random-access point, then decodes forward until it has a frame at or after the
+  target; stale pre-seek pictures cannot fill the bounded video queue.
 - Video is decoded for every codec with a backend. An unsupported video codec is
   skipped so that audio still plays, instead of failing the session.
 - `set_video_enabled(false)` stops video decoding and presentation while audio
