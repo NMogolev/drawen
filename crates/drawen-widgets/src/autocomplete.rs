@@ -406,42 +406,43 @@ impl Autocomplete {
                 context.request_redraw();
                 EventStatus::Handled
             }
-            _ if command => {
-                let handled = match &key.key {
-                    Key::Character(character) if character.eq_ignore_ascii_case("a") => {
-                        self.editor.select_all();
-                        true
-                    }
-                    Key::Character(character) if character.eq_ignore_ascii_case("c") => {
-                        self.copy(context)
-                    }
-                    Key::Character(character) if character.eq_ignore_ascii_case("x") => {
-                        self.cut(context)
-                    }
-                    Key::Character(character) if character.eq_ignore_ascii_case("v") => {
-                        self.paste(context)
-                    }
-                    Key::Character(character) if character.eq_ignore_ascii_case("z") => {
-                        if extend {
-                            self.apply_edit(context, TextEditor::redo)
-                        } else {
-                            self.apply_edit(context, TextEditor::undo)
-                        }
-                    }
-                    Key::Character(character) if character.eq_ignore_ascii_case("y") => {
-                        self.apply_edit(context, TextEditor::redo)
-                    }
-                    _ => false,
-                };
-                if handled {
-                    self.ensure_caret_visible();
-                    context.request_redraw();
-                    EventStatus::Handled
+            _ if command => self.handle_command_key(context, &key.key, extend),
+            _ => EventStatus::Ignored,
+        }
+    }
+
+    fn handle_command_key(
+        &mut self,
+        context: &mut EventContext<'_>,
+        key: &Key,
+        extend: bool,
+    ) -> EventStatus {
+        let handled = match key {
+            Key::Character(character) if character.eq_ignore_ascii_case("a") => {
+                self.editor.select_all();
+                true
+            }
+            Key::Character(character) if character.eq_ignore_ascii_case("c") => self.copy(context),
+            Key::Character(character) if character.eq_ignore_ascii_case("x") => self.cut(context),
+            Key::Character(character) if character.eq_ignore_ascii_case("v") => self.paste(context),
+            Key::Character(character) if character.eq_ignore_ascii_case("z") => {
+                if extend {
+                    self.apply_edit(context, TextEditor::redo)
                 } else {
-                    EventStatus::Ignored
+                    self.apply_edit(context, TextEditor::undo)
                 }
             }
-            _ => EventStatus::Ignored,
+            Key::Character(character) if character.eq_ignore_ascii_case("y") => {
+                self.apply_edit(context, TextEditor::redo)
+            }
+            _ => false,
+        };
+        if handled {
+            self.ensure_caret_visible();
+            context.request_redraw();
+            EventStatus::Handled
+        } else {
+            EventStatus::Ignored
         }
     }
 }
