@@ -128,6 +128,22 @@ impl<T: Clone + PartialEq + 'static> Property<T> {
         self.inner.value.borrow().clone()
     }
 
+    /// Runs `f` with a borrow of the current value, without cloning it.
+    ///
+    /// This is the allocation-free read path for large values such as text: a
+    /// widget can compare the stored value against its own copy on every event
+    /// without cloning, and only clone when they actually differ. The borrow is
+    /// held for the duration of `f` and released when it returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `f` writes to this property, directly or through a binding,
+    /// because the value is already borrowed. Read the value inside `f`; write
+    /// it after `with` returns.
+    pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(&self.inner.value.borrow())
+    }
+
     /// Stores `value` and returns whether it differed from the current one.
     ///
     /// A property created with [`Self::normalized`] first passes `value`
@@ -276,6 +292,26 @@ mod tests {
         let handle = property.clone();
         handle.set(String::from("busy"));
         assert_eq!(property.get(), "busy");
+    }
+
+    #[test]
+    fn with_borrows_the_value_without_cloning() {
+        let property = Property::new(String::from("hello"));
+        let len = property.with(String::len);
+        assert_eq!(len, 5);
+        let upper = property.with(|text| text.to_uppercase());
+        assert_eq!(upper, "HELLO");
+        // The stored value is untouched by a read borrow.
+        assert_eq!(property.get(), "hello");
+    }
+
+    #[test]
+    #[should_panic(expected = "already borrowed")]
+    fn with_panics_when_the_closure_writes_the_property() {
+        let property = Property::new(0_u32);
+        property.with(|_| {
+            property.set(1);
+        });
     }
 
     #[test]
