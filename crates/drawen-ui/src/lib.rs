@@ -48,7 +48,8 @@ pub use environment::UiEnvironment;
 pub use event::{EventContext, EventPhase, EventStatus, ResizeEdge, WindowCommand};
 pub use layout::{ChildLayout, LayoutResult};
 pub use overlay::{
-    DismissPolicy, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide, place_overlay,
+    DismissPolicy, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide, ResolvedOverlay,
+    place_overlay,
 };
 pub use row::Row;
 pub use runtime::{

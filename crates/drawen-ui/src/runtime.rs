@@ -19,7 +19,7 @@ use drawen_render::{
 use crate::{
     AccessibilityAction, AccessibilityActions, AccessibilityRole, AccessibilityState,
     DismissPolicy, DssStyle, EventContext, EventPhase, EventStatus, KeyboardCommand, LayoutResult,
-    OverlayOptions, PseudoClass, SemanticTree, SemanticsBuilder, StyleTarget, UiEnvironment,
+    OverlayOptions, OverlaySide, PseudoClass, SemanticTree, SemanticsBuilder, StyleTarget, UiEnvironment,
     Widget, WindowCommand, event, overlay,
 };
 use event::{EventEffects, FocusRequest};
@@ -252,9 +252,16 @@ impl LayoutContext<'_> {
     /// `anchor` is expressed in the parent's local coordinates. The child is
     /// measured with `constraints`, placed against the anchor using
     /// `options.placement`, flipped or clamped so it stays inside the runtime
-    /// viewport, and marked for painting above the normal tree. The returned
-    /// origin is relative to the parent and should be passed to
-    /// [`crate::ChildLayout::new`] exactly like [`Self::layout_child`].
+    /// viewport, and marked for painting above the normal tree. When the
+    /// measured content is larger than the space available on the resolved
+    /// side, the child is re-measured with constraints capped to that space so
+    /// scrollable content (such as a long [`crate::Menu`]-style list) shrinks
+    /// instead of covering the anchor.
+    ///
+    /// Returns the child handle, its layout, the origin relative to the parent
+    /// (pass it to [`crate::ChildLayout::new`] exactly like
+    /// [`Self::layout_child`]), and the resolved [`OverlaySide`] after
+    /// flipping, for anchor-facing decorations such as tooltip nibs.
     ///
     /// # Errors
     ///
@@ -266,7 +273,7 @@ impl LayoutContext<'_> {
         constraints: Constraints,
         anchor: Rect,
         options: OverlayOptions,
-    ) -> Result<(WidgetId, LayoutResult, Point), UiRuntimeError> {
+    ) -> Result<(WidgetId, LayoutResult, Point, OverlaySide), UiRuntimeError> {
         let id = *self
             .runtime
             .node(self.parent)
@@ -286,13 +293,44 @@ impl LayoutContext<'_> {
         // content are painted after it.
         self.runtime.remember_overlay_focus(id);
         self.runtime.overlay_roots.push(id);
-        let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
-        let origin = overlay::place_overlay(
+        self.runtime.remember_overlay_owner(id, self.parent);
+        let mut result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
+        let mut resolved = overlay::place_overlay(
             absolute_anchor,
             result.size(),
             self.runtime.viewport,
             options,
         );
+        if result.size().width() > resolved.available.width()
+            || result.size().height() > resolved.available.height()
+        {
+            let max = Size::new(
+                constraints
+                    .max()
+                    .width()
+                    .min(resolved.available.width())
+                    .max(0.0),
+                constraints
+                    .max()
+                    .height()
+                    .min(resolved.available.height())
+                    .max(0.0),
+            )
+            .unwrap_or(Size::ZERO);
+            let min = constraints.min();
+            let min = Size::new(min.width().min(max.width()), min.height().min(max.height()))
+                .unwrap_or(Size::ZERO);
+            if let Ok(capped) = Constraints::new(min, max) {
+                result = self.runtime.layout_node(id, capped, Point::ZERO)?;
+                resolved = overlay::place_overlay(
+                    absolute_anchor,
+                    result.size(),
+                    self.runtime.viewport,
+                    options,
+                );
+            }
+        }
+        let origin = resolved.origin;
         self.runtime.translate_subtree(id, origin);
         if let Some(node) = self.runtime.node_mut(id) {
             node.overlay = Some(OverlayRecord {
@@ -307,7 +345,7 @@ impl LayoutContext<'_> {
             origin.x - self.parent_origin.x,
             origin.y - self.parent_origin.y,
         );
-        Ok((id, result, relative))
+        Ok((id, result, relative, resolved.side))
     }
 
     /// Measures the child at `index` and lays it out as a modal overlay.
@@ -342,6 +380,7 @@ impl LayoutContext<'_> {
         // content are painted after it.
         self.runtime.remember_overlay_focus(id);
         self.runtime.overlay_roots.push(id);
+        self.runtime.remember_overlay_owner(id, self.parent);
         let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
         let origin = self.runtime.viewport.map_or(Point::ZERO, |viewport| {
             Point::new(
@@ -391,6 +430,9 @@ pub struct UiRuntime {
     /// Focus target to restore when each open overlay root closes, captured
     /// when the root first registers. Keys are overlay roots, not owners.
     overlay_restore_focus: HashMap<WidgetId, WidgetId>,
+    /// Nearest ancestor overlay root for each open overlay root. Closing an
+    /// overlay cascades to the overlays opened from inside its subtree.
+    overlay_owner: HashMap<WidgetId, WidgetId>,
     viewport: Option<Rect>,
     clipboard: Rc<RefCell<Box<dyn Clipboard>>>,
     stats: FrameDiagnostics,
@@ -582,6 +624,7 @@ impl UiRuntime {
             environment,
             overlay_roots: Vec::new(),
             overlay_restore_focus: HashMap::new(),
+            overlay_owner: HashMap::new(),
             viewport: None,
             clipboard: Rc::new(RefCell::new(Box::new(drawen_core::MemoryClipboard::new()))),
             stats: RuntimeStats::default(),
@@ -1021,7 +1064,8 @@ impl UiRuntime {
             Ok(Ok(layout)) => {
                 let registered = std::mem::take(&mut self.overlay_roots);
                 let mut ordered: Vec<WidgetId> = previous_roots
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|id| registered.contains(id))
                     .collect();
                 for id in registered {
@@ -1029,8 +1073,12 @@ impl UiRuntime {
                         ordered.push(id);
                     }
                 }
+                let closed: Vec<WidgetId> = previous_roots
+                    .into_iter()
+                    .filter(|id| !ordered.contains(id))
+                    .collect();
                 self.overlay_roots = ordered;
-                self.restore_closed_overlay_focus();
+                self.settle_closed_overlays(closed);
                 self.layout = Some(layout);
                 self.last_constraints = Some(constraints);
                 self.redraw_requested = true;
@@ -1468,6 +1516,7 @@ impl UiRuntime {
             if dismissed {
                 self.release_overlay_focus(id);
                 changed = true;
+                changed |= self.dismiss_owned_overlays(id);
             }
         }
         if changed {
@@ -1539,6 +1588,7 @@ impl UiRuntime {
             if dismissed {
                 self.release_overlay_focus(id);
                 changed = true;
+                changed |= self.dismiss_owned_overlays(id);
             }
         }
         if changed {
@@ -1577,6 +1627,7 @@ impl UiRuntime {
                 .is_some_and(Widget::dismiss_overlay);
             if dismissed {
                 self.release_overlay_focus(id);
+                self.dismiss_owned_overlays(id);
                 self.invalidate_layout();
                 return true;
             }
@@ -1606,6 +1657,7 @@ impl UiRuntime {
                     .is_some_and(Widget::dismiss_overlay);
                 if dismissed {
                     self.release_overlay_focus(id);
+                    self.dismiss_owned_overlays(id);
                     self.invalidate_layout();
                 }
                 return;
@@ -2174,10 +2226,81 @@ impl UiRuntime {
             return;
         }
         let restore = self.overlay_restore_focus.get(&overlay).copied();
-        let target = restore.filter(|id| {
-            self.is_visible(*id) && self.node(*id).is_some_and(|node| node.accepts_focus)
-        });
+        let target = self.overlay_restore_target(restore);
         self.set_focus(target);
+    }
+
+    /// Picks a live focus target for a closing overlay.
+    ///
+    /// The remembered opener may have been removed or hidden while the overlay
+    /// was open (a list row scrolled away, a parent deleted). Restoring to a
+    /// dead handle would focus nothing, so fall back to the root when it can
+    /// take focus, and clear focus otherwise.
+    fn overlay_restore_target(&self, restore: Option<WidgetId>) -> Option<WidgetId> {
+        let usable = |id: WidgetId| {
+            self.is_visible(id) && self.node(id).is_some_and(|node| node.accepts_focus)
+        };
+        restore
+            .filter(|id| usable(*id))
+            .or_else(|| usable(self.root).then_some(self.root))
+    }
+
+    /// Records the nearest ancestor overlay root that owns `overlay`.
+    ///
+    /// Ownership follows the retained tree: an overlay opened from inside a
+    /// modal or popover subtree closes with that surface. Ancestors register
+    /// before descendants during layout, so the walk sees this pass's roots.
+    fn remember_overlay_owner(&mut self, overlay: WidgetId, parent: WidgetId) {
+        let mut current = Some(parent);
+        while let Some(id) = current {
+            if self.overlay_roots.contains(&id) {
+                self.overlay_owner.insert(overlay, id);
+                return;
+            }
+            current = self.node(id).and_then(|node| node.parent);
+        }
+        self.overlay_owner.remove(&overlay);
+    }
+
+    /// Whether `overlay` is transitively owned by `ancestor` in the layer.
+    fn overlay_owned_by(&self, overlay: WidgetId, ancestor: WidgetId) -> bool {
+        let mut current = self.overlay_owner.get(&overlay).copied();
+        while let Some(owner) = current {
+            if owner == ancestor {
+                return true;
+            }
+            current = self.overlay_owner.get(&owner).copied();
+        }
+        false
+    }
+
+    /// Closes still-open overlays owned by a surface that just closed.
+    ///
+    /// LIFO stacking orders the layer but does not own it: a popover opened
+    /// inside a modal must not outlive the modal. Returns whether any owner
+    /// widget changed state.
+    fn dismiss_owned_overlays(&mut self, closed: WidgetId) -> bool {
+        let owned_roots: Vec<WidgetId> = self
+            .overlay_roots
+            .iter()
+            .copied()
+            .filter(|id| self.overlay_owned_by(*id, closed))
+            .collect();
+        let mut changed = false;
+        for id in owned_roots {
+            let Some(owner) = self.node(id).and_then(|node| node.parent) else {
+                continue;
+            };
+            let dismissed = self
+                .node_mut(owner)
+                .and_then(|node| node.widget.as_deref_mut())
+                .is_some_and(Widget::dismiss_overlay);
+            if dismissed {
+                self.release_overlay_focus(id);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Records the focus target to restore when `overlay` closes.
@@ -2195,30 +2318,71 @@ impl UiRuntime {
         }
     }
 
-    /// Restores focus for overlays that closed outside the dismissal path.
+    /// Settles overlays that closed outside the dismissal path.
     ///
     /// Application code can close a surface through its own handle; the next
     /// layout then drops the overlay root without calling `dismiss_overlay`.
-    /// Also prunes restore targets for roots that are no longer open.
-    fn restore_closed_overlay_focus(&mut self) {
-        let closed: Vec<WidgetId> = self
-            .overlay_restore_focus
-            .keys()
-            .copied()
+    /// Overlays owned by the closed subtree drop with it, but their owner
+    /// widgets still hold stale open flags, so ask them to dismiss as well.
+    /// Focus restores outermost-first: the outer restore target sits outside
+    /// the whole closed chain, and `focus_within` then skips the inner roots.
+    /// Also prunes ownership and restore entries for roots no longer open.
+    fn settle_closed_overlays(&mut self, closed: Vec<WidgetId>) {
+        let mut closed: Vec<WidgetId> = closed
+            .into_iter()
+            .chain(self.overlay_restore_focus.keys().copied())
+            .chain(self.overlay_owner.keys().copied())
             .filter(|id| !self.overlay_roots.contains(id))
             .collect();
+        closed.sort_unstable();
+        closed.dedup();
+        // Owners before descendants so focus chains outward deterministically.
+        closed.sort_by_key(|id| self.overlay_owner_depth(*id));
+        let mut changed = false;
         for id in closed {
+            let owned_roots: Vec<WidgetId> = self
+                .overlay_owner
+                .keys()
+                .copied()
+                .filter(|child| *child != id && self.overlay_owned_by(*child, id))
+                .collect();
+            for child in owned_roots {
+                if self.overlay_roots.contains(&child) {
+                    continue;
+                }
+                let Some(owner) = self.node(child).and_then(|node| node.parent) else {
+                    continue;
+                };
+                let dismissed = self
+                    .node_mut(owner)
+                    .and_then(|node| node.widget.as_deref_mut())
+                    .is_some_and(Widget::dismiss_overlay);
+                changed |= dismissed;
+            }
             if self.focus_within(id) {
-                let restore = self.overlay_restore_focus[&id];
-                let target = Some(restore).filter(|target| {
-                    self.is_visible(*target)
-                        && self.node(*target).is_some_and(|node| node.accepts_focus)
-                });
+                let restore = self.overlay_restore_focus.get(&id).copied();
+                let target = self.overlay_restore_target(restore);
                 self.set_focus(target);
             }
         }
+        if changed {
+            self.invalidate_layout();
+        }
         self.overlay_restore_focus
             .retain(|id, _| self.overlay_roots.contains(id));
+        self.overlay_owner
+            .retain(|id, _| self.overlay_roots.contains(id));
+    }
+
+    /// Number of overlay ancestors above `id` in the ownership chain.
+    fn overlay_owner_depth(&self, id: WidgetId) -> usize {
+        let mut depth = 0;
+        let mut current = self.overlay_owner.get(&id).copied();
+        while let Some(owner) = current {
+            depth += 1;
+            current = self.overlay_owner.get(&owner).copied();
+        }
+        depth
     }
 
     fn dispatch_to(
@@ -2379,7 +2543,8 @@ impl UiRuntime {
         self.hovered.retain(|_, hovered| *hovered != id);
         self.overlay_roots.retain(|overlay| *overlay != id);
         self.overlay_restore_focus.remove(&id);
-        self.overlay_restore_focus.retain(|_, target| *target != id);
+        self.overlay_owner.remove(&id);
+        self.overlay_owner.retain(|_, owner| *owner != id);
         if self.focused == Some(id) {
             self.focused = None;
         }
@@ -2422,6 +2587,7 @@ impl UiRuntime {
         self.hovered.clear();
         self.overlay_roots.clear();
         self.overlay_restore_focus.clear();
+        self.overlay_owner.clear();
         self.focused = None;
     }
 
@@ -3124,6 +3290,321 @@ mod tests {
         assert_eq!(runtime.ime_cursor_area(), None);
     }
 
+    struct Surface {
+        open: Rc<Cell<bool>>,
+        modal: bool,
+        size: Size,
+    }
+
+    impl Widget for Surface {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let mut children = Vec::new();
+            if self.open.get() && context.child_count() > 0 {
+                if self.modal {
+                    let (panel, _, origin) = context
+                        .layout_child_modal(0, Constraints::loose(self.size), DismissPolicy::Light)
+                        .expect("modal child");
+                    children.push(ChildLayout::new(panel, origin));
+                    return LayoutResult::with_children(Size::ZERO, children);
+                }
+                let (panel, _, origin, _) = context
+                    .layout_child_overlay(
+                        0,
+                        Constraints::loose(self.size),
+                        Rect::new(Point::ZERO, self.size),
+                        super::OverlayOptions::new(super::overlay::OverlayPlacement::bottom()),
+                    )
+                    .expect("overlay child");
+                children.push(ChildLayout::new(panel, origin));
+            }
+            // Remaining children (an action row) stay in normal layout.
+            for index in 1..context.child_count() {
+                let (child, _) = context
+                    .layout_child(index, Constraints::loose(constraints.max()))
+                    .expect("normal child");
+                children.push(ChildLayout::new(child, Point::ZERO));
+            }
+            LayoutResult::with_children(constraints.constrain(self.size), children)
+        }
+
+        fn dismiss_overlay(&mut self) -> bool {
+            if self.open.get() {
+                self.open.set(false);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn accepts_focus(&self) -> bool {
+            true
+        }
+    }
+
+    struct Action;
+
+    impl Widget for Action {
+        fn layout(
+            &mut self,
+            _: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(size(40.0, 10.0)))
+        }
+
+        fn handle_event(
+            &mut self,
+            context: &mut EventContext<'_>,
+            event: &InputEvent,
+        ) -> EventStatus {
+            if context.phase() == EventPhase::Target
+                && matches!(event, InputEvent::PointerDown(_))
+            {
+                context.request_overlay_dismiss();
+                return EventStatus::Handled;
+            }
+            EventStatus::Ignored
+        }
+    }
+
+    #[test]
+    fn closing_a_surface_cascades_to_overlays_opened_inside_it() {
+        let modal_open = Rc::new(Cell::new(true));
+        let popover_open = Rc::new(Cell::new(true));
+        let mut runtime = UiRuntime::new(Surface {
+            open: Rc::clone(&modal_open),
+            modal: true,
+            size: size(120.0, 80.0),
+        });
+        let root = runtime.root();
+        let popover = runtime
+            .append_child(
+                root,
+                Surface {
+                    open: Rc::clone(&popover_open),
+                    modal: false,
+                    size: size(60.0, 20.0),
+                },
+            )
+            .expect("popover host");
+        let content = runtime
+            .append_child(popover, Solid {
+                size: size(60.0, 40.0),
+                color: Color::BLACK,
+                name: "content",
+                hits: Rc::new(RefCell::new(Vec::new())),
+            })
+            .expect("content");
+        let action = runtime.append_child(popover, Action).expect("action");
+        let viewport = Constraints::tight(size(320.0, 240.0)).expect("valid constraints");
+        runtime.layout(viewport).expect("layout succeeds");
+        runtime.focus_widget(content).expect("content focuses");
+
+        // The action sits inside the modal but outside the popover; dismissing
+        // its surrounding surface must close the popover in the same pass.
+        let bounds = runtime.bounds(action).expect("action has bounds");
+        let _ = runtime.dispatch_event(&pointer(
+            Point::new(bounds.origin.x + 5.0, bounds.origin.y + 5.0),
+            true,
+        ));
+        assert!(!modal_open.get(), "modal closes");
+        assert!(!popover_open.get(), "popover inside the modal closes with it");
+
+        // Reopening the modal must not resurrect the stale popover.
+        modal_open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("reopen layout succeeds");
+        assert!(!popover_open.get());
+
+        // Closing through the handle (no dismiss call) also cascades.
+        popover_open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("popover opens inside the modal");
+        modal_open.set(false);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("modal closes through the handle");
+        assert!(
+            !popover_open.get(),
+            "settle pass dismisses overlays orphaned by a handle close"
+        );
+    }
+
+    #[test]
+    fn a_removed_opener_falls_back_to_the_root_for_focus() {
+        use std::cell::Cell;
+
+        struct Host;
+
+        impl Widget for Host {
+            fn layout(
+                &mut self,
+                context: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                let mut children = Vec::new();
+                for index in 0..context.child_count() {
+                    let (child, _) = context
+                        .layout_child(index, Constraints::loose(constraints.max()))
+                        .expect("child");
+                    #[allow(clippy::cast_precision_loss)]
+                    let y = index as f32 * 30.0;
+                    children.push(ChildLayout::new(child, Point::new(0.0, y)));
+                }
+                LayoutResult::with_children(constraints.constrain(size(320.0, 240.0)), children)
+            }
+
+            fn accepts_focus(&self) -> bool {
+                true
+            }
+        }
+
+        struct Focusable;
+
+        impl Widget for Focusable {
+            fn layout(
+                &mut self,
+                _: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                LayoutResult::new(constraints.constrain(size(60.0, 20.0)))
+            }
+
+            fn accepts_focus(&self) -> bool {
+                true
+            }
+        }
+
+        struct OverlayHost {
+            open: Rc<Cell<bool>>,
+        }
+
+        impl Widget for OverlayHost {
+            fn layout(
+                &mut self,
+                context: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                let own = constraints.constrain(size(60.0, 20.0));
+                let mut children = Vec::new();
+                if self.open.get() && context.child_count() > 0 {
+                    let (panel, _, origin, _) = context
+                        .layout_child_overlay(
+                            0,
+                            Constraints::loose(size(60.0, 40.0)),
+                            Rect::new(Point::ZERO, own),
+                            super::OverlayOptions::new(super::overlay::OverlayPlacement::bottom()),
+                        )
+                        .expect("overlay child");
+                    children.push(ChildLayout::new(panel, origin));
+                }
+                LayoutResult::with_children(own, children)
+            }
+
+            fn dismiss_overlay(&mut self) -> bool {
+                if self.open.get() {
+                    self.open.set(false);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        let open = Rc::new(Cell::new(false));
+        let mut runtime = UiRuntime::new(Host);
+        let root = runtime.root();
+        let opener = runtime.append_child(root, Focusable).expect("opener");
+        let host = runtime
+            .append_child(root, OverlayHost {
+                open: Rc::clone(&open),
+            })
+            .expect("overlay host");
+        let content = runtime
+            .append_child(host, Focusable)
+            .expect("content");
+        let viewport = Constraints::tight(size(320.0, 240.0)).expect("valid constraints");
+        runtime.layout(viewport).expect("layout succeeds");
+        runtime.focus_widget(opener).expect("opener focuses");
+        open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("overlay opens");
+        runtime.focus_widget(content).expect("content focuses");
+
+        // The opener disappears while the overlay is open (a list row removed,
+        // a parent deleted). Closing must not focus a dead handle.
+        runtime.remove(opener).expect("opener removed");
+        open.set(false);
+        runtime.invalidate_layout();
+        runtime.layout(viewport).expect("overlay closes");
+        assert_eq!(
+            runtime.focused_widget(),
+            Some(root),
+            "focus falls back to the live root instead of the removed opener"
+        );
+    }
+
+    #[test]
+    fn oversized_overlay_content_is_capped_to_the_available_space() {
+        struct TallHost;
+
+        impl Widget for TallHost {
+            fn layout(
+                &mut self,
+                context: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                let anchor = Rect::new(Point::new(100.0, 170.0), size(80.0, 20.0));
+                let (panel, panel_layout, origin, side) = context
+                    .layout_child_overlay(
+                        0,
+                        Constraints::loose(size(400.0, 400.0)),
+                        anchor,
+                        super::OverlayOptions::new(super::overlay::OverlayPlacement::bottom())
+                            .with_margin(8.0),
+                    )
+                    .expect("overlay child");
+                assert_eq!(side, super::overlay::OverlaySide::Top);
+                // Above the anchor: 170 - 4 (gap) - 8 (margin) = 158.
+                assert!((panel_layout.size().height() - 158.0).abs() < f32::EPSILON);
+                LayoutResult::with_children(
+                    constraints.constrain(size(320.0, 200.0)),
+                    vec![ChildLayout::new(panel, origin)],
+                )
+            }
+        }
+
+        struct TallContent;
+
+        impl Widget for TallContent {
+            fn layout(
+                &mut self,
+                _: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                LayoutResult::new(constraints.constrain(size(120.0, 300.0)))
+            }
+        }
+
+        let mut runtime = UiRuntime::new(TallHost);
+        let root = runtime.root();
+        let content = runtime
+            .append_child(root, TallContent)
+            .expect("content");
+        runtime
+            .layout(Constraints::tight(size(320.0, 200.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        let bounds = runtime.bounds(content).expect("content has bounds");
+        assert!(bounds.origin.y >= 8.0, "overlay stays inside the margin");
+        assert!(
+            bounds.bottom() <= 170.0,
+            "shrunk overlay does not cover its anchor"
+        );
+    }
+
     #[test]
     fn tab_and_shift_tab_cycle_focusable_widgets_in_tree_order() {
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -3542,7 +4023,7 @@ mod tests {
                     Constraints::tight(size(50.0, 50.0)).expect("valid tight size"),
                 )
                 .expect("sibling child");
-            let (overlay, _, origin) = context
+            let (overlay, _, origin, _) = context
                 .layout_child_overlay(
                     2,
                     Constraints::loose(size(50.0, 50.0)),
@@ -3816,7 +4297,7 @@ mod tests {
                 .expect("anchor a");
             let mut children = vec![ChildLayout::new(anchor_a, Point::ZERO)];
             if self.open_a.get() {
-                let (popup, _, origin) = context
+                let (popup, _, origin, _) = context
                     .layout_child_overlay(
                         1,
                         Constraints::loose(size(60.0, 60.0)),
@@ -3834,7 +4315,7 @@ mod tests {
                 .expect("anchor b");
             children.push(ChildLayout::new(anchor_b, Point::new(0.0, 40.0)));
             if self.open_b.get() {
-                let (popup, _, origin) = context
+                let (popup, _, origin, _) = context
                     .layout_child_overlay(
                         3,
                         Constraints::loose(size(60.0, 60.0)),
@@ -3941,7 +4422,7 @@ mod tests {
                 .expect("anchor child");
             children.push(ChildLayout::new(anchor, Point::ZERO));
             if self.popup_open.get() {
-                let (popup, _, origin) = context
+                let (popup, _, origin, _) = context
                     .layout_child_overlay(
                         2,
                         Constraints::loose(size(60.0, 60.0)),
