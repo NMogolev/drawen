@@ -151,6 +151,8 @@ Rules that keep this predictable:
   is not dropped immediately.
 - Signals are synchronous and UI-thread-local. Do not use them from a worker
   thread; send data to the UI thread first.
+- For a direct state-to-widget link, recipe 13 replaces the dirty flag with
+  `Property<T>` and `UiRuntime::bind`.
 
 ## 4. A stylesheet with DSS
 
@@ -814,3 +816,50 @@ Rules for split buttons:
 - Call `set_open` only from plain state changes and pair it with
   `invalidate_layout`; pointer and keyboard paths request layout themselves.
 
+
+## 13. Property bindings
+
+`Signal<T>` notifies; `Property<T>` stores. A property is a value cell with a
+change signal: clones share one value, and `set` emits `changed` only when the
+value actually differs. `UiRuntime::bind` copies a source property into a
+widget property and keeps it in sync:
+
+```rust
+use drawen::{Binding, Button, Property};
+
+let is_valid = Property::new(false);
+let button = Button::new();
+let enabled = button.enabled();
+let button = runtime.append_child(runtime.root(), button)?;
+
+let _binding: Binding = runtime.bind(&enabled, &is_valid);
+
+// Later, from a signal handler or any UI-thread code:
+is_valid.set(true); // the button enables and a redraw is requested
+```
+
+The runnable version is
+[`bound_app.rs`](../crates/drawen/examples/bound_app.rs): widget signals write
+into state properties, property subscriptions derive validity, and the binding
+drives `Button::enabled`.
+
+Rules that keep bindings thin:
+
+- A binding is one-way, synchronous, and UI-thread-local. It copies the current
+  source value once at `bind`, then on every source change. There is no
+  dependency graph, no queued delivery, and no two-way magic: for the reverse
+  direction, subscribe to the widget signal and write the state property
+  explicitly, exactly as in recipe 3.
+- Keep every `Binding` alive like a `Subscription`; dropping it disconnects the
+  copy immediately. The target keeps its last value.
+- Equal writes are silent, so chains and cycles of bindings converge instead of
+  looping. Do not build observer pyramids on top of this; derive state in plain
+  Rust subscriptions.
+- Bound and watched properties wake the runtime themselves: the change drains
+  into `take_redraw_request`, `tick`, and `paint`. An event loop whose painted
+  state is all properties can drop the manual dirty flag from recipe 3.
+- Use `runtime.watch(&property)` for state a widget reads at paint time without
+  a widget property to bind. Use `bind_layout` / `watch_layout` when the value
+  participates in layout; the next paint re-runs layout automatically.
+- `Button::enabled()` is the first bindable widget property. A disabled button
+  ignores activation, skips focus, and matches `button:disabled` in DSS.

@@ -16,6 +16,9 @@ Non-negotiables:
 - `Button::new()` takes no label. Append a `Text` child.
 - State is plain Rust. On a state change, invalidate paint and return
   `WindowAction::RequestRedraw`; invalidate layout only when geometry changes.
+- `Property<T>` stores state with a change signal; `UiRuntime::bind(&target,
+  &source)` is a thin one-way copy that wakes redraws. Keep the `Binding`
+  alive. No dependency graph, no two-way magic.
 - DSS is a typed subset: type/id/class/state selectors, descendant and child
   combinators, structural pseudo-classes, `var()`/`calc()`, and `!important`.
   No sibling combinators, animations, or full browser CSS.
@@ -38,6 +41,7 @@ Canonical files:
 
 - `crates/drawen/examples/minimal_window.rs`
 - `crates/drawen/examples/stateful_app.rs`
+- `crates/drawen/examples/bound_app.rs`
 - `docs/RECIPES.md`
 - `docs/MEDIA.md`
 - `docs/THREADING.md`

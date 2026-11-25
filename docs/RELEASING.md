@@ -91,6 +91,7 @@ local machine.
    git fetch --tags
    cargo semver-checks check-release --package drawen-core --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-render --baseline-rev v0.3.0
+    cargo semver-checks check-release --package drawen-signals --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-ui --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-widgets --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.3.0

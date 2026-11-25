@@ -41,6 +41,8 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `Widget::new().build()` | Widgets are values appended with `UiRuntime::append_child` |
 | CSS sibling selectors, animations | DSS combinators, structural states, and typed properties only |
 | `signal.connect` from any thread | `Signal::subscribe` on the UI thread, returns `drop`-based `Subscription` |
+| A `Signal<T>` that stores a value | `Signal` is value-less; `Property<T>` stores a value and emits `changed` |
+| `button.enabled = state.is_valid` | `runtime.bind(&button.enabled(), &state.is_valid)`, keep the `Binding` |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
@@ -94,6 +96,33 @@ geometry changes.
 
 Do not invent a reactive dependency graph, hooks, or a global store. A
 `Signal<T>` is a synchronous notification channel, not an observable framework.
+For a direct state-to-widget link, use `Property<T>` and `UiRuntime::bind`: a
+one-way synchronous copy that invalidates paint, not a dependency graph. See
+[RECIPES.md](RECIPES.md#13-property-bindings) and
+[`bound_app.rs`](../crates/drawen/examples/bound_app.rs).
+
+### "Bind a widget property to application state."
+
+Store the state in a `Property<T>` and bind the widget's property to it before
+or after appending the widget:
+
+```rust
+let is_valid = Property::new(false);
+let button = Button::new();
+let enabled = button.enabled();
+let button = runtime.append_child(runtime.root(), button)?;
+let binding = runtime.bind(&enabled, &is_valid);
+// keep `binding` alive; later, from any UI-thread code:
+is_valid.set(true);
+```
+
+`bind` copies the current value once, then follows every source change and
+wakes redraws through `take_redraw_request`. Keep the returned `Binding` like a
+`Subscription`. Equal writes are silent, so chains and cycles converge. For the
+reverse direction (widget to state), subscribe to the widget signal and write
+the property explicitly; there is no two-way binding. Use `bind_layout` when
+the target participates in layout, and `runtime.watch(&property)` for state a
+custom widget reads at paint time.
 
 ### "Can I update the UI from another thread?"
 
@@ -255,6 +284,8 @@ Common causes:
 - `UiRuntime::layout` is not called after a resize, so hit testing and painting
   use stale geometry.
 - A `Subscription` was dropped immediately, so the click handler never runs.
+- A `Binding` was dropped immediately, so the widget property stopped following
+  its source property.
 - The event loop ignores `take_redraw_request()` or never returns a frame
   interval from `next_frame_in()`.
 - `presentation_changed` does not forward to `UiRuntime::set_presented`, so the
@@ -288,12 +319,15 @@ paint to a `DisplayList`, and let `WindowApplication` return `WindowAction`s.
 `Button::new()` takes no label: append a `Text` child. Signals use
 `.subscribe(...)` and the returned `Subscription` must be kept alive. State is
 plain Rust (`Rc<RefCell<_>>`); after a state change call `invalidate_paint()` and
-return `WindowAction::RequestRedraw`. DSS has no sibling combinators,
-animations, or full browser CSS.
+return `WindowAction::RequestRedraw`. `Property<T>` stores state with a change
+signal; `runtime.bind(&target, &source)` copies source changes into a widget
+property and wakes redraws, and the returned `Binding` must be kept alive. DSS
+has no sibling combinators, animations, or full browser CSS.
 
 Copy the event loop and media policy from:
 - crates/drawen/examples/minimal_window.rs
 - crates/drawen/examples/stateful_app.rs
+- crates/drawen/examples/bound_app.rs
 - docs/RECIPES.md
 - docs/MEDIA.md
 ```
@@ -304,12 +338,14 @@ Copy the event loop and media policy from:
   window, button, resize, close, redraw.
 - [`stateful_app.rs`](../crates/drawen/examples/stateful_app.rs) — state,
   signal subscription, dirty paint, lifecycle.
+- [`bound_app.rs`](../crates/drawen/examples/bound_app.rs) — property cells,
+  `UiRuntime::bind`, watched state, no dirty flag.
 - [`hello_drawen.rs`](../crates/drawen/examples/hello_drawen.rs) — a more
   complete single-window application.
 - [`workspace.rs`](../crates/drawen/examples/workspace.rs) — docking, tabs,
   persistence.
 - [`background_tasks.rs`](../crates/drawen/examples/background_tasks.rs) —
   worker pool, progress, and UI delivery.
-- [`RECIPES.md`](RECIPES.md) — the twelve application patterns.
+- [`RECIPES.md`](RECIPES.md) — the thirteen application patterns.
 - [`MEDIA.md`](MEDIA.md) — sessions, clocks, backends, lifecycle policy.
 - [`THREADING.md`](THREADING.md) — task pools, cancellation, and the UI bridge.
