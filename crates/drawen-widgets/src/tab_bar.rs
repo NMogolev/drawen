@@ -3,7 +3,7 @@ use drawen_render::{PaintContext, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, ChildLayout, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutContext, LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const DEFAULT_TAB_HEIGHT: f32 = 30.0;
@@ -15,9 +15,14 @@ const VERTICAL_TEXT_OFFSET: f32 = 8.0;
 /// Supply labels during construction and append a matching page child for each
 /// label. Extra children remain retained but hidden. User selection emits the
 /// active tab index through [`Self::changed`].
+///
+/// The selection is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&tabs.selected(), &state.tab)`, because switching tabs
+/// changes which page is laid out. A binding copy of an out-of-range index
+/// resolves to no selection.
 pub struct TabBar {
     tabs: Vec<String>,
-    selected: Option<usize>,
+    selected: Property<Option<usize>>,
     changed: Signal<usize>,
     tab_bounds: Vec<Rect>,
     size: Size,
@@ -32,8 +37,11 @@ impl TabBar {
         T: Into<String>,
     {
         let tabs = tabs.into_iter().map(Into::into).collect::<Vec<_>>();
+        let count = tabs.len();
         Self {
-            selected: (!tabs.is_empty()).then_some(0),
+            selected: Property::normalized((!tabs.is_empty()).then_some(0), move |selected| {
+                selected.filter(|&index| index < count)
+            }),
             tabs,
             changed: Signal::new(),
             tab_bounds: Vec::new(),
@@ -48,13 +56,24 @@ impl TabBar {
         &self.tabs
     }
 
-    /// Returns the active tab index, if one is selected.
-    #[must_use]
-    pub const fn selected(&self) -> Option<usize> {
-        self.selected
+    /// Returns the selection property shared with this tab bar.
+    ///
+    /// The stored value is the active tab index, or `None` when no tab is
+    /// selected. Every write is normalized: an out-of-range index resolves to
+    /// `None`, including `UiRuntime::bind` copies. Switching tabs changes which
+    /// page is laid out, so bind with
+    /// `runtime.bind_layout(&tabs.selected(), &state.tab)` and read the scalar
+    /// with `tabs.selected().get()`. The property's `changed` signal fires on
+    /// every write; [`Self::changed`] fires only on user interaction.
+    pub fn selected(&self) -> Property<Option<usize>> {
+        self.selected.clone()
     }
 
-    /// Selects a tab without emitting [`Self::changed`].
+    /// Selects a tab.
+    ///
+    /// Emits `selected().changed()` when the value differs, but not the
+    /// user-only [`Self::changed`] signal. The caller is responsible for
+    /// requesting a layout pass, or bind the property with `bind_layout`.
     ///
     /// # Panics
     ///
@@ -64,7 +83,7 @@ impl TabBar {
             selected.is_none_or(|index| index < self.tabs.len()),
             "selected tab index must refer to an existing tab"
         );
-        self.selected = selected;
+        self.selected.set(selected);
     }
 
     /// Returns a signal emitted when a user activates a different tab.
@@ -74,18 +93,18 @@ impl TabBar {
     }
 
     fn select_user(&mut self, index: usize, context: &mut EventContext<'_>) {
-        if self.selected != Some(index) {
-            self.selected = Some(index);
+        if self.selected.get() != Some(index) {
+            self.selected.set(Some(index));
             self.changed.emit(&index);
             context.request_layout();
         }
     }
 
     fn select_without_context(&mut self, index: usize) -> bool {
-        if self.selected == Some(index) {
+        if self.selected.get() == Some(index) {
             return true;
         }
-        self.selected = Some(index);
+        self.selected.set(Some(index));
         self.changed.emit(&index);
         true
     }
@@ -103,6 +122,7 @@ impl TabBar {
         };
         let selected = self
             .selected
+            .get()
             .unwrap_or(if offset.is_negative() { last } else { 0 });
         let next = selected.saturating_add_signed(offset).min(last);
         self.select_without_context(next)
@@ -155,7 +175,7 @@ impl Widget for TabBar {
         );
         let mut children = Vec::with_capacity(context.child_count());
         for index in 0..context.child_count() {
-            let visible = self.selected == Some(index) && index < self.tabs.len();
+            let visible = self.selected.get() == Some(index) && index < self.tabs.len();
             let (id, _) = context
                 .layout_child(
                     index,
@@ -200,7 +220,7 @@ impl Widget for TabBar {
         context.with_clip(bounds, |context| {
             for (index, (tab, tab_bounds)) in self.tabs.iter().zip(&self.tab_bounds).enumerate() {
                 let tab_bounds = offset_rect(*tab_bounds, bounds.origin);
-                let selected = self.selected == Some(index);
+                let selected = self.selected.get() == Some(index);
                 if selected {
                     context.fill_rect(tab_bounds, theme.raised_surface());
                 }
@@ -279,7 +299,7 @@ impl Widget for TabBar {
                     | AccessibilityActions::INCREMENT
                     | AccessibilityActions::DECREMENT,
             );
-        if let Some(index) = self.selected
+        if let Some(index) = self.selected.get()
             && let Some(tab) = self.tabs.get(index)
         {
             accessibility = accessibility.with_value(tab);
@@ -327,7 +347,7 @@ mod tests {
     #[test]
     fn selects_a_tab_and_emits_its_index() {
         let tab_bar = TabBar::new(["First", "Second"]);
-        assert_eq!(tab_bar.selected(), Some(0));
+        assert_eq!(tab_bar.selected().get(), Some(0));
         let changes = Rc::new(RefCell::new(Vec::new()));
         let _subscription = tab_bar.changed().subscribe({
             let changes = Rc::clone(&changes);
@@ -347,5 +367,52 @@ mod tests {
         }));
 
         assert_eq!(*changes.borrow(), vec![1]);
+    }
+
+    #[test]
+    fn bound_selected_follows_application_state() {
+        let tab = Property::new(Some(0_usize));
+        let tab_bar = TabBar::new(["First", "Second", "Third"]);
+        let selected = tab_bar.selected();
+        let mut runtime = UiRuntime::new(tab_bar);
+        let _binding = runtime.bind_layout(&selected, &tab);
+        runtime
+            .layout(Constraints::tight(size(100.0, 50.0)).expect("valid constraints"))
+            .expect("tab bar layout succeeds");
+        assert_eq!(selected.get(), Some(0));
+
+        tab.set(Some(2));
+        assert_eq!(selected.get(), Some(2));
+
+        // A binding copies the source verbatim; an out-of-range index resolves
+        // to no selection rather than panicking.
+        tab.set(Some(99));
+        assert_eq!(selected.get(), None);
+    }
+
+    #[test]
+    fn set_selected_emits_property_changed_but_not_user_changed() {
+        let tab_bar = TabBar::new(["First", "Second"]);
+        let selected = tab_bar.selected();
+        let changed = tab_bar.changed();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = selected.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = changed.subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |index| user_changes.borrow_mut().push(*index)
+        });
+        let mut runtime = UiRuntime::new(tab_bar);
+        runtime
+            .layout(Constraints::tight(size(100.0, 50.0)).expect("valid constraints"))
+            .expect("tab bar layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        selected.set(Some(1));
+        assert_eq!(*property_changes.borrow(), vec![Some(1)]);
+        assert!(user_changes.borrow().is_empty());
     }
 }

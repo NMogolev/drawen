@@ -5,7 +5,7 @@ use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const HORIZONTAL_PADDING: f32 = 12.0;
@@ -17,10 +17,14 @@ const MIN_WIDTH: f32 = 120.0;
 /// The control paints equal-width segments and reports the newly selected index
 /// through [`Self::changed`]. Pointer clicks, arrow keys, Home, and End all
 /// participate in selection.
+///
+/// The selection is a [`Property`]: bind application state to it with
+/// `runtime.bind(&control.selected(), &state.segment)`. A binding copy of an
+/// out-of-range index resolves to no selection.
 pub struct SegmentedControl {
     labels: Vec<String>,
     layouts: Vec<TextLayout>,
-    selected: Option<usize>,
+    selected: Property<Option<usize>>,
     changed: Signal<usize>,
     segment_bounds: Vec<Rect>,
     size: Size,
@@ -35,8 +39,11 @@ impl SegmentedControl {
         T: Into<String>,
     {
         let labels = labels.into_iter().map(Into::into).collect::<Vec<_>>();
+        let count = labels.len();
         Self {
-            selected: (!labels.is_empty()).then_some(0),
+            selected: Property::normalized((!labels.is_empty()).then_some(0), move |selected| {
+                selected.filter(|&index| index < count)
+            }),
             labels,
             layouts: Vec::new(),
             changed: Signal::new(),
@@ -52,10 +59,16 @@ impl SegmentedControl {
         &self.labels
     }
 
-    /// Returns the selected index, if any.
-    #[must_use]
-    pub const fn selected(&self) -> Option<usize> {
-        self.selected
+    /// Returns the selection property shared with this control.
+    ///
+    /// The stored value is the selected index, or `None` when no segment is
+    /// selected. Every write is normalized: an out-of-range index resolves to
+    /// `None`, including `UiRuntime::bind` copies. Bind state with
+    /// `runtime.bind(&control.selected(), &state.segment)` and read the scalar
+    /// with `control.selected().get()`. The property's `changed` signal fires on
+    /// every write; [`Self::changed`] fires only on user interaction.
+    pub fn selected(&self) -> Property<Option<usize>> {
+        self.selected.clone()
     }
 
     /// Returns this control with an initial selection.
@@ -82,7 +95,11 @@ impl SegmentedControl {
         self.changed.clone()
     }
 
-    /// Selects a segment without emitting [`Self::changed`].
+    /// Selects a segment.
+    ///
+    /// Emits `selected().changed()` when the value differs, but not the
+    /// user-only [`Self::changed`] signal. When the property is watched or bound
+    /// through the runtime, the change invalidates paint.
     ///
     /// # Panics
     ///
@@ -92,14 +109,14 @@ impl SegmentedControl {
             selected.is_none_or(|index| index < self.labels.len()),
             "selected segment index must refer to an existing label"
         );
-        self.selected = selected;
+        self.selected.set(selected);
     }
 
     fn select_user(&mut self, index: usize, context: &mut EventContext<'_>) {
-        if self.selected == Some(index) {
+        if self.selected.get() == Some(index) {
             return;
         }
-        self.selected = Some(index);
+        self.selected.set(Some(index));
         self.changed.emit(&index);
         context.request_redraw();
     }
@@ -110,16 +127,17 @@ impl SegmentedControl {
         };
         let selected = self
             .selected
+            .get()
             .unwrap_or(if offset.is_negative() { last } else { 0 });
         let next = selected.saturating_add_signed(offset).min(last);
         self.select_user(next, context);
     }
 
     fn select_without_context(&mut self, index: usize) -> bool {
-        if self.selected == Some(index) {
+        if self.selected.get() == Some(index) {
             return false;
         }
-        self.selected = Some(index);
+        self.selected.set(Some(index));
         self.changed.emit(&index);
         true
     }
@@ -137,6 +155,7 @@ impl SegmentedControl {
         };
         let selected = self
             .selected
+            .get()
             .unwrap_or(if offset.is_negative() { last } else { 0 });
         let next = selected.saturating_add_signed(offset).min(last);
         self.select_without_context(next)
@@ -241,14 +260,14 @@ impl Widget for SegmentedControl {
         context.with_clip(bounds, |context| {
             for (index, segment) in self.segment_bounds.iter().enumerate() {
                 let segment = offset_rect(*segment, bounds.origin);
-                if self.selected == Some(index) {
+                if self.selected.get() == Some(index) {
                     let pill = segment.inset(Insets::all(2.0));
                     context.fill_rounded_rect(pill, (pill.size.height() / 2.0).max(0.0), accent);
                 }
                 let Some(layout) = self.layouts.get(index) else {
                     continue;
                 };
-                let color = if self.selected == Some(index) {
+                let color = if self.selected.get() == Some(index) {
                     selected_text
                 } else {
                     foreground
@@ -314,7 +333,7 @@ impl Widget for SegmentedControl {
                     | AccessibilityActions::INCREMENT
                     | AccessibilityActions::DECREMENT,
             );
-        if let Some(index) = self.selected
+        if let Some(index) = self.selected.get()
             && let Some(label) = self.labels.get(index)
         {
             accessibility = accessibility.with_value(label);
@@ -371,7 +390,7 @@ mod tests {
     #[test]
     fn selects_a_segment_on_click_and_emits_its_index() {
         let control = SegmentedControl::new(["Day", "Week", "Month"]);
-        assert_eq!(control.selected(), Some(0));
+        assert_eq!(control.selected().get(), Some(0));
         let changes = Rc::new(RefCell::new(Vec::new()));
         let _subscription = control.changed().subscribe({
             let changes = Rc::clone(&changes);
@@ -416,5 +435,52 @@ mod tests {
         }));
 
         assert_eq!(*changes.borrow(), vec![1]);
+    }
+
+    #[test]
+    fn bound_selected_follows_application_state() {
+        let segment = Property::new(Some(0_usize));
+        let control = SegmentedControl::new(["Day", "Week", "Month"]);
+        let selected = control.selected();
+        let mut runtime = UiRuntime::new(control);
+        let _binding = runtime.bind(&selected, &segment);
+        runtime
+            .layout(Constraints::tight(size(120.0, 32.0)).expect("valid constraints"))
+            .expect("segmented control layout succeeds");
+        assert_eq!(selected.get(), Some(0));
+
+        segment.set(Some(2));
+        assert_eq!(selected.get(), Some(2));
+
+        // A binding copies the source verbatim; an out-of-range index resolves
+        // to no selection rather than panicking.
+        segment.set(Some(99));
+        assert_eq!(selected.get(), None);
+    }
+
+    #[test]
+    fn set_selected_emits_property_changed_but_not_user_changed() {
+        let control = SegmentedControl::new(["Day", "Week"]);
+        let selected = control.selected();
+        let changed = control.changed();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = selected.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = changed.subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |index| user_changes.borrow_mut().push(*index)
+        });
+        let mut runtime = UiRuntime::new(control);
+        runtime
+            .layout(Constraints::tight(size(120.0, 32.0)).expect("valid constraints"))
+            .expect("segmented control layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        selected.set(Some(1));
+        assert_eq!(*property_changes.borrow(), vec![Some(1)]);
+        assert!(user_changes.borrow().is_empty());
     }
 }
