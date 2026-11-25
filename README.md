@@ -219,6 +219,7 @@ remain available for headless tests, custom backends, and smaller binaries.
 | [`drawen-widgets`](https://crates.io/crates/drawen-widgets) | Standard layout and control widgets |
 | [`drawen-software`](https://crates.io/crates/drawen-software) | Deterministic software renderer and test support |
 | [`drawen-tasks`](https://crates.io/crates/drawen-tasks) | Worker pool, cancellation, progress, and the UI-thread dispatcher |
+| [`drawen-agent`](https://crates.io/crates/drawen-agent) | Graphics-free observation and control of the UI for LLM agents |
 | [`drawen-wgpu`](https://crates.io/crates/drawen-wgpu) | GPU display-list renderer |
 | [`drawen-platform`](https://crates.io/crates/drawen-platform) | Platform-independent window and event contracts |
 | [`drawen-platform-winit`](https://crates.io/crates/drawen-platform-winit) | Native `winit` window adapter |
@@ -249,6 +250,8 @@ The facade separates the headless core from the GPU, browser, and media stacks:
 | `media` | yes | `Video`, `AudioPlayer`, `AnimatedImage`, `PaleoSession`, and the media contracts |
 | `audio` | no | `AudioPaleoSession` and the `cpal` output device; implies `media` |
 | `director` | no | `MediaDirector` playback policy; implies `media` |
+| `agent` | no | `drawen::agent`, the LLM agent bridge over the semantic tree |
+| `agent-serve` | no | The bridge's loopback JSON-lines TCP endpoint; implies `agent` |
 
 A headless application can drop the GPU, Servo, and Paleo dependency graphs:
 

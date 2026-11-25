@@ -152,6 +152,17 @@ adapter wakes the loop through `WindowApplication::attach_waker`),
 `next_frame_in`, or a widget animation tick. Never hold a `UiRuntime`, `Widget`,
 `Signal`, or `Subscription` across threads.
 
+### "Let an LLM agent see and drive the app without screenshots."
+
+Enable the facade's `agent` feature (or `agent-serve` for the TCP endpoint)
+and use `drawen::agent`. `Agent::observe` renders the runtime's semantic tree
+as compact text or JSON; `Agent::execute` applies typed commands through the
+same accessibility and input paths a human uses, and every reply carries a
+fresh snapshot. `AgentServer::bind` serves JSON lines on loopback; drain it on
+the UI thread once per event-loop turn, exactly like a `UiDispatcher`. Do not
+screenshot the window or synthesize OS input for this — the semantic tree is
+the observation channel. See [AGENT.md](AGENT.md).
+
 ### "Add a stylesheet."
 
 Use `UiEnvironment::from_dss(theme, source)` and

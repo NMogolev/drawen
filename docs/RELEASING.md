@@ -97,6 +97,7 @@ local machine.
    cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-software --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-tasks --baseline-rev v0.3.0
+   cargo semver-checks check-release --package drawen-agent --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-platform --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-platform-winit --baseline-rev v0.3.0
    cargo semver-checks check-release --package drawen-workspace --baseline-rev v0.3.0

@@ -251,12 +251,36 @@ in the headings because the version itself must stay valid semver; see
   callback once instead of once per value, and receiving re-arms the wake so
   values sent during a drain are never stranded without a wake-up.
 
+### Agent bridge
+
+- Added `drawen-agent`: graphics-free observation and control of a Drawen UI
+  for LLM agents. `Agent` renders the runtime's `SemanticTree` as a compact
+  text outline or JSON and applies typed commands — click, toggle, focus,
+  select, set value, increment, decrement, expand, collapse, scroll, key
+  press, text input, and coordinate clicks — through the same accessibility
+  and input paths a human uses. Every reply carries a fresh snapshot, so one
+  round trip is a complete observe-act-observe step.
+- Targets resolve by arena index, accessible-name substring, or role/label
+  query. Exact names win, ambiguous queries fail with the candidate list, and
+  stale indices fail instead of hitting recycled slots.
+- The `serve` feature adds `AgentServer`, a loopback JSON-lines TCP endpoint.
+  Socket work runs on a `TaskPool`; commands cross to the UI thread through a
+  `UiDispatcher` the application drains once per event-loop turn. The facade
+  exposes the crate as `drawen::agent` behind the `agent` and `agent-serve`
+  features.
+- `UiRuntime::ensure_layout` re-runs layout with the last constraints after
+  invalidation, so semantic bounds are current without recording a paint pass.
+  The facade now re-exports `SemanticTree` and `SemanticNode`.
+
 ### Documentation
 
 - `RECIPES.md` grows to twelve patterns: tooltips, popovers, and floating
   menus; modal dialogs; the command palette; toast notifications; and the
   split button join the original seven. The virtual-list recipe now covers
   chat-style variable-height rows, autocomplete, and IME caret positioning.
+- `AGENT.md` documents the agent bridge: the snapshot formats, the JSON
+  protocol, target resolution, the threading contract, a ready-made model
+  prompt, and the headless and native-window examples.
 - `AI_GUIDE.md` and `AGENTS.md` cover the overlay widgets, presentation-aware
   background ticking, and the multicodec Paleo backends. `DSS.md` documents
   the extended language; `MEDIA.md` and `PALEO.md` document the player, the
@@ -267,8 +291,8 @@ in the headings because the version itself must stay valid semver; see
 
 ### Packaging
 
-- Five new crates join the published set: `paleo-video`, `paleo-player`,
-  `paleo-hevc`, `paleo-vp9`, and `paleo-av1`.
+- Six new crates join the published set: `paleo-video`, `paleo-player`,
+  `paleo-hevc`, `paleo-vp9`, `paleo-av1`, and `drawen-agent`.
 - `drawen-widgets` now depends only on `paleo-player`: its `media` feature
   links the player with the pure-Rust backends instead of `paleo` plus
   `paleo-h264` directly, and `audio` enables `paleo-player/device`.
