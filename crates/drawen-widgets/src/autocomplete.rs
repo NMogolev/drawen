@@ -11,10 +11,10 @@ use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, ChildLayout, DismissPolicy, DssStyle, EventContext, EventPhase,
     EventStatus, LayoutContext, LayoutResult, OverlayAlign, OverlayOptions, OverlayPlacement,
-    OverlaySide, Signal, StyleTarget, UiEnvironment, Widget,
+    OverlaySide, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
-use crate::text_editor::TextEditor;
+use crate::text_editor::{TextEditor, normalize};
 
 const DEFAULT_WIDTH: f32 = 200.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
@@ -64,8 +64,14 @@ struct PopupState {
 /// commit it (setting the query to the option and emitting [`Self::selected`]),
 /// and `Escape` or an outside click closes the list. Filtering defaults to a
 /// case-insensitive substring match; override it with [`Self::with_filter`].
+///
+/// The query is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&field.query(), &state.query)`. A binding copy replaces
+/// the query, refilters the options, and resets the caret; user typing keeps the
+/// caret and updates the property. Read the scalar with `field.query().get()`.
 pub struct Autocomplete {
     editor: TextEditor,
+    query: Property<String>,
     options: Vec<String>,
     filter: Box<OptionFilter>,
     filtered: Vec<usize>,
@@ -96,8 +102,13 @@ impl Autocomplete {
     pub fn new(options: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let options: Vec<String> = options.into_iter().map(Into::into).collect();
         let filtered = (0..options.len()).collect();
+        let editor = TextEditor::with_text(false, "");
+        let query = Property::normalized(editor.text().to_owned(), |text: String| {
+            normalize(false, &text)
+        });
         Self {
-            editor: TextEditor::with_text(false, ""),
+            editor,
+            query,
             options,
             filter: Box::new(|query, option| option.to_lowercase().contains(&query.to_lowercase())),
             filtered,
@@ -159,15 +170,25 @@ impl Autocomplete {
         self
     }
 
-    /// Returns the current query text.
-    #[must_use]
-    pub fn query(&self) -> &str {
-        self.editor.text()
+    /// Returns the query property shared with this field.
+    ///
+    /// The stored value is the current query with line breaks stripped. Every
+    /// write is normalized, including `UiRuntime::bind` copies, and refilters the
+    /// options on the next layout or event. Bind state with
+    /// `runtime.bind_layout(&field.query(), &state.query)` and read the scalar
+    /// with `field.query().get()`. The property's `changed` signal fires on every
+    /// write; [`Self::query_changed`] fires only on user edits and commits.
+    pub fn query(&self) -> Property<String> {
+        self.query.clone()
     }
 
-    /// Replaces the query without emitting signals and refilters the options.
+    /// Replaces the query and refilters the options.
+    ///
+    /// Emits `query().changed()` when the normalized query differs, but not
+    /// [`Self::query_changed`]; use that signal for edits initiated by the user.
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.editor.set_text(query);
+        self.query.set(self.editor.text().to_owned());
         self.preedit = None;
         self.scroll_x = 0.0;
         self.refilter();
@@ -189,6 +210,21 @@ impl Autocomplete {
     #[must_use]
     pub fn selected(&self) -> Signal<usize> {
         self.selected.clone()
+    }
+
+    /// Applies an external property write (for example a binding copy) to the
+    /// editor and refilters the options. User edits keep the editor and the
+    /// property equal, so this is a no-op for them and preserves the caret.
+    fn reconcile_query(&mut self) {
+        // Compare without cloning; only an external write (a binding copy or a
+        // direct `set`) diverges from the editor, and only then do we clone.
+        if self.query.with(|stored| stored != self.editor.text()) {
+            let text = self.query.get();
+            self.editor.set_text(text);
+            self.preedit = None;
+            self.scroll_x = 0.0;
+            self.refilter();
+        }
     }
 
     fn refilter(&mut self) {
@@ -267,6 +303,7 @@ impl Autocomplete {
         self.refilter();
         self.open = self.focused && !self.filtered.is_empty();
         self.ensure_caret_visible();
+        self.query.set(self.editor.text().to_owned());
         self.query_changed.emit(&self.editor.text().to_owned());
         context.request_layout();
         true
@@ -290,6 +327,7 @@ impl Autocomplete {
         self.scroll_x = 0.0;
         self.open = false;
         self.refilter();
+        self.query.set(self.editor.text().to_owned());
         self.selected.emit(&index);
         self.query_changed.emit(&self.editor.text().to_owned());
         true
@@ -457,6 +495,7 @@ impl Widget for Autocomplete {
         context: &mut LayoutContext<'_>,
         constraints: Constraints,
     ) -> LayoutResult {
+        self.reconcile_query();
         let style = context.style();
         let environment = context.environment();
         let theme = environment.theme();
@@ -601,6 +640,7 @@ impl Widget for Autocomplete {
         if context.phase() != EventPhase::Target {
             return EventStatus::Ignored;
         }
+        self.reconcile_query();
         match event {
             InputEvent::PointerDown(pointer) => {
                 if pointer.button != Some(PointerButton::Primary) {
@@ -878,6 +918,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use drawen_core::{KeyCode, KeyEvent, PointerButtons, PointerEvent, PointerId};
+    use drawen_render::{DisplayList, PaintContext};
     use drawen_ui::UiRuntime;
 
     use super::*;
@@ -1029,5 +1070,91 @@ mod tests {
         runtime.layout(viewport()).expect("layout succeeds");
         assert_eq!(*observed.borrow(), vec![2]);
         drop(selected);
+    }
+
+    #[test]
+    fn bound_query_follows_application_state() {
+        let state = Property::new(String::new());
+        let field = Autocomplete::new(["alice", "bob", "carol"]);
+        let query = field.query();
+        let popup = field.popup();
+        let mut runtime = UiRuntime::new(field);
+        let root = runtime.root();
+        runtime.append_child(root, popup).expect("popup appends");
+        let _binding = runtime.bind_layout(&query, &state);
+        runtime.layout(viewport()).expect("layout succeeds");
+
+        // A binding copy replaces the query; the next paint reconciles the editor.
+        state.set("bo".to_string());
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint after a bound query change succeeds");
+        assert_eq!(query.get(), "bo");
+
+        // Line breaks are stripped for the single-line query, even on a bind copy.
+        state.set("a\nb".to_string());
+        assert_eq!(query.get(), "ab");
+    }
+
+    #[test]
+    fn set_query_emits_property_changed_but_not_user_changed() {
+        let field = Autocomplete::new(["alice", "bob"]);
+        let query = field.query();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = query.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(value.clone())
+        });
+        let _user = field.query_changed().subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(value.clone())
+        });
+        let popup = field.popup();
+        let mut runtime = UiRuntime::new(field);
+        let root = runtime.root();
+        runtime.append_child(root, popup).expect("popup appends");
+        runtime.layout(viewport()).expect("layout succeeds");
+        runtime.focus_widget(root).expect("field focuses");
+
+        // A programmatic write emits the property signal, never the user one.
+        query.set("a".to_string());
+        assert_eq!(property_changes.borrow().len(), 1);
+        assert!(user_changes.borrow().is_empty());
+
+        // User input emits both.
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("b".into()));
+        assert_eq!(property_changes.borrow().len(), 2);
+        assert_eq!(user_changes.borrow().len(), 1);
+        assert_eq!(query.get(), "ab");
+    }
+
+    #[test]
+    fn commit_updates_the_query_property() {
+        let field = Autocomplete::new(["alice", "bob", "carol"]);
+        let query = field.query();
+        let popup = field.popup();
+        let mut runtime = UiRuntime::new(field);
+        let root = runtime.root();
+        runtime.append_child(root, popup).expect("popup appends");
+        runtime.layout(viewport()).expect("layout succeeds");
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 5.0))
+                .is_handled()
+        );
+        runtime.layout(viewport()).expect("layout succeeds");
+        assert!(
+            runtime
+                .dispatch_event(&InputEvent::TextInput("bo".into()))
+                .is_handled()
+        );
+        runtime.layout(viewport()).expect("layout succeeds");
+        assert!(runtime.dispatch_event(&key(NamedKey::Enter)).is_handled());
+        runtime.layout(viewport()).expect("layout succeeds");
+
+        // Committing a suggestion is a user edit: the query property follows it.
+        assert_eq!(query.get(), "bob");
     }
 }
