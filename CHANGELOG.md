@@ -43,6 +43,11 @@ in the headings because the version itself must stay valid semver; see
 - Added `Modal`, a zero-size one-child host with a shared `ModalHandle` and
   `opened()` / `closed()` signals, and `Dialog`, a padded, rounded, shadowed
   panel that reports the `Dialog` accessibility role with the modal state.
+- Added `CommandPalette` and `PaletteCommand`, a modal search palette with a
+  built-in query editor, case-insensitive filtering, up to eight visible rows
+  with scrolling, pointer and keyboard navigation, and an `executed(index)`
+  signal that dismisses the surrounding modal. Place it as the single child of
+  a `Modal` and focus it after opening.
 
 ### Fonts
 

@@ -52,6 +52,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | Hand-built context menu | `Popover` with `PopoverTrigger::Secondary` plus a `Menu` |
 | A centered modal dialog | `Modal` + `Dialog`; the runtime adds the scrim, input blocking, and focus trap |
 | `dialog.show()` that also lays out | `ModalHandle::open()`, then `runtime.invalidate_layout()`; focus after the next layout |
+| A searchable command palette | `Modal` + `CommandPalette::new([PaletteCommand::new("...")])`; `executed(index)` dismisses the modal |
 
 ## Q&A
 
@@ -158,6 +159,26 @@ and move focus into the dialog only after the next layout pass. Escape, a click
 on the scrim, or focus loss closes a light modal; pass
 `.with_dismiss(DismissPolicy::None)` to require an explicit button. See
 [RECIPES.md](RECIPES.md#9-modal-dialogs).
+
+### "Add a command palette."
+
+Use `CommandPalette` as the single child of a `Modal`. It is data-driven like
+`Menu`: it owns the query field and the filtered rows, so append no children.
+
+```rust
+let palette = CommandPalette::new([
+    PaletteCommand::new("Open file").with_hint("Ctrl+O"),
+    PaletteCommand::new("Save all"),
+]);
+let executed = palette.executed();
+let palette = runtime.append_child(modal, palette)?;
+```
+
+Focus the palette after opening and laying out the modal. Typing filters by
+case-insensitive substring, arrows move the active row, and Enter or a row
+click emits `executed(index)` and dismisses the modal. Do not handle Escape in
+application code; the runtime's light dismissal closes the modal. See
+[RECIPES.md](RECIPES.md#10-a-command-palette).
 
 ### "Play this MP4 and turn on the sound."
 

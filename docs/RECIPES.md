@@ -556,3 +556,62 @@ Rules for modal dialogs:
 - Do not nest a second modal inside a modal. Open a popover or menu from inside
   the dialog instead; the runtime still dismisses those with the dialog.
 
+## 10. A command palette
+
+A command palette is a modal search surface: a query field above a filtered
+list of commands. `CommandPalette` is data-driven like `Menu` — it owns its
+query editor and rows, so it needs no child widgets. Place it directly as the
+single child of a `Modal`:
+
+```rust
+use drawen::{CommandPalette, Modal, PaletteCommand};
+
+let modal = Modal::new();
+let handle = modal.handle();
+let modal = runtime.append_child(runtime.root(), modal)?;
+
+let palette = CommandPalette::new([
+    PaletteCommand::new("Open file").with_hint("Ctrl+O"),
+    PaletteCommand::new("Save all").with_hint("Ctrl+S"),
+    PaletteCommand::new("Copy path"),
+]);
+let executed = palette.executed();
+let palette = runtime.append_child(modal, palette)?;
+```
+
+Open it like any modal, then focus the palette after the next layout pass:
+
+```rust
+handle.open();
+runtime.invalidate_layout();
+// On the next frame, after layout:
+let _ = runtime.focus_widget(palette);
+```
+
+Typing filters commands by case-insensitive substring; the first match is
+active immediately. Arrow keys move the active row, Enter executes it, and a
+primary click on a row executes it directly. The query field supports the usual
+single-line editing: caret movement, shift selection, clipboard, and undo.
+
+`executed()` emits the command's index in the original list, then the palette
+asks the runtime to dismiss the surrounding overlay — which closes a
+light-dismiss `Modal`. Escape and scrim clicks close the palette through the
+same modal dismissal; the palette itself does not handle Escape.
+
+```rust
+let _subscription = executed.subscribe(move |index| {
+    // Run the command, set a dirty flag, request one redraw.
+});
+```
+
+Rules for command palettes:
+
+- Keep the command list fixed at construction. The palette filters and scrolls
+  the rows itself; it shows up to eight rows and scrolls the rest.
+- React to `executed()` with plain state changes; the modal closes itself, so
+  do not call `handle.close()` again from the handler.
+- Use `matched()` and `active_command()` for read-only inspection, and
+  `query()` for the current filter text.
+- Style it through the `command-palette` style target; padding, background,
+  border, corner radius, foreground, and accent resolve from DSS or the theme.
+

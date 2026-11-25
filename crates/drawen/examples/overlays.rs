@@ -1,8 +1,10 @@
-//! Anchored overlays: tooltips, dropdown menus, and a modal dialog.
+//! Anchored overlays: tooltips, dropdown menus, a modal dialog, and a command
+//! palette.
 //!
 //! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content,
 //! and `Menu` supplies the rows. `Modal` hosts a centered `Dialog` above a scrim
-//! and traps focus inside it. The runtime measures floating and modal content
+//! and traps focus inside it; a `CommandPalette` uses the same modal layer for
+//! a searchable command list. The runtime measures floating and modal content
 //! only while it is open, flips anchored content when the window edge is too
 //! close, and paints both above the rest of the tree.
 //!
@@ -15,9 +17,10 @@ use std::{
 };
 
 use drawen::{
-    Border, Box, Button, Color, Column, Constraints, Dialog, Insets, LayoutContext, LayoutResult,
-    Menu, MenuEntry, Modal, OverlayPlacement, Padding, Popover, PopoverTrigger, Rect, Row, Size,
-    SizedBox, Subscription, Text, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
+    Border, Box, Button, Color, Column, CommandPalette, Constraints, Dialog, Insets, LayoutContext,
+    LayoutResult, Menu, MenuEntry, Modal, OverlayPlacement, Padding, PaletteCommand, Popover,
+    PopoverTrigger, Rect, Row, Size, SizedBox, Subscription, Text, Tooltip, UiEnvironment,
+    UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -132,6 +135,15 @@ impl OverlayDemo {
             &pending_focus,
             &mut subscriptions,
         );
+        build_palette(
+            &mut runtime,
+            column,
+            &status,
+            &dirty,
+            &pending_layout,
+            &pending_focus,
+            &mut subscriptions,
+        );
 
         let status_row = Padding::new(Insets::new(22.0, 0.0, 0.0, 0.0));
         let status_row = runtime
@@ -146,7 +158,7 @@ impl OverlayDemo {
             )
             .expect("status row accepts one child");
 
-        let size = Size::new(720.0, 440.0).expect("window size is valid");
+        let size = Size::new(720.0, 500.0).expect("window size is valid");
         runtime
             .layout(Constraints::tight(size).expect("window constraints are valid"))
             .expect("layout succeeds");
@@ -471,6 +483,95 @@ fn build_dialog(
             // and required for programmatic closes.
             pending_layout.set(true);
             *status.borrow_mut() = "Dialog closed.".to_string();
+            dirty.set(true);
+        }
+    }));
+}
+
+/// Adds a button that opens a modal command palette.
+fn build_palette(
+    runtime: &mut UiRuntime,
+    column: WidgetId,
+    status: &Rc<RefCell<String>>,
+    dirty: &Rc<Cell<bool>>,
+    pending_layout: &Rc<Cell<bool>>,
+    pending_focus: &Rc<Cell<Option<WidgetId>>>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let row = Padding::new(Insets::new(14.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
+        .expect("column accepts children");
+
+    let trigger = Button::new();
+    let activated = trigger.activated();
+    let trigger = runtime
+        .append_child(row, trigger)
+        .expect("row accepts children");
+    append_text(runtime, trigger, "Open palette", 14.0, ink());
+
+    let modal = Modal::new();
+    let handle = modal.handle();
+    let closed = modal.closed();
+    let modal = runtime
+        .append_child(column, modal)
+        .expect("column accepts children");
+
+    let commands = [
+        PaletteCommand::new("Open file").with_hint("Ctrl+O"),
+        PaletteCommand::new("Save all").with_hint("Ctrl+S"),
+        PaletteCommand::new("Copy path").with_hint("Ctrl+Shift+C"),
+        PaletteCommand::new("Toggle terminal").with_hint("Ctrl+`"),
+        PaletteCommand::new("Format document").with_hint("Shift+Alt+F"),
+    ];
+    let labels: Vec<String> = commands
+        .iter()
+        .map(|command| command.label().to_string())
+        .collect();
+    let palette_widget = CommandPalette::new(commands);
+    let executed = palette_widget.executed();
+    let palette = runtime
+        .append_child(modal, palette_widget)
+        .expect("modal accepts one child");
+
+    // Executing a command dismisses the modal, so remember that a command ran
+    // and let the close handler keep the execution message on screen.
+    let ran = Rc::new(Cell::new(false));
+    subscriptions.push(activated.subscribe({
+        let handle = handle.clone();
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        let pending_focus = Rc::clone(pending_focus);
+        move |()| {
+            handle.open();
+            pending_layout.set(true);
+            pending_focus.set(Some(palette));
+            *status.borrow_mut() = "Palette opened. Type to filter, Enter to run.".to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(executed.subscribe({
+        let labels = labels.clone();
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let ran = Rc::clone(&ran);
+        move |index| {
+            *status.borrow_mut() = format!("Ran \"{}\"", labels[*index]);
+            ran.set(true);
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(closed.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        let ran = Rc::clone(&ran);
+        move |()| {
+            pending_layout.set(true);
+            if !ran.replace(false) {
+                *status.borrow_mut() = "Palette closed.".to_string();
+            }
             dirty.set(true);
         }
     }));
