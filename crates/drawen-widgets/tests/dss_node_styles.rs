@@ -414,3 +414,35 @@ fn rgba_borders_parse_and_apply_to_standard_widgets() {
         } if *color == border.color
     )));
 }
+
+#[test]
+fn disabled_state_rules_match_only_disabled_buttons() {
+    let mut runtime = UiRuntime::with_environment(
+        Stack::new(),
+        environment("button:disabled { background: #445566; }"),
+    );
+    let enabled = runtime
+        .append_child(runtime.root(), Button::new())
+        .expect("root exists");
+    let disabled = runtime
+        .append_child(runtime.root(), Button::new().with_enabled(false))
+        .expect("root exists");
+    runtime
+        .layout(Constraints::UNBOUNDED)
+        .expect("layout succeeds");
+
+    assert_eq!(
+        runtime
+            .computed_style(disabled)
+            .expect("button is live")
+            .background,
+        Some(Color::rgba8(68, 85, 102, 255))
+    );
+    assert_eq!(
+        runtime
+            .computed_style(enabled)
+            .expect("button is live")
+            .background,
+        None
+    );
+}

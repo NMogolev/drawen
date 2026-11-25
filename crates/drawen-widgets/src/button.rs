@@ -5,8 +5,8 @@ use drawen_render::PaintContext;
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, ChildLayout, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, PseudoClass, Signal, StyleTarget, SurfaceStyle, UiEnvironment,
-    Widget,
+    LayoutContext, LayoutResult, Property, PseudoClass, Signal, StyleTarget, SurfaceStyle,
+    UiEnvironment, Widget,
 };
 
 /// Locally overridable visual properties for a [`Button`].
@@ -32,6 +32,7 @@ pub struct ButtonStyle {
 pub struct Button {
     style: ButtonStyle,
     activated: Signal<()>,
+    enabled: Property<bool>,
     pressed: bool,
     pressed_pointer: Option<drawen_core::PointerId>,
     pointer_inside: bool,
@@ -48,6 +49,7 @@ impl Button {
         Self {
             style: ButtonStyle::default(),
             activated: Signal::new(),
+            enabled: Property::new(true),
             pressed: false,
             pressed_pointer: None,
             pointer_inside: false,
@@ -132,6 +134,43 @@ impl Button {
         self.activated.clone()
     }
 
+    /// Returns the enabled property shared with this button.
+    ///
+    /// A disabled button ignores pointer and keyboard activation, skips
+    /// sequential focus, reports the disabled accessibility state (styled as
+    /// `button:disabled` in DSS), and paints a muted flat background. Bind
+    /// application state to it with
+    /// `runtime.bind(&button.enabled(), &state.is_valid)`; the binding keeps
+    /// the button in sync and wakes redraws on every change.
+    pub fn enabled(&self) -> Property<bool> {
+        self.enabled.clone()
+    }
+
+    /// Returns whether the button accepts activation.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.get()
+    }
+
+    /// Sets whether the button accepts activation.
+    ///
+    /// Disabling cancels an in-flight press without activating; the captured
+    /// pointer is still released on its up event. When the property is
+    /// watched or bound through the runtime, the change invalidates paint.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled.set(enabled) && !enabled {
+            self.pressed = false;
+            self.pointer_inside = false;
+        }
+    }
+
+    /// Returns this button with the supplied enabled state.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
     /// Returns whether the button is currently pressed.
     #[must_use]
     pub const fn is_pressed(&self) -> bool {
@@ -214,7 +253,11 @@ impl Widget for Button {
             .pressed_background
             .or(styled_idle)
             .unwrap_or_else(|| theme.control_pressed_background());
-        let background = context.transition().control_color(idle, hover, pressed);
+        let background = if self.is_enabled() {
+            context.transition().control_color(idle, hover, pressed)
+        } else {
+            idle.mix(theme.disabled_foreground(), 0.5)
+        };
         let radius = self
             .style
             .surface
@@ -232,7 +275,9 @@ impl Widget for Button {
             return EventStatus::Ignored;
         }
         match event {
-            InputEvent::PointerDown(pointer) if pointer.button == Some(PointerButton::Primary) => {
+            InputEvent::PointerDown(pointer)
+                if pointer.button == Some(PointerButton::Primary) && self.is_enabled() =>
+            {
                 self.pressed = true;
                 self.pressed_pointer = Some(pointer.pointer_id);
                 self.pointer_inside = true;
@@ -245,7 +290,8 @@ impl Widget for Button {
                 if pointer.button == Some(PointerButton::Primary)
                     && self.pressed_pointer == Some(pointer.pointer_id) =>
             {
-                let activate = self.pressed && self.size.contains(pointer.position);
+                let activate =
+                    self.pressed && self.is_enabled() && self.size.contains(pointer.position);
                 self.pressed = false;
                 self.pressed_pointer = None;
                 self.pointer_inside = false;
@@ -278,6 +324,7 @@ impl Widget for Button {
             }
             InputEvent::KeyDown(key)
                 if !key.repeat
+                    && self.is_enabled()
                     && context.current_target() == context.target()
                     && matches!(key.key, Key::Named(NamedKey::Enter | NamedKey::Space)) =>
             {
@@ -290,17 +337,21 @@ impl Widget for Button {
     }
 
     fn accepts_focus(&self) -> bool {
-        true
+        self.is_enabled()
     }
 
     fn accessibility(&self) -> Accessibility {
-        Accessibility::new(AccessibilityRole::Button)
-            .with_states(AccessibilityState::FOCUSABLE)
-            .with_actions(AccessibilityActions::FOCUS | AccessibilityActions::CLICK)
+        if self.is_enabled() {
+            Accessibility::new(AccessibilityRole::Button)
+                .with_states(AccessibilityState::FOCUSABLE)
+                .with_actions(AccessibilityActions::FOCUS | AccessibilityActions::CLICK)
+        } else {
+            Accessibility::new(AccessibilityRole::Button).with_states(AccessibilityState::DISABLED)
+        }
     }
 
     fn accessibility_action(&mut self, action: &AccessibilityAction) -> bool {
-        if matches!(action, AccessibilityAction::Click) {
+        if self.is_enabled() && matches!(action, AccessibilityAction::Click) {
             self.activated.emit(&());
             true
         } else {
@@ -322,7 +373,9 @@ mod tests {
         PointerEvent, PointerId, Size,
     };
     use drawen_render::{DisplayCommand, DisplayList, FontdueTextShaper, TextStyle};
-    use drawen_ui::{EventStatus, LightTheme, Theme, UiRuntime};
+    use drawen_ui::{
+        AccessibilityState, EventStatus, LightTheme, Property, Theme, UiRuntime, Widget,
+    };
 
     use crate::{Checkbox, Text};
 
@@ -621,6 +674,131 @@ mod tests {
             EventStatus::Handled
         );
         assert_eq!(activations.get(), 1);
+    }
+
+    #[test]
+    fn disabled_button_ignores_pointer_and_keyboard_activation() {
+        let activations = Rc::new(Cell::new(0));
+        let button = Button::new().with_enabled(false);
+        let _subscription = button.activated().subscribe({
+            let activations = Rc::clone(&activations);
+            move |()| activations.set(activations.get() + 1)
+        });
+        assert!(!button.accepts_focus());
+        let accessibility = button.accessibility();
+        assert!(accessibility.states.contains(AccessibilityState::DISABLED));
+        assert!(!accessibility.states.contains(AccessibilityState::FOCUSABLE));
+
+        let mut runtime = UiRuntime::new(button);
+        runtime
+            .layout(
+                Constraints::tight(Size::new(40.0, 20.0).expect("valid button size"))
+                    .expect("valid constraints"),
+            )
+            .expect("button layout succeeds");
+        let inside = Point::new(10.0, 10.0);
+
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        let _ = runtime.dispatch_event(&key(NamedKey::Enter));
+        let _ = runtime.dispatch_event(&key(NamedKey::Space));
+
+        assert_eq!(activations.get(), 0);
+    }
+
+    #[test]
+    fn disabling_mid_press_releases_without_activating() {
+        let activations = Rc::new(Cell::new(0));
+        let button = Button::new();
+        let enabled = button.enabled();
+        let _subscription = button.activated().subscribe({
+            let activations = Rc::clone(&activations);
+            move |()| activations.set(activations.get() + 1)
+        });
+        let mut runtime = UiRuntime::new(button);
+        runtime
+            .layout(
+                Constraints::tight(Size::new(40.0, 20.0).expect("valid button size"))
+                    .expect("valid constraints"),
+            )
+            .expect("button layout succeeds");
+        let inside = Point::new(10.0, 10.0);
+
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        enabled.set(false);
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        assert_eq!(activations.get(), 0);
+
+        enabled.set(true);
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        assert_eq!(activations.get(), 1);
+    }
+
+    #[test]
+    fn bound_enabled_follows_application_state() {
+        let is_valid = Property::new(false);
+        let activations = Rc::new(Cell::new(0));
+        let button = Button::new();
+        let enabled = button.enabled();
+        let _subscription = button.activated().subscribe({
+            let activations = Rc::clone(&activations);
+            move |()| activations.set(activations.get() + 1)
+        });
+        let mut runtime = UiRuntime::new(button);
+        let _binding = runtime.bind(&enabled, &is_valid);
+        runtime
+            .layout(
+                Constraints::tight(Size::new(40.0, 20.0).expect("valid button size"))
+                    .expect("valid constraints"),
+            )
+            .expect("button layout succeeds");
+        let inside = Point::new(10.0, 10.0);
+
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        assert_eq!(activations.get(), 0);
+
+        is_valid.set(true);
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        assert_eq!(activations.get(), 1);
+
+        is_valid.set(false);
+        let _ = runtime.dispatch_event(&pointer_event(inside, true));
+        let _ = runtime.dispatch_event(&pointer_event(inside, false));
+        assert_eq!(activations.get(), 1);
+    }
+
+    #[test]
+    fn disabled_paint_is_muted_and_ignores_hover() {
+        let mut runtime = UiRuntime::with_environment(
+            Button::new().with_enabled(false),
+            drawen_ui::UiEnvironment::new(ButtonTheme),
+        );
+        runtime
+            .layout(
+                Constraints::tight(Size::new(20.0, 20.0).expect("valid button size"))
+                    .expect("valid constraints"),
+            )
+            .expect("button layout succeeds");
+        let expected = ButtonTheme
+            .control_background()
+            .mix(ButtonTheme.disabled_foreground(), 0.5);
+
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut drawen_render::PaintContext::new(&mut list))
+            .expect("disabled button paint succeeds");
+        assert_eq!(fill_color(&list), expected);
+
+        let _ = runtime.dispatch_event(&pointer_move(Point::new(10.0, 10.0)));
+        runtime.settle_animations();
+        let mut hovered = DisplayList::new();
+        runtime
+            .paint(&mut drawen_render::PaintContext::new(&mut hovered))
+            .expect("hovered disabled button paint succeeds");
+        assert_eq!(fill_color(&hovered), expected);
     }
 
     fn fill_color(list: &DisplayList) -> Color {
