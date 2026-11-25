@@ -615,3 +615,47 @@ Rules for command palettes:
 - Style it through the `command-palette` style target; padding, background,
   border, corner radius, foreground, and accent resolve from DSS or the theme.
 
+## 11. Toast notifications
+
+Toasts are transient, non-interactive notifications stacked in a window corner.
+`ToastHost` is a zero-size widget that paints its cards through the floating
+paint pass, so they appear above the tree and any open overlays without
+affecting layout, hit testing, or focus. A shared `ToastHandle` shows and
+dismisses them:
+
+```rust
+use drawen::{Toast, ToastHost, ToastTone};
+
+let host = ToastHost::new();            // bottom-right corner by default
+let handle = host.handle();
+let host = runtime.append_child(runtime.root(), host)?;
+
+// From a signal handler or window_event:
+let _ = handle.show(Toast::new("Project saved").with_tone(ToastTone::Success));
+// ... then invalidate paint and request one redraw.
+```
+
+Each toast fades in, stays for its duration (four seconds by default, override
+with `.with_duration(...)`), fades out, and removes itself. Timed dismissal runs
+through `Widget::advance_animation`; while any toast is queued,
+`runtime.next_frame_in()` keeps scheduling frames, so the standard
+`tick`/`next_frame_in` wiring in `WindowApplication` is all the timing support
+an application needs.
+
+The queue keeps at most five toasts and drops the oldest when a sixth arrives.
+`handle.dismiss(id)` removes one early, `handle.clear()` removes all, and
+`shown()` emits the identifier of each new toast. Use
+`.with_corner(ToastCorner::TopRight)` (or `TopLeft` / `BottomLeft`) to move the
+stack; top corners keep the newest toast at the top edge, bottom corners at the
+bottom edge.
+
+Rules for toasts:
+
+- Show toasts from plain state changes; do not append a widget per notification.
+  The host owns the queue and the cards.
+- Toasts are non-interactive like tooltip bubbles. Put actions in a dialog or
+  alert instead; a toast should only report status.
+- Invalidate paint, not layout, after `show` / `dismiss` / `clear`. The host
+  computes card geometry at paint time from the live queue.
+- Keep messages short. Cards wrap at 360 logical pixels and never take focus.
+

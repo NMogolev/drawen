@@ -53,6 +53,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A centered modal dialog | `Modal` + `Dialog`; the runtime adds the scrim, input blocking, and focus trap |
 | `dialog.show()` that also lays out | `ModalHandle::open()`, then `runtime.invalidate_layout()`; focus after the next layout |
 | A searchable command palette | `Modal` + `CommandPalette::new([PaletteCommand::new("...")])`; `executed(index)` dismisses the modal |
+| Transient corner notifications | `ToastHost` + `ToastHandle::show(Toast::new("..."))`; cards paint above the tree and expire on their own |
 
 ## Q&A
 
@@ -179,6 +180,25 @@ case-insensitive substring, arrows move the active row, and Enter or a row
 click emits `executed(index)` and dismisses the modal. Do not handle Escape in
 application code; the runtime's light dismissal closes the modal. See
 [RECIPES.md](RECIPES.md#10-a-command-palette).
+
+### "Show a toast notification."
+
+Append one `ToastHost` anywhere in the tree; it is zero-size and paints its
+cards above everything through the floating paint pass. Show notifications
+through its handle:
+
+```rust
+let host = ToastHost::new();
+let handle = host.handle();
+let host = runtime.append_child(runtime.root(), host)?;
+// later, from a signal handler:
+let _ = handle.show(Toast::new("Saved").with_tone(ToastTone::Success));
+```
+
+Invalidate paint afterwards, not layout. Toasts fade in, expire after their
+duration, and remove themselves; `next_frame_in()` schedules the frames while
+any toast is queued. They are non-interactive — do not put buttons in them.
+See [RECIPES.md](RECIPES.md#11-toast-notifications).
 
 ### "Play this MP4 and turn on the sound."
 

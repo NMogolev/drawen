@@ -48,6 +48,12 @@ in the headings because the version itself must stay valid semver; see
   with scrolling, pointer and keyboard navigation, and an `executed(index)`
   signal that dismisses the surrounding modal. Place it as the single child of
   a `Modal` and focus it after opening.
+- Added `ToastHost`, `ToastHandle`, `Toast`, `ToastTone`, and `ToastCorner`:
+  transient non-interactive notifications stacked in a window corner. The
+  zero-size host paints cards through the floating paint pass, fades them in
+  and out, and removes them when their duration elapses via
+  `Widget::advance_animation`. The queue caps at five toasts; `show`,
+  `dismiss`, and `clear` manage it through the shared handle.
 
 ### Fonts
 

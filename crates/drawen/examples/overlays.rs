@@ -1,12 +1,13 @@
-//! Anchored overlays: tooltips, dropdown menus, a modal dialog, and a command
-//! palette.
+//! Anchored overlays: tooltips, dropdown menus, a modal dialog, a command
+//! palette, and toast notifications.
 //!
 //! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content,
 //! and `Menu` supplies the rows. `Modal` hosts a centered `Dialog` above a scrim
 //! and traps focus inside it; a `CommandPalette` uses the same modal layer for
-//! a searchable command list. The runtime measures floating and modal content
-//! only while it is open, flips anchored content when the window edge is too
-//! close, and paints both above the rest of the tree.
+//! a searchable command list. `ToastHost` paints transient notifications above
+//! everything through the floating paint pass. The runtime measures floating
+//! and modal content only while it is open, flips anchored content when the
+//! window edge is too close, and paints both above the rest of the tree.
 //!
 //! Run it with `cargo run -p drawen --example overlays`.
 
@@ -19,8 +20,8 @@ use std::{
 use drawen::{
     Border, Box, Button, Color, Column, CommandPalette, Constraints, Dialog, Insets, LayoutContext,
     LayoutResult, Menu, MenuEntry, Modal, OverlayPlacement, Padding, PaletteCommand, Popover,
-    PopoverTrigger, Rect, Row, Size, SizedBox, Subscription, Text, Tooltip, UiEnvironment,
-    UiRuntime, Widget, WidgetId,
+    PopoverTrigger, Rect, Row, Size, SizedBox, Subscription, Text, Toast, ToastHost, ToastTone,
+    Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -144,6 +145,7 @@ impl OverlayDemo {
             &pending_focus,
             &mut subscriptions,
         );
+        build_toasts(&mut runtime, column, &dirty, &mut subscriptions);
 
         let status_row = Padding::new(Insets::new(22.0, 0.0, 0.0, 0.0));
         let status_row = runtime
@@ -158,7 +160,7 @@ impl OverlayDemo {
             )
             .expect("status row accepts one child");
 
-        let size = Size::new(720.0, 500.0).expect("window size is valid");
+        let size = Size::new(720.0, 540.0).expect("window size is valid");
         runtime
             .layout(Constraints::tight(size).expect("window constraints are valid"))
             .expect("layout succeeds");
@@ -572,6 +574,43 @@ fn build_palette(
             if !ran.replace(false) {
                 *status.borrow_mut() = "Palette closed.".to_string();
             }
+            dirty.set(true);
+        }
+    }));
+}
+
+/// Adds a button that shows transient toast notifications.
+fn build_toasts(
+    runtime: &mut UiRuntime,
+    column: WidgetId,
+    dirty: &Rc<Cell<bool>>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let row = Padding::new(Insets::new(14.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
+        .expect("column accepts children");
+
+    let trigger = Button::new();
+    let activated = trigger.activated();
+    let trigger = runtime
+        .append_child(row, trigger)
+        .expect("row accepts children");
+    append_text(runtime, trigger, "Show toast", 14.0, ink());
+
+    // The host is zero-size and paints its cards above the whole tree, so it
+    // can live anywhere in the layout without affecting it.
+    let host = ToastHost::new();
+    let handle = host.handle();
+    runtime
+        .append_child(column, host)
+        .expect("column accepts children");
+
+    subscriptions.push(activated.subscribe({
+        let handle = handle.clone();
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            let _ = handle.show(Toast::new("Project saved").with_tone(ToastTone::Success));
             dirty.set(true);
         }
     }));
