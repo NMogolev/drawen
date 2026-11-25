@@ -172,6 +172,7 @@ pub struct Player {
     decoder: Option<Box<dyn VideoDecoder>>,
     output: Option<Output>,
     converter: Option<PcmConverter>,
+    pending_audio: Option<PcmBuffer>,
     timeline: Timeline,
     state: PlayerState,
     state_serial: u64,
@@ -268,6 +269,7 @@ impl Player {
             decoder,
             output,
             converter,
+            pending_audio: None,
             timeline: Timeline::default(),
             state: PlayerState::Paused,
             state_serial: 0,
@@ -422,6 +424,7 @@ impl Player {
 
         self.video_queue.clear();
         self.video_trim_from = self.info.video_enabled.then_some(target);
+        self.pending_audio = None;
         self.eof = false;
         self.flushed = false;
 
@@ -603,6 +606,7 @@ impl Player {
         }
         self.eof
             && self.video_queue.is_empty()
+            && self.pending_audio.is_none()
             && self
                 .output
                 .as_ref()
@@ -638,6 +642,9 @@ impl Player {
     fn fill(&mut self) -> Result<()> {
         let audio_target = self.audio_target();
         let audio_active = audio_target.is_some();
+        if audio_active && self.flush_pending_audio()? {
+            return Ok(());
+        }
         let mut packets = 0;
         while !self.eof && packets < MAX_PACKETS_PER_UPDATE {
             let need_video = self.info.video_enabled && self.video_queue.len() < VIDEO_QUEUE_TARGET;
@@ -663,6 +670,9 @@ impl Player {
                 Event::Audio(buffer) => {
                     if audio_active {
                         self.queue_audio(buffer)?;
+                        if self.pending_audio.is_some() {
+                            break;
+                        }
                     }
                 }
                 Event::EndOfStream => self.eof = true,
@@ -702,19 +712,36 @@ impl Player {
 
     /// Converts one decoded block and queues it on the device.
     fn queue_audio(&mut self, buffer: paleo::AudioBuffer) -> Result<()> {
-        let (Some(output), Some(converter)) = (self.output.as_mut(), self.converter.as_mut())
-        else {
+        let Some(converter) = self.converter.as_mut() else {
             return Ok(());
         };
         let pcm = converter.push(&PcmBuffer::from_paleo(buffer)?)?;
-        if pcm.is_empty() {
-            return Ok(());
+        self.pending_audio = (!pcm.is_empty()).then_some(pcm);
+        let _ = self.flush_pending_audio()?;
+        Ok(())
+    }
+
+    /// Queues as much converted audio as the device ring can accept.
+    ///
+    /// Returns `true` when a tail remains for a later update.
+    fn flush_pending_audio(&mut self) -> Result<bool> {
+        let Some(mut pcm) = self.pending_audio.take() else {
+            return Ok(false);
+        };
+        let Some(output) = self.output.as_mut() else {
+            return Ok(false);
+        };
+        let vacant = output.vacant_frames();
+        if vacant == 0 {
+            self.pending_audio = Some(pcm);
+            return Ok(true);
+        }
+        if pcm.frames() > vacant {
+            self.pending_audio = Some(pcm.split_off_frames(vacant));
         }
         let skipped = output.queue(&pcm)?;
-        if skipped > 0 {
-            self.warning = Some(format!("audio output dropped {skipped} frames"));
-        }
-        Ok(())
+        debug_assert_eq!(skipped, 0, "PCM queue write exceeded available capacity");
+        Ok(self.pending_audio.is_some())
     }
 
     /// Inserts a picture in presentation order.

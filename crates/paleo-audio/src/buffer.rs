@@ -211,6 +211,23 @@ impl PcmBuffer {
         self.samples.get(start..end)
     }
 
+    /// Splits off frames from `frame` onward, advancing the returned buffer's
+    /// timestamp to its first frame.
+    #[must_use]
+    pub fn split_off_frames(&mut self, frame: usize) -> Self {
+        let frame = frame.min(self.frames());
+        let samples = frame.saturating_mul(self.format.channels());
+        let tail = self.samples.split_off(samples);
+        let frame = u64::try_from(frame).unwrap_or(u64::MAX);
+        Self {
+            pts: self
+                .pts
+                .saturating_add(self.format.duration_for_frames(frame)),
+            format: self.format,
+            samples: tail,
+        }
+    }
+
     /// Consumes the buffer and returns its interleaved samples.
     #[must_use]
     pub fn into_samples(self) -> Vec<f32> {
@@ -401,6 +418,22 @@ mod tests {
         assert_eq!(buffer.samples().len(), 8);
         assert_eq!(buffer.frame(3), Some(&[0.0, 0.0][..]));
         assert_eq!(buffer.frame(4), None);
+    }
+
+    #[test]
+    fn splitting_a_buffer_preserves_frame_boundaries_and_timestamps() {
+        let mut buffer = PcmBuffer::new(
+            Duration::from_millis(10),
+            format(2),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+        .expect("aligned stereo samples");
+
+        let tail = buffer.split_off_frames(2);
+
+        assert_eq!(buffer.samples(), &[0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(tail.samples(), &[4.0, 5.0]);
+        assert_eq!(tail.pts(), Duration::from_nanos(10_041_666));
     }
 
     #[test]

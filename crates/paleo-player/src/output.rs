@@ -42,6 +42,11 @@ impl Output {
         self.0.capacity()
     }
 
+    /// Returns the number of complete PCM frames that fit in the device ring.
+    pub(crate) fn vacant_frames(&self) -> usize {
+        self.0.vacant_frames()
+    }
+
     /// Returns the media position the device has played.
     pub(crate) fn position(&self) -> Duration {
         self.0.position()
@@ -101,6 +106,10 @@ impl Output {
     }
 
     pub(crate) fn capacity(&self) -> Duration {
+        match *self {}
+    }
+
+    pub(crate) fn vacant_frames(&self) -> usize {
         match *self {}
     }
 

@@ -266,9 +266,10 @@ Paleo audio ──► PcmConverter ──► AudioOutput ring ──► device
   usable output device falls back to the wall-clock behavior of `PaleoSession`;
   `PaleoSession::warning` reports why audio was skipped.
 - Audio is queued ahead of the device up to 300 ms, bounded by the device ring.
-  The ring drops the remainder rather than blocking, so a stalled decoder cannot
-  grow the queue. Video is limited to three queued pictures, so the demuxer
-  cannot race ahead of the device and reach end-of-stream early.
+  When a converted PCM block does not fit, the player keeps its unqueued tail
+  and resumes it on the next update instead of dropping samples. Video is
+  limited to three queued pictures, so the demuxer cannot race ahead of the
+  device and reach end-of-stream early.
 - Seeking searches back for the preceding keyframe, repositions audio and video
   together, resets the converter and output clock to the requested position, and
   trims audio and video decoded before the target. The decoder resumes at a

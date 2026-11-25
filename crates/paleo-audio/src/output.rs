@@ -333,6 +333,12 @@ impl AudioOutput {
         usize::try_from(buffered).unwrap_or(usize::MAX) / self.format.channels()
     }
 
+    /// Returns the number of complete frames that fit in the ring immediately.
+    #[must_use]
+    pub fn vacant_frames(&self) -> usize {
+        self.producer.vacant_len() / self.format.channels()
+    }
+
     /// Returns how much audio is waiting in the ring.
     #[must_use]
     pub fn buffered(&self) -> Duration {
