@@ -56,6 +56,9 @@
 //!   device. It implies `media`.
 //! - `director` enables `MediaDirector`, which maps window lifecycle events to
 //!   playback policy. It implies `media`.
+//! - `agent` enables the LLM agent bridge and [`agent`].
+//! - `agent-serve` enables the bridge's loopback TCP endpoint. It implies
+//!   `agent`.
 //!
 //! `gpu`, `browser`, and `media` are enabled by default; `audio` and
 //! `director` are opt-in. Use `--no-default-features` for a headless build that
@@ -79,9 +82,9 @@ pub use drawen_ui::{
     FontMetrics, FontSize, FontStyle, FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand,
     LayoutContext, LayoutResult, LightTheme, OverlayAlign, OverlayOptions, OverlayPlacement,
     OverlaySide, Property, PropertyDamage, PseudoClass, ResizeEdge, ResolvedOverlay, Row,
-    RuntimeStats, Selector, Signal, StyleRule, StyleSheet, StyleTarget, Styled, Subscription,
-    SurfaceStyle, SystemAppearance, SystemTheme, Theme, UiEnvironment, UiRuntime, UiRuntimeError,
-    Widget, WindowCommand, place_overlay,
+    RuntimeStats, Selector, SemanticNode, SemanticTree, Signal, StyleRule, StyleSheet, StyleTarget,
+    Styled, Subscription, SurfaceStyle, SystemAppearance, SystemTheme, Theme, UiEnvironment,
+    UiRuntime, UiRuntimeError, Widget, WindowCommand, place_overlay,
 };
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
@@ -147,6 +150,20 @@ pub mod platform {
             }),
         }
     }
+}
+
+/// Graphics-free observation and control of the UI for LLM agents.
+///
+/// [`Agent`](crate::agent::Agent) renders the semantic tree as compact text or
+/// JSON and applies agent commands through the same accessibility and input
+/// paths a human uses. With the `agent-serve` feature,
+/// [`AgentServer`](crate::agent::AgentServer) exposes a loopback JSON-lines
+/// endpoint an external model process can drive. See `docs/AGENT.md`.
+#[cfg(feature = "agent")]
+pub mod agent {
+    #[cfg(feature = "agent-serve")]
+    pub use drawen_agent::AgentServer;
+    pub use drawen_agent::{Agent, Command, Modifier, Reply, Snapshot, SnapshotNode, Target};
 }
 
 /// Worker-thread execution, cancellation, and the UI-thread bridge.

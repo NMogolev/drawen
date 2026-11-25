@@ -14,6 +14,7 @@ members = [
     "crates/drawen-ui",
     "crates/drawen-widgets",
     "crates/drawen-tasks",
+    "crates/drawen-agent",
     "crates/drawen-software",
     "crates/drawen-wgpu",
     "crates/drawen-platform",

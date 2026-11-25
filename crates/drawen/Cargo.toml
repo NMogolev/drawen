@@ -29,8 +29,13 @@ media = ["drawen-widgets/media"]
 audio = ["media", "drawen-widgets/audio"]
 # Enables the optional media director runtime.
 director = ["dep:drawen-director", "media"]
+# Enables the LLM agent bridge and `drawen::agent`.
+agent = ["dep:drawen-agent"]
+# Enables the loopback TCP server in the agent bridge.
+agent-serve = ["agent", "drawen-agent/serve"]
 
 [dependencies]
+drawen-agent = { version = "0.3", path = "../drawen-agent", optional = true }
 drawen-browser = { version = "0.3", path = "../drawen-browser", optional = true }
 drawen-core = { version = "0.3", path = "../drawen-core" }
 drawen-director = { version = "0.3", path = "../drawen-director", optional = true }

@@ -1209,6 +1209,24 @@ impl UiRuntime {
         }
     }
 
+    /// Re-runs layout with the last constraints when invalidation discarded it.
+    ///
+    /// Agent bridges and headless tests call this after performing actions so
+    /// semantic bounds reflect the new state without recording a paint pass.
+    /// Does nothing while the layout is current or before the first layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::layout`] when a rebuild is needed.
+    pub fn ensure_layout(&mut self) -> Result<(), UiRuntimeError> {
+        if self.layout.is_none()
+            && let Some(constraints) = self.last_constraints
+        {
+            self.layout(constraints)?;
+        }
+        Ok(())
+    }
+
     /// Returns the most recently computed root layout, if any.
     #[must_use]
     pub const fn last_layout(&self) -> Option<&LayoutResult> {
