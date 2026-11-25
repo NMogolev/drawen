@@ -5,8 +5,8 @@ use drawen_core::{
 use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
-    AccessibilityState, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult,
-    Signal, StyleTarget, UiEnvironment, Widget,
+    AccessibilityState, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult, Signal,
+    StyleTarget, UiEnvironment, Widget,
 };
 
 use crate::text_editor::TextEditor;
@@ -192,7 +192,8 @@ impl CommandPalette {
     /// Returns the original index of the active command, if any.
     #[must_use]
     pub fn active_command(&self) -> Option<usize> {
-        self.active.and_then(|index| self.filtered.get(index).copied())
+        self.active
+            .and_then(|index| self.filtered.get(index).copied())
     }
 
     /// Returns a signal emitted with the executed command's original index.
@@ -212,7 +213,9 @@ impl CommandPalette {
             .commands
             .iter()
             .enumerate()
-            .filter(|(_, command)| query.is_empty() || command.label().to_lowercase().contains(&query))
+            .filter(|(_, command)| {
+                query.is_empty() || command.label().to_lowercase().contains(&query)
+            })
             .map(|(index, _)| index)
             .collect();
         self.active = previous
@@ -349,10 +352,8 @@ impl CommandPalette {
 
     fn hit_test_caret(&self, position: Point) -> usize {
         let origin = self.query_text_origin();
-        self.query_layout.byte_at_point(Point::new(
-            position.x - origin.x,
-            position.y - origin.y,
-        ))
+        self.query_layout
+            .byte_at_point(Point::new(position.x - origin.x, position.y - origin.y))
     }
 
     /// Applies `edit`, refiltering and requesting layout when the query changed.
@@ -649,10 +650,9 @@ impl Widget for CommandPalette {
         self.hint_layouts.clear();
         let mut row_width: f32 = 0.0;
         for command in &self.commands {
-            let layout =
-                environment
-                    .text_shaper()
-                    .layout(command.label(), &text_style, None);
+            let layout = environment
+                .text_shaper()
+                .layout(command.label(), &text_style, None);
             let mut width = layout.size().width();
             self.label_layouts.push(Some(layout));
             let hint = command.hint().map(|hint| {
@@ -675,9 +675,11 @@ impl Widget for CommandPalette {
 
         let inner_width = (row_width + ITEM_INSET * 2.0)
             .max(self.query_layout.size().width() + ITEM_INSET * 2.0)
-            .max(self.placeholder_layout.as_ref().map_or(0.0, |layout| {
-                layout.size().width() + ITEM_INSET * 2.0
-            }));
+            .max(
+                self.placeholder_layout
+                    .as_ref()
+                    .map_or(0.0, |layout| layout.size().width() + ITEM_INSET * 2.0),
+            );
         let width = (inner_width + self.padding.horizontal()).max(MIN_WIDTH);
         #[allow(clippy::cast_precision_loss)]
         let rows_height = self.visible_rows() as f32 * ROW_HEIGHT;
@@ -889,7 +891,7 @@ mod tests {
     };
     use drawen_ui::UiRuntime;
 
-    use super::{CommandPalette, PaletteCommand, DEFAULT_PADDING, DIVIDER_GAP, ROW_HEIGHT};
+    use super::{CommandPalette, DEFAULT_PADDING, DIVIDER_GAP, PaletteCommand, ROW_HEIGHT};
     use crate::Modal;
 
     fn size(width: f32, height: f32) -> Size {
@@ -1055,9 +1057,7 @@ mod tests {
         runtime
             .layout(Constraints::tight(size(600.0, 600.0)).expect("valid constraints"))
             .expect("layout succeeds");
-        runtime
-            .focus_widget(palette)
-            .expect("palette is focusable");
+        runtime.focus_widget(palette).expect("palette is focusable");
 
         let _ = runtime.dispatch_event(&key(NamedKey::Enter));
         assert_eq!(*executed.borrow(), vec![0]);

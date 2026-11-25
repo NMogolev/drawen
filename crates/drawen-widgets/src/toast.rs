@@ -299,9 +299,7 @@ impl Widget for ToastHost {
         let theme = environment.theme();
         self.viewport = context.viewport();
         self.padding = style.padding.unwrap_or(CARD_PADDING);
-        self.radius = style
-            .corner_radius
-            .unwrap_or_else(|| theme.corner_radius());
+        self.radius = style.corner_radius.unwrap_or_else(|| theme.corner_radius());
         self.fade_in = theme.animation_duration();
         self.fade_out = self.fade_in.saturating_mul(2);
         self.reduced_motion = !environment.animations_enabled() || self.fade_in.is_zero();
@@ -334,8 +332,8 @@ impl Widget for ToastHost {
                 &TextStyle::new_with_font(font.clone(), theme.foreground()),
                 Some(max_text_width),
             );
-            let width = (layout.size().width() + self.padding.horizontal())
-                .clamp(MIN_WIDTH, MAX_WIDTH);
+            let width =
+                (layout.size().width() + self.padding.horizontal()).clamp(MIN_WIDTH, MAX_WIDTH);
             let height = layout.size().height() + self.padding.vertical();
             let x = match self.corner {
                 ToastCorner::TopLeft | ToastCorner::BottomLeft => viewport.origin.x + self.margin,
@@ -343,7 +341,13 @@ impl Widget for ToastHost {
                     viewport.right() - self.margin - width
                 }
             };
-            cards.push((Point::new(x, 0.0), size(width, height), tone, self.alpha(entry), layout));
+            cards.push((
+                Point::new(x, 0.0),
+                size(width, height),
+                tone,
+                self.alpha(entry),
+                layout,
+            ));
             total_height += height;
         }
         #[allow(clippy::cast_precision_loss)]
@@ -367,22 +371,13 @@ impl Widget for ToastHost {
             let (origin, card_size, tone, alpha, layout) = cards[index].clone();
             let card = Rect::new(Point::new(origin.x, y), card_size);
             let shadow = Rect::new(Point::new(card.origin.x, card.origin.y + 2.0), card.size);
-            context.fill_rounded_rect(
-                shadow,
-                self.radius,
-                theme.shadow().with_alpha(0.35 * alpha),
-            );
+            context.fill_rounded_rect(shadow, self.radius, theme.shadow().with_alpha(0.35 * alpha));
             context.fill_rounded_rect(
                 card,
                 self.radius,
                 blend(theme.raised_surface(), tone, 0.10).with_alpha(alpha),
             );
-            context.stroke_rounded_rect(
-                card,
-                self.radius,
-                1.0,
-                theme.border().with_alpha(alpha),
-            );
+            context.stroke_rounded_rect(card, self.radius, 1.0, theme.border().with_alpha(alpha));
             let stripe_height = (card.size.height() - 12.0).max(0.0);
             if stripe_height > 0.0 {
                 context.fill_rounded_rect(
@@ -396,7 +391,9 @@ impl Widget for ToastHost {
             }
             let text_height = layout.size().height();
             context.draw_text(
-                layout.clone().with_color(theme.foreground().with_alpha(alpha)),
+                layout
+                    .clone()
+                    .with_color(theme.foreground().with_alpha(alpha)),
                 Point::new(
                     card.origin.x + self.padding.left,
                     card.origin.y + (card.size.height() - text_height) / 2.0,
@@ -537,7 +534,7 @@ mod tests {
         runtime.advance_animations(Duration::from_millis(200));
         assert!(handle.is_empty());
         let texts = painted_texts(&mut runtime);
-        assert!(texts.is_empty());
+        assert_eq!(texts, [] as [(std::string::String, drawen_core::Point); 0]);
     }
 
     #[test]
@@ -595,7 +592,10 @@ mod tests {
         handle.clear();
         assert!(handle.is_empty());
         runtime.advance_animations(Duration::from_millis(16));
-        assert!(painted_texts(&mut runtime).is_empty());
+        assert_eq!(
+            painted_texts(&mut runtime),
+            [] as [(std::string::String, drawen_core::Point); 0]
+        );
     }
 
     #[test]

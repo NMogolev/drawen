@@ -186,15 +186,15 @@ impl Widget for SplitButton {
         let font = environment.font_for(&style);
         self.padding = style.padding.unwrap_or_else(|| theme.control_padding());
         self.text_color = style.foreground_or(theme.foreground());
-        self.idle_color = style.background.unwrap_or_else(|| theme.control_background());
+        self.idle_color = style
+            .background
+            .unwrap_or_else(|| theme.control_background());
         self.hover_color = theme.control_hover_background();
         self.pressed_color = theme.control_pressed_background();
         self.border_color = style
             .border
             .map_or_else(|| theme.border(), |border| border.color);
-        self.radius = style
-            .corner_radius
-            .unwrap_or_else(|| theme.corner_radius());
+        self.radius = style.corner_radius.unwrap_or_else(|| theme.corner_radius());
 
         let label_layout = environment.text_shaper().layout(
             &self.label,
@@ -207,10 +207,8 @@ impl Widget for SplitButton {
         let primary_width = label_layout.size().width() + self.padding.horizontal();
         let arrow_width = height;
         self.label_layout = Some(label_layout);
-        self.size = constraints.constrain(size(
-            primary_width + DIVIDER_WIDTH + arrow_width,
-            height,
-        ));
+        self.size =
+            constraints.constrain(size(primary_width + DIVIDER_WIDTH + arrow_width, height));
         self.arrow_x = primary_width + DIVIDER_WIDTH;
         self.has_content = context.child_count() > 0;
 
@@ -484,10 +482,7 @@ mod tests {
     fn sample() -> (SplitButton, Menu) {
         (
             SplitButton::new("Save"),
-            Menu::new([
-                MenuEntry::item("Save as…"),
-                MenuEntry::item("Save all"),
-            ]),
+            Menu::new([MenuEntry::item("Save as…"), MenuEntry::item("Save all")]),
         )
     }
 
