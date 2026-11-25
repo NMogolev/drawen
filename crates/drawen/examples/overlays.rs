@@ -2,12 +2,14 @@
 //! palette, and toast notifications.
 //!
 //! `Tooltip` wraps one anchor. `Popover` takes an anchor plus floating content,
-//! and `Menu` supplies the rows. `Modal` hosts a centered `Dialog` above a scrim
-//! and traps focus inside it; a `CommandPalette` uses the same modal layer for
-//! a searchable command list. `ToastHost` paints transient notifications above
-//! everything through the floating paint pass. The runtime measures floating
-//! and modal content only while it is open, flips anchored content when the
-//! window edge is too close, and paints both above the rest of the tree.
+//! and `Menu` supplies the rows. `SplitButton` joins a primary action to a
+//! dropdown arrow that floats the same kind of menu. `Modal` hosts a centered
+//! `Dialog` above a scrim and traps focus inside it; a `CommandPalette` uses the
+//! same modal layer for a searchable command list. `ToastHost` paints transient
+//! notifications above everything through the floating paint pass. The runtime
+//! measures floating and modal content only while it is open, flips anchored
+//! content when the window edge is too close, and paints both above the rest of
+//! the tree.
 //!
 //! Run it with `cargo run -p drawen --example overlays`.
 
@@ -20,8 +22,8 @@ use std::{
 use drawen::{
     Border, Box, Button, Color, Column, CommandPalette, Constraints, Dialog, Insets, LayoutContext,
     LayoutResult, Menu, MenuEntry, Modal, OverlayPlacement, Padding, PaletteCommand, Popover,
-    PopoverTrigger, Rect, Row, Size, SizedBox, Subscription, Text, Toast, ToastHost, ToastTone,
-    Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
+    PopoverTrigger, Rect, Row, Size, SizedBox, SplitButton, Subscription, Text, Toast, ToastHost,
+    ToastTone, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -116,6 +118,15 @@ impl OverlayDemo {
             column,
             &status,
             &dirty,
+            &pending_focus,
+            &mut subscriptions,
+        );
+        build_split_button(
+            &mut runtime,
+            column,
+            &status,
+            &dirty,
+            &pending_layout,
             &pending_focus,
             &mut subscriptions,
         );
@@ -285,6 +296,82 @@ fn build_dropdown(
         let dirty = Rc::clone(dirty);
         move |()| {
             *status.borrow_mut() = "Menu closed.".to_string();
+            dirty.set(true);
+        }
+    }));
+}
+
+/// Adds a split button: the left segment saves, the arrow floats a menu.
+fn build_split_button(
+    runtime: &mut UiRuntime,
+    column: WidgetId,
+    status: &Rc<RefCell<String>>,
+    dirty: &Rc<Cell<bool>>,
+    pending_layout: &Rc<Cell<bool>>,
+    pending_focus: &Rc<Cell<Option<WidgetId>>>,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let row = Padding::new(Insets::new(18.0, 0.0, 0.0, 0.0));
+    let row = runtime
+        .append_child(column, row)
+        .expect("column accepts children");
+
+    let split_widget = SplitButton::new("Save");
+    let activated = split_widget.activated();
+    let opened = split_widget.opened();
+    let closed = split_widget.closed();
+    let split = runtime
+        .append_child(row, split_widget)
+        .expect("row accepts children");
+
+    let menu_widget = Menu::new([
+        MenuEntry::item("Save as…").with_shortcut("Ctrl+Shift+S"),
+        MenuEntry::item("Save all").with_shortcut("Ctrl+Alt+S"),
+    ]);
+    let selected = menu_widget.selected();
+    let menu = runtime
+        .append_child(split, menu_widget)
+        .expect("split button accepts its menu");
+
+    subscriptions.push(activated.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            *status.borrow_mut() = "Saved the document".to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(selected.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        move |index| {
+            let message = match *index {
+                0 => "Save as… requested",
+                _ => "Saved all documents",
+            };
+            *status.borrow_mut() = message.to_string();
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(opened.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        let pending_focus = Rc::clone(pending_focus);
+        move |()| {
+            *status.borrow_mut() = "Save menu opened. Use the arrow keys and Enter.".to_string();
+            pending_layout.set(true);
+            pending_focus.set(Some(menu));
+            dirty.set(true);
+        }
+    }));
+    subscriptions.push(closed.subscribe({
+        let status = Rc::clone(status);
+        let dirty = Rc::clone(dirty);
+        let pending_layout = Rc::clone(pending_layout);
+        move |()| {
+            *status.borrow_mut() = "Save menu closed.".to_string();
+            pending_layout.set(true);
             dirty.set(true);
         }
     }));

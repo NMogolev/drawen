@@ -54,6 +54,11 @@ in the headings because the version itself must stay valid semver; see
   and out, and removes them when their duration elapses via
   `Widget::advance_animation`. The queue caps at five toasts; `show`,
   `dismiss`, and `clear` manage it through the shared handle.
+- Added `SplitButton`, a primary action joined to a dropdown arrow. The left
+  segment emits `activated()`; the arrow toggles a floating `Menu` supplied as
+  the widget's single child, anchored below the button through the overlay
+  layer with light dismissal. `opened()` / `closed()` report menu transitions,
+  Enter and Space activate the primary segment, and `ArrowDown` opens the menu.
 
 ### Fonts
 

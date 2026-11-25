@@ -659,3 +659,61 @@ Rules for toasts:
   computes card geometry at paint time from the live queue.
 - Keep messages short. Cards wrap at 360 logical pixels and never take focus.
 
+## 12. A split button
+
+A `SplitButton` joins a primary action to a dropdown arrow. The left segment
+runs the default action and emits `activated()`; the right segment toggles a
+floating menu supplied as the widget's single child, usually a `Menu`:
+
+```rust
+use drawen::{Menu, MenuEntry, SplitButton};
+
+let split = SplitButton::new("Save");
+let activated = split.activated();
+let opened = split.opened();
+let split = runtime.append_child(parent, split)?;
+
+let menu = Menu::new([
+    MenuEntry::item("Save as…").with_shortcut("Ctrl+Shift+S"),
+    MenuEntry::item("Save all"),
+]);
+let selected = menu.selected();
+let menu = runtime.append_child(split, menu)?;
+```
+
+The menu floats through the same overlay layer as `Popover`, anchored below the
+button and aligned to its trailing edge. It is measured only while open. Light
+dismissal is on by default: an outside primary click, Escape, or window focus
+loss closes the menu, and selecting a row dismisses it through the same path.
+
+Wire the signals like any other overlay:
+
+- `activated()` fires on a completed primary-segment click, Enter, or Space.
+- `opened()` / `closed()` fire on every menu transition. On `opened`, invalidate
+  layout and focus the menu after the next pass so arrow keys work immediately.
+- The child menu's `selected(index)` reports the chosen row; the split button
+  closes itself, so do not call `set_open(false)` from the handler.
+
+```rust
+subscriptions.push(opened.subscribe({
+    let pending_layout = Rc::clone(&pending_layout);
+    let pending_focus = Rc::clone(&pending_focus);
+    move |()| {
+        pending_layout.set(true);
+        pending_focus.set(Some(menu));
+    }
+}));
+```
+
+Rules for split buttons:
+
+- Give the widget exactly one child: the floating menu. The primary label is a
+  string passed to `new`, not a `Text` child.
+- `ArrowDown` opens the menu from the keyboard; Enter and Space always activate
+  the primary segment, never the arrow.
+- Style it through the `split-button` style target; padding, background, border,
+  corner radius, and foreground resolve from DSS or the theme. The arrow segment
+  shares the surface and is separated by a one-pixel divider.
+- Call `set_open` only from plain state changes and pair it with
+  `invalidate_layout`; pointer and keyboard paths request layout themselves.
+

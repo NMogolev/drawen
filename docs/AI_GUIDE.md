@@ -54,6 +54,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `dialog.show()` that also lays out | `ModalHandle::open()`, then `runtime.invalidate_layout()`; focus after the next layout |
 | A searchable command palette | `Modal` + `CommandPalette::new([PaletteCommand::new("...")])`; `executed(index)` dismisses the modal |
 | Transient corner notifications | `ToastHost` + `ToastHandle::show(Toast::new("..."))`; cards paint above the tree and expire on their own |
+| A primary action plus a dropdown | `SplitButton::new("Save")` with one `Menu` child; `activated()` runs the action, the arrow floats the menu |
 
 ## Q&A
 
@@ -199,6 +200,28 @@ Invalidate paint afterwards, not layout. Toasts fade in, expire after their
 duration, and remove themselves; `next_frame_in()` schedules the frames while
 any toast is queued. They are non-interactive — do not put buttons in them.
 See [RECIPES.md](RECIPES.md#11-toast-notifications).
+
+### "Add a split button with a dropdown."
+
+`SplitButton::new("Save")` takes the primary label as a string, not a `Text`
+child. Append exactly one child: the floating `Menu`.
+
+```rust
+let split = SplitButton::new("Save");
+let activated = split.activated();
+let opened = split.opened();
+let split = runtime.append_child(parent, split)?;
+let menu = Menu::new([MenuEntry::item("Save as…"), MenuEntry::item("Save all")]);
+let selected = menu.selected();
+let menu = runtime.append_child(split, menu)?;
+```
+
+The left segment emits `activated()`; the arrow toggles the menu, which floats
+below the button through the overlay layer with light dismissal. On `opened`,
+invalidate layout and focus the menu after the next pass. Enter and Space always
+activate the primary segment; `ArrowDown` opens the menu. Do not close the menu
+from `selected` — the split button dismisses itself.
+See [RECIPES.md](RECIPES.md#12-a-split-button).
 
 ### "Play this MP4 and turn on the sound."
 
