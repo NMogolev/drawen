@@ -117,8 +117,10 @@ widget state.
   state changed.
 - The dispatcher channel is unbounded. If a producer can outrun the UI, send
   the newest value only (replace state) instead of a complete history.
-- `UiDispatcher::new` calls the wake callback after every successful send. The
-  callback should only wake the event loop, never touch widgets.
+- `UiDispatcher` coalesces wake-ups: while a wake is pending, further sends
+  queue their values without calling the wake callback again, and receiving
+  re-arms the wake for anything that arrived mid-drain. The callback should
+  only wake the event loop, never touch widgets.
 - `UiSender::send` returns `UiSendError` with the value back when the window
   has closed, so a worker can stop early instead of computing for nothing.
 

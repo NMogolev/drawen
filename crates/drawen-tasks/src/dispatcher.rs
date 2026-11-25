@@ -1,7 +1,7 @@
 use core::fmt;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{self, Receiver, Sender},
 };
 
@@ -32,19 +32,21 @@ impl QueueDepth {
     }
 
     fn get(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::SeqCst)
     }
 }
 
 /// The worker-side half of a [`UiDispatcher`].
 ///
 /// The sender is clonable, `Send`, and `Sync`, so it can be captured by any
-/// number of tasks. Every successful send invokes the wake callback supplied to
-/// [`UiDispatcher::new`]; that callback should only nudge the event loop, not
-/// run application logic.
+/// number of tasks. Wake-ups are coalesced: the wake callback supplied to
+/// [`UiDispatcher::new`] runs once per pending batch, so a burst of sends
+/// nudges the event loop once instead of once per value. The callback should
+/// only nudge the event loop, not run application logic.
 pub struct UiSender<T> {
     sender: Sender<T>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    wake_pending: Arc<AtomicBool>,
     depth: QueueDepth,
 }
 
@@ -53,7 +55,8 @@ impl<T> UiSender<T> {
     ///
     /// The send itself never blocks. The value becomes available on the UI
     /// thread through [`UiDispatcher::drain`] or
-    /// [`UiDispatcher::try_recv`].
+    /// [`UiDispatcher::try_recv`]. While a wake-up is still pending, further
+    /// sends queue their values without invoking the wake callback again.
     ///
     /// # Errors
     ///
@@ -63,7 +66,9 @@ impl<T> UiSender<T> {
         self.depth.increase();
         match self.sender.send(value) {
             Ok(()) => {
-                (self.wake)();
+                if !self.wake_pending.swap(true, Ordering::SeqCst) {
+                    (self.wake)();
+                }
                 Ok(())
             }
             Err(error) => {
@@ -79,6 +84,7 @@ impl<T> Clone for UiSender<T> {
         Self {
             sender: self.sender.clone(),
             wake: Arc::clone(&self.wake),
+            wake_pending: Arc::clone(&self.wake_pending),
             depth: self.depth.clone(),
         }
     }
@@ -149,28 +155,35 @@ pub struct UiDispatcher<T> {
     receiver: Receiver<T>,
     sender: Sender<T>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    wake_pending: Arc<AtomicBool>,
     depth: QueueDepth,
 }
 
 impl<T> UiDispatcher<T> {
     /// Creates a dispatcher and its worker-side sender.
     ///
-    /// `wake` is invoked after each successful send. It should perform a cheap
+    /// `wake` is invoked when a send arrives while no wake-up is pending;
+    /// bursts of sends coalesce into one call. It should perform a cheap
     /// thread-safe wake-up, such as sending a user event to the native event
-    /// loop; it must not touch the widget tree.
+    /// loop; it must not touch the widget tree. Receiving values re-arms the
+    /// wake-up, so values sent while the UI thread is draining are never
+    /// stranded without a wake.
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> (Self, UiSender<T>) {
         let (sender, receiver) = mpsc::channel();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let wake_pending = Arc::new(AtomicBool::new(false));
         let depth = QueueDepth::default();
         let dispatcher = Self {
             receiver,
             sender: sender.clone(),
             wake: Arc::clone(&wake),
+            wake_pending: Arc::clone(&wake_pending),
             depth: depth.clone(),
         };
         let ui_sender = UiSender {
             sender,
             wake,
+            wake_pending,
             depth,
         };
         (dispatcher, ui_sender)
@@ -185,7 +198,20 @@ impl<T> UiDispatcher<T> {
         UiSender {
             sender: self.sender.clone(),
             wake: Arc::clone(&self.wake),
+            wake_pending: Arc::clone(&self.wake_pending),
             depth: self.depth.clone(),
+        }
+    }
+
+    /// Clears the pending wake-up and re-arms it when values remain queued.
+    ///
+    /// A sender that observed the pending flag skips its wake-up, so after
+    /// receiving, the dispatcher must check for values that arrived while it
+    /// was draining and wake the loop for them itself.
+    fn rearm_wake(&self) {
+        self.wake_pending.store(false, Ordering::SeqCst);
+        if self.depth.get() > 0 && !self.wake_pending.swap(true, Ordering::SeqCst) {
+            (self.wake)();
         }
     }
 
@@ -195,6 +221,7 @@ impl<T> UiDispatcher<T> {
         let value = self.receiver.try_recv().ok();
         if value.is_some() {
             self.depth.decrease(1);
+            self.rearm_wake();
         }
         value
     }
@@ -207,6 +234,7 @@ impl<T> UiDispatcher<T> {
     pub fn drain(&self) -> Vec<T> {
         let values: Vec<T> = self.receiver.try_iter().collect();
         self.depth.decrease(values.len());
+        self.rearm_wake();
         values
     }
 
@@ -215,6 +243,7 @@ impl<T> UiDispatcher<T> {
         let before = buffer.len();
         buffer.extend(self.receiver.try_iter());
         self.depth.decrease(buffer.len() - before);
+        self.rearm_wake();
     }
 
     /// Returns whether no values are waiting.

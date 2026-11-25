@@ -26,10 +26,97 @@ fn worker_messages_are_delivered_and_wake_the_ui() {
     sender.send(1).expect("dispatcher is alive");
     sender.send(2).expect("dispatcher is alive");
 
-    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
     assert_eq!(dispatcher.len(), 2);
     assert_eq!(dispatcher.drain(), vec![1, 2]);
     assert!(dispatcher.is_empty());
+
+    sender.send(3).expect("dispatcher is alive");
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    assert_eq!(dispatcher.drain(), vec![3]);
+}
+
+#[test]
+fn a_burst_of_sends_coalesces_into_one_wake() {
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let (dispatcher, sender) = {
+        let wakes = Arc::clone(&wakes);
+        UiDispatcher::new(move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+
+    for value in 0..1000 {
+        sender.send(value).expect("dispatcher is alive");
+    }
+
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatcher.drain().len(), 1000);
+    assert!(dispatcher.is_empty());
+}
+
+#[test]
+fn receiving_rearms_the_wake_while_values_remain() {
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let (dispatcher, sender) = {
+        let wakes = Arc::clone(&wakes);
+        UiDispatcher::new(move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+
+    sender.send(1).expect("dispatcher is alive");
+    sender.send(2).expect("dispatcher is alive");
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+    assert_eq!(dispatcher.try_recv(), Some(1));
+    // One value is still queued, so the wake-up must be pending again.
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    assert_eq!(dispatcher.try_recv(), Some(2));
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+
+    sender.send(3).expect("dispatcher is alive");
+    assert_eq!(wakes.load(Ordering::SeqCst), 3);
+    assert_eq!(dispatcher.drain(), vec![3]);
+}
+
+#[test]
+fn wake_driven_draining_never_strands_values() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const PER_SENDER: usize = 10_000;
+
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let (dispatcher, sender) = UiDispatcher::new(move || {
+        let _ = wake_tx.send(());
+    });
+
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                for value in 0..PER_SENDER {
+                    sender.send(value).expect("dispatcher is alive");
+                }
+            })
+        })
+        .collect();
+
+    // Drain only when a wake-up arrives, like an event loop would. A lost
+    // wake-up leaves values queued with no signal, and the wait times out.
+    let mut received = 0usize;
+    while received < PER_SENDER * 2 {
+        wake_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a wake-up arrives for every batch");
+        received += dispatcher.drain().len();
+    }
+    assert!(dispatcher.is_empty());
+
+    for worker in workers {
+        worker.join().expect("no sender panics");
+    }
 }
 
 #[test]
