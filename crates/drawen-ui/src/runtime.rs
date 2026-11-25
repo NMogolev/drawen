@@ -284,6 +284,7 @@ impl LayoutContext<'_> {
             .overlay_constraints(constraints, options.margin);
         // Register the root before measuring so nested overlays created by the
         // content are painted after it.
+        self.runtime.remember_overlay_focus(id);
         self.runtime.overlay_roots.push(id);
         let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
         let origin = overlay::place_overlay(
@@ -314,7 +315,8 @@ impl LayoutContext<'_> {
     /// The child is centered in the runtime viewport, registered as a modal
     /// overlay root, and painted above the normal tree over a themed scrim.
     /// While a modal is visible it blocks pointer input to everything behind it
-    /// and confines sequential focus traversal to its subtree.
+    /// and confines sequential focus traversal to its subtree. When the modal
+    /// closes, focus returns to the widget that held it when the modal opened.
     ///
     /// Pass loose constraints bounded by the viewport so the child can choose
     /// its own size. The returned origin is relative to the parent and should
@@ -338,6 +340,7 @@ impl LayoutContext<'_> {
             .ok_or(UiRuntimeError::InvalidWidgetId)?;
         // Register the root before measuring so nested overlays created by the
         // content are painted after it.
+        self.runtime.remember_overlay_focus(id);
         self.runtime.overlay_roots.push(id);
         let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
         let origin = self.runtime.viewport.map_or(Point::ZERO, |viewport| {
@@ -385,6 +388,9 @@ pub struct UiRuntime {
     redraw_requested: bool,
     environment: UiEnvironment,
     overlay_roots: Vec<WidgetId>,
+    /// Focus target to restore when each open overlay root closes, captured
+    /// when the root first registers. Keys are overlay roots, not owners.
+    overlay_restore_focus: HashMap<WidgetId, WidgetId>,
     viewport: Option<Rect>,
     clipboard: Rc<RefCell<Box<dyn Clipboard>>>,
     stats: FrameDiagnostics,
@@ -575,6 +581,7 @@ impl UiRuntime {
             redraw_requested: true,
             environment,
             overlay_roots: Vec::new(),
+            overlay_restore_focus: HashMap::new(),
             viewport: None,
             clipboard: Rc::new(RefCell::new(Box::new(drawen_core::MemoryClipboard::new()))),
             stats: RuntimeStats::default(),
@@ -996,7 +1003,10 @@ impl UiRuntime {
             self.stats.record_layout(Duration::ZERO, true);
             return self.layout.as_ref().ok_or(UiRuntimeError::InvalidLayout);
         }
-        self.overlay_roots.clear();
+        // Keep the previous stacking order: overlay roots register in tree
+        // order during layout, but the layer must stay LIFO by open time so a
+        // surface opened later paints and hit tests above earlier ones.
+        let previous_roots = std::mem::take(&mut self.overlay_roots);
         self.viewport = viewport_for(constraints);
         for slot in &mut self.nodes {
             if let Some(node) = &mut slot.node {
@@ -1009,6 +1019,18 @@ impl UiRuntime {
             self.layout_node(self.root, constraints, Point::ZERO)
         })) {
             Ok(Ok(layout)) => {
+                let registered = std::mem::take(&mut self.overlay_roots);
+                let mut ordered: Vec<WidgetId> = previous_roots
+                    .into_iter()
+                    .filter(|id| registered.contains(id))
+                    .collect();
+                for id in registered {
+                    if !ordered.contains(&id) {
+                        ordered.push(id);
+                    }
+                }
+                self.overlay_roots = ordered;
+                self.restore_closed_overlay_focus();
                 self.layout = Some(layout);
                 self.last_constraints = Some(constraints);
                 self.redraw_requested = true;
@@ -1440,13 +1462,23 @@ impl UiRuntime {
     /// nothing. A click on an overlay's own anchor is also left to that
     /// overlay's trigger logic so a toggle can close and reopen it in one step.
     fn dismiss_overlays_at(&mut self, position: Point) {
-        if self.overlay_roots.iter().copied().any(|id| {
-            self.is_visible(id)
-                && self
-                    .node(id)
-                    .is_some_and(|node| node.bounds.contains(position))
-        }) {
-            return;
+        // Walk the stack top-down. A click inside the topmost overlay at this
+        // position is delivered normally; overlays behind the topmost modal are
+        // covered by its scrim and must not suppress light dismissal.
+        let top_modal = self.modal_overlay();
+        for id in self.overlay_roots.iter().rev().copied() {
+            if !self.is_visible(id) {
+                continue;
+            }
+            if self
+                .node(id)
+                .is_some_and(|node| node.bounds.contains(position))
+            {
+                return;
+            }
+            if top_modal == Some(id) {
+                break;
+            }
         }
         // While a modal is open, only the modal and overlays opened from inside
         // it may react to a click on the scrim. Surfaces behind it stay open.
@@ -2116,11 +2148,58 @@ impl UiRuntime {
         false
     }
 
-    /// Moves focus out of an overlay that is about to disappear.
+    /// Moves focus out of an overlay that is about to disappear, restoring it
+    /// to the widget that held focus when the overlay opened.
     fn release_overlay_focus(&mut self, overlay: WidgetId) {
-        if self.focus_within(overlay) {
-            self.set_focus(None);
+        if !self.focus_within(overlay) {
+            return;
         }
+        let restore = self.overlay_restore_focus.get(&overlay).copied();
+        let target = restore.filter(|id| {
+            self.is_visible(*id) && self.node(*id).is_some_and(|node| node.accepts_focus)
+        });
+        self.set_focus(target);
+    }
+
+    /// Records the focus target to restore when `overlay` closes.
+    ///
+    /// Captured once, when the overlay root first registers; later layouts keep
+    /// the original opener even after focus moves inside the overlay.
+    fn remember_overlay_focus(&mut self, overlay: WidgetId) {
+        if self.overlay_restore_focus.contains_key(&overlay) {
+            return;
+        }
+        if let Some(focused) = self.focused
+            && !self.focus_within(overlay)
+        {
+            self.overlay_restore_focus.insert(overlay, focused);
+        }
+    }
+
+    /// Restores focus for overlays that closed outside the dismissal path.
+    ///
+    /// Application code can close a surface through its own handle; the next
+    /// layout then drops the overlay root without calling `dismiss_overlay`.
+    /// Also prunes restore targets for roots that are no longer open.
+    fn restore_closed_overlay_focus(&mut self) {
+        let closed: Vec<WidgetId> = self
+            .overlay_restore_focus
+            .keys()
+            .copied()
+            .filter(|id| !self.overlay_roots.contains(id))
+            .collect();
+        for id in closed {
+            if self.focus_within(id) {
+                let restore = self.overlay_restore_focus[&id];
+                let target = Some(restore).filter(|target| {
+                    self.is_visible(*target)
+                        && self.node(*target).is_some_and(|node| node.accepts_focus)
+                });
+                self.set_focus(target);
+            }
+        }
+        self.overlay_restore_focus
+            .retain(|id, _| self.overlay_roots.contains(id));
     }
 
     fn dispatch_to(
@@ -2280,6 +2359,8 @@ impl UiRuntime {
         self.pointer_capture.retain(|_, captured| *captured != id);
         self.hovered.retain(|_, hovered| *hovered != id);
         self.overlay_roots.retain(|overlay| *overlay != id);
+        self.overlay_restore_focus.remove(&id);
+        self.overlay_restore_focus.retain(|_, target| *target != id);
         if self.focused == Some(id) {
             self.focused = None;
         }
@@ -2321,6 +2402,7 @@ impl UiRuntime {
         self.pointer_capture.clear();
         self.hovered.clear();
         self.overlay_roots.clear();
+        self.overlay_restore_focus.clear();
         self.focused = None;
     }
 
@@ -3627,5 +3709,252 @@ mod tests {
         let _ = runtime.dispatch_event(&escape());
         assert_eq!(dismissed.get(), 1);
         assert!(!open.get());
+    }
+
+    struct TwoPopupsProbe {
+        open_a: Rc<Cell<bool>>,
+        open_b: Rc<Cell<bool>>,
+    }
+
+    impl Widget for TwoPopupsProbe {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let anchor_size = size(10.0, 10.0);
+            let options = super::OverlayOptions::new(
+                super::overlay::OverlayPlacement::new(
+                    super::overlay::OverlaySide::Bottom,
+                    super::overlay::OverlayAlign::Start,
+                )
+                .with_offset(0.0),
+            )
+            .with_margin(0.0);
+            let (anchor_a, _) = context
+                .layout_child(
+                    0,
+                    Constraints::tight(anchor_size).expect("valid tight size"),
+                )
+                .expect("anchor a");
+            let mut children = vec![ChildLayout::new(anchor_a, Point::ZERO)];
+            if self.open_a.get() {
+                let (popup, _, origin) = context
+                    .layout_child_overlay(
+                        1,
+                        Constraints::loose(size(60.0, 60.0)),
+                        Rect::new(Point::ZERO, anchor_size),
+                        options,
+                    )
+                    .expect("popup a");
+                children.push(ChildLayout::new(popup, origin));
+            }
+            let (anchor_b, _) = context
+                .layout_child(
+                    2,
+                    Constraints::tight(anchor_size).expect("valid tight size"),
+                )
+                .expect("anchor b");
+            children.push(ChildLayout::new(anchor_b, Point::new(0.0, 40.0)));
+            if self.open_b.get() {
+                let (popup, _, origin) = context
+                    .layout_child_overlay(
+                        3,
+                        Constraints::loose(size(60.0, 60.0)),
+                        Rect::new(Point::new(0.0, 40.0), anchor_size),
+                        options,
+                    )
+                    .expect("popup b");
+                children.push(ChildLayout::new(popup, origin));
+            }
+            LayoutResult::with_children(constraints.constrain(size(100.0, 140.0)), children)
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+    }
+
+    #[test]
+    fn later_opened_overlay_stacks_above_earlier_ones() {
+        let open_a = Rc::new(Cell::new(false));
+        let open_b = Rc::new(Cell::new(false));
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = UiRuntime::new(TwoPopupsProbe {
+            open_a: Rc::clone(&open_a),
+            open_b: Rc::clone(&open_b),
+        });
+        let root = runtime.root();
+        for (name, color) in [
+            ("anchor-a", Color::rgba8(128, 128, 128, 255)),
+            ("popup-a", Color::rgba8(0, 0, 255, 255)),
+            ("anchor-b", Color::rgba8(128, 128, 128, 255)),
+            ("popup-b", Color::rgba8(0, 255, 0, 255)),
+        ] {
+            let side = if name.starts_with("anchor") { 10.0 } else { 60.0 };
+            runtime
+                .append_child(
+                    root,
+                    Solid {
+                        size: size(side, side),
+                        color,
+                        name,
+                        hits: Rc::clone(&hits),
+                    },
+                )
+                .expect("child");
+        }
+        let constraints = Constraints::tight(size(100.0, 140.0)).expect("valid constraints");
+        runtime.layout(constraints).expect("layout succeeds");
+
+        // Open popup B first even though popup A comes earlier in the tree.
+        open_b.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(constraints).expect("layout succeeds");
+        open_a.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(constraints).expect("layout succeeds");
+
+        // Both popups cover (20, 60); the one opened later must win.
+        let _ = runtime.dispatch_event(&pointer(Point::new(20.0, 60.0), true));
+        assert_eq!(*hits.borrow(), vec!["popup-a"]);
+
+        let mut display_list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut display_list))
+            .expect("paint succeeds");
+        let last_fill = display_list.commands().iter().rev().find_map(|command| {
+            if let DisplayCommand::FillRect { color, .. } = command {
+                Some(*color)
+            } else {
+                None
+            }
+        });
+        assert_eq!(last_fill, Some(Color::rgba8(0, 0, 255, 255)));
+    }
+
+    struct StackingProbe {
+        modal_open: Rc<Cell<bool>>,
+        popup_open: Rc<Cell<bool>>,
+        dismissed: Rc<Cell<usize>>,
+    }
+
+    impl Widget for StackingProbe {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let mut children = Vec::new();
+            if self.modal_open.get() {
+                let (panel, _, origin) = context
+                    .layout_child_modal(
+                        0,
+                        Constraints::loose(size(40.0, 20.0)),
+                        DismissPolicy::Light,
+                    )
+                    .expect("modal child");
+                children.push(ChildLayout::new(panel, origin));
+            }
+            let (anchor, _) = context
+                .layout_child(
+                    1,
+                    Constraints::tight(size(10.0, 10.0)).expect("valid tight size"),
+                )
+                .expect("anchor child");
+            children.push(ChildLayout::new(anchor, Point::ZERO));
+            if self.popup_open.get() {
+                let (popup, _, origin) = context
+                    .layout_child_overlay(
+                        2,
+                        Constraints::loose(size(60.0, 60.0)),
+                        Rect::new(Point::ZERO, size(10.0, 10.0)),
+                        super::OverlayOptions::new(
+                            super::overlay::OverlayPlacement::new(
+                                super::overlay::OverlaySide::Bottom,
+                                super::overlay::OverlayAlign::Start,
+                            )
+                            .with_offset(0.0),
+                        )
+                        .with_margin(0.0),
+                    )
+                    .expect("popup child");
+                children.push(ChildLayout::new(popup, origin));
+            }
+            LayoutResult::with_children(constraints.constrain(size(100.0, 100.0)), children)
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+
+        fn dismiss_overlay(&mut self) -> bool {
+            self.dismissed.set(self.dismissed.get() + 1);
+            self.modal_open.set(false);
+            true
+        }
+    }
+
+    #[test]
+    fn scrim_click_dismisses_modal_over_a_background_overlay() {
+        let modal_open = Rc::new(Cell::new(false));
+        let popup_open = Rc::new(Cell::new(true));
+        let dismissed = Rc::new(Cell::new(0));
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = UiRuntime::new(StackingProbe {
+            modal_open: Rc::clone(&modal_open),
+            popup_open: Rc::clone(&popup_open),
+            dismissed: Rc::clone(&dismissed),
+        });
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(40.0, 20.0),
+                    color: Color::rgba8(0, 0, 255, 255),
+                    name: "panel",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("panel");
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(10.0, 10.0),
+                    color: Color::rgba8(255, 0, 0, 255),
+                    name: "anchor",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("anchor");
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(60.0, 60.0),
+                    color: Color::rgba8(0, 255, 0, 255),
+                    name: "popup",
+                    hits: Rc::clone(&hits),
+                },
+            )
+            .expect("popup");
+        let constraints = Constraints::tight(size(100.0, 100.0)).expect("valid constraints");
+        runtime.layout(constraints).expect("popup layout succeeds");
+
+        // The modal opens after the popup but sits earlier in the tree; it must
+        // still stack on top, and its scrim must receive the click.
+        modal_open.set(true);
+        runtime.invalidate_layout();
+        runtime.layout(constraints).expect("modal layout succeeds");
+
+        // (5, 50) is on the scrim, inside the background popup's bounds but
+        // outside the centered panel (30, 40, 40x20).
+        let _ = runtime.dispatch_event(&pointer(Point::new(5.0, 50.0), true));
+        assert_eq!(dismissed.get(), 1, "scrim click must dismiss the modal");
+        assert!(!modal_open.get());
+        assert!(popup_open.get(), "surface behind the modal stays open");
+        assert!(hits.borrow().is_empty(), "dismissing click is consumed");
     }
 }
