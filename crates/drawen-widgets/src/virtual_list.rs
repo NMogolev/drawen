@@ -1028,12 +1028,19 @@ impl<D: VirtualDataSource> VirtualList<D> {
 }
 
 /// A virtualized, selectable table backed by a [`VirtualTableSource`].
+///
+/// The scroll offset is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&table.offset(), &state.offset)`. The offset selects the
+/// visible rows and their positions, so use `bind_layout`. The stored value is
+/// kept finite and non-negative; the upper bound depends on the row count and
+/// viewport and is applied on the next layout. Read the scalar with
+/// `table.offset().get()`.
 pub struct VirtualTable<D> {
     data: D,
     columns: Vec<Column>,
     row_height: f32,
     header_height: f32,
-    offset: f32,
+    offset: Property<f32>,
     viewport: Size,
     visible: Vec<VisibleTableRow>,
     cache: HashMap<u64, TableVisual>,
@@ -1103,7 +1110,7 @@ impl<D: VirtualTableSource> VirtualTable<D> {
             columns,
             row_height: ROW_HEIGHT,
             header_height: HEADER_HEIGHT,
-            offset: 0.0,
+            offset: Property::normalized(0.0, normalize_offset),
             viewport: Size::ZERO,
             visible: Vec::new(),
             cache: HashMap::new(),
@@ -1174,6 +1181,26 @@ impl<D: VirtualTableSource> VirtualTable<D> {
         self.cache.len()
     }
 
+    /// Returns the scroll offset property shared with this table.
+    ///
+    /// The stored value is finite and non-negative; the upper bound depends on
+    /// the row count and viewport and is applied on the next layout. Bind state
+    /// with `runtime.bind_layout(&table.offset(), &state.offset)` and read the
+    /// scalar with `table.offset().get()`. The property's `changed` signal fires
+    /// on every write, including wheel scrolling.
+    pub fn offset(&self) -> Property<f32> {
+        self.offset.clone()
+    }
+
+    /// Sets the vertical scroll offset, clamped to the content bounds.
+    ///
+    /// Emits `offset().changed()` when the clamped offset differs. The upper bound
+    /// is re-applied on the next layout once the row count is measured.
+    pub fn set_offset(&mut self, offset: f32) {
+        let clamped = offset.clamp(0.0, self.max_offset());
+        self.offset.set(clamped);
+    }
+
     fn max_offset(&self) -> f32 {
         let content = row_extent(self.data.row_count(), self.row_height);
         (content - self.body_height()).max(0.0)
@@ -1195,7 +1222,7 @@ impl<D: VirtualTableSource> VirtualTable<D> {
     }
 
     fn row_at(&self, position: Point) -> Option<usize> {
-        let y = position.y - self.header_height + self.offset;
+        let y = position.y - self.header_height + self.offset.get();
         if y < 0.0 {
             return None;
         }
@@ -1208,12 +1235,15 @@ impl<D: VirtualTableSource> VirtualTable<D> {
         let top = index_offset(row, self.row_height);
         let bottom = top + self.row_height;
         let height = self.body_height().max(self.row_height);
-        if top < self.offset {
-            self.offset = top;
-        } else if bottom > self.offset + height {
-            self.offset = bottom - height;
-        }
-        self.offset = self.offset.clamp(0.0, self.max_offset());
+        let offset = self.offset.get();
+        let target = if top < offset {
+            top
+        } else if bottom > offset + height {
+            bottom - height
+        } else {
+            offset
+        };
+        self.set_offset(target);
     }
 
     fn move_focus(&mut self, context: &mut EventContext<'_>, row: usize, extend: bool) {
@@ -1326,7 +1356,7 @@ impl<D: VirtualTableSource> Widget for VirtualTable<D> {
         self.focused_column = self
             .focused_column
             .min(self.columns.len().saturating_sub(1));
-        self.offset = self.offset.clamp(0.0, self.max_offset());
+        self.set_offset(self.offset.get());
 
         let font = environment.font_for(&style);
         let text_style =
@@ -1368,7 +1398,7 @@ impl<D: VirtualTableSource> Widget for VirtualTable<D> {
                 index: row,
                 key,
                 layouts,
-                y: index_offset(row, self.row_height) - self.offset,
+                y: index_offset(row, self.row_height) - self.offset.get(),
             });
         }
         if self.cache.len() > CACHE_LIMIT {
@@ -1521,9 +1551,9 @@ impl<D: VirtualTableSource> Widget for VirtualTable<D> {
                     WheelDelta::Pixels(delta) => delta.y,
                     WheelDelta::Lines(delta) => delta.y * self.row_height * 3.0,
                 };
-                let old = self.offset;
-                self.offset = (self.offset - delta).clamp(0.0, self.max_offset());
-                if (self.offset - old).abs() <= f32::EPSILON {
+                let old = self.offset.get();
+                self.set_offset(old - delta);
+                if (self.offset.get() - old).abs() <= f32::EPSILON {
                     return EventStatus::Ignored;
                 }
                 context.request_layout();
@@ -1580,13 +1610,13 @@ impl<D: VirtualTableSource> Widget for VirtualTable<D> {
 impl<D: VirtualTableSource> VirtualTable<D> {
     fn first_visible(&self) -> usize {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = (self.offset / self.row_height) as usize;
+        let row = (self.offset.get() / self.row_height) as usize;
         row.saturating_sub(OVERSCAN)
     }
 
     fn last_visible(&self) -> usize {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = ((self.offset + self.body_height()) / self.row_height).ceil() as usize;
+        let row = ((self.offset.get() + self.body_height()) / self.row_height).ceil() as usize;
         (row + OVERSCAN + 1).min(self.data.row_count())
     }
 
@@ -2087,6 +2117,53 @@ mod tests {
             .layout(viewport(200.0, 100.0))
             .expect("layout succeeds");
         assert!((offset.get() - 120.0).abs() <= f32::EPSILON);
+        assert_eq!(changes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn bound_table_offset_is_clamped_to_the_content_bounds() {
+        let state = Property::new(0.0_f32);
+        let table = VirtualTable::new(Rows(100), vec![Column::new("A", 60.0)]);
+        let offset = table.offset();
+        let mut runtime = UiRuntime::new(table);
+        let _binding = runtime.bind_layout(&offset, &state);
+        runtime
+            .layout(viewport(180.0, 120.0))
+            .expect("layout succeeds");
+
+        // content = 100 * 28 = 2800, body = 120 - 30 header = 90, upper bound 2710.
+        state.set(5000.0);
+        let mut display_list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut display_list))
+            .expect("paint after a bound offset change succeeds");
+        assert!((offset.get() - 2710.0).abs() <= f32::EPSILON);
+
+        state.set(-5.0);
+        assert!(offset.get().abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn table_wheel_scrolling_emits_the_offset_property() {
+        let table = VirtualTable::new(Rows(100), vec![Column::new("A", 60.0)]);
+        let offset = table.offset();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = offset.subscribe({
+            let changes = Rc::clone(&changes);
+            move |value| changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(table);
+        runtime
+            .layout(viewport(180.0, 120.0))
+            .expect("layout succeeds");
+
+        let wheel = InputEvent::Wheel(drawen_core::WheelEvent {
+            position: Point::new(10.0, 40.0),
+            delta: drawen_core::WheelDelta::Pixels(Point::new(0.0, -56.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert!(runtime.dispatch_event(&wheel).is_handled());
+        assert!((offset.get() - 56.0).abs() <= f32::EPSILON);
         assert_eq!(changes.borrow().len(), 1);
     }
 }
