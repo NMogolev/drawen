@@ -701,4 +701,34 @@ mod tests {
         // the caret instead of reconciling it to the end of the text.
         assert_eq!(text.get(), "heXllo");
     }
+
+    #[test]
+    fn two_way_bindings_converge_and_preserve_the_caret() {
+        let state = Property::new("hello".to_string());
+        let mut field = TextField::with_text("hello");
+        field.set_cursor(2);
+        let text = field.text();
+        let mut runtime = UiRuntime::new(field);
+        // Two opposite bindings form a cycle: state -> field and field -> state.
+        let _to_field = runtime.bind_layout(&text, &state);
+        let _to_state = runtime.bind(&state, &text);
+        runtime.layout(viewport()).expect("field layout succeeds");
+        runtime.focus_widget(runtime.root()).expect("field focuses");
+
+        // A user edit flows field -> state through the reverse binding.
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("X".into()));
+        assert_eq!(text.get(), "heXllo");
+        assert_eq!(state.get(), "heXllo");
+
+        // The forward copy of the same value is deduplicated, so reconciliation
+        // is a no-op and the caret survives the next layout. A second edit then
+        // inserts at the caret rather than appending at the end.
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint succeeds");
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("Y".into()));
+        assert_eq!(text.get(), "heXYllo");
+        assert_eq!(state.get(), "heXYllo");
+    }
 }
