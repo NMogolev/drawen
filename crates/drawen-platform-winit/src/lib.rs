@@ -13,7 +13,7 @@ use std::{
 
 use drawen_core::{
     Clipboard, InputEvent, Key, KeyCode, KeyEvent, Modifiers, NamedKey, Point, PointerButton,
-    PointerButtons, PointerEvent, PointerId, Size, TextPreedit, WheelDelta, WheelEvent,
+    PointerButtons, PointerEvent, PointerId, Rect, Size, TextPreedit, WheelDelta, WheelEvent,
 };
 use drawen_platform::{
     BACKGROUND_FRAME_INTERVAL, WindowAction, WindowApplication, WindowEvent, WindowOptions,
@@ -164,6 +164,7 @@ struct Adapter {
     modifiers: Modifiers,
     animation_deadline: Option<Instant>,
     last_tick: Instant,
+    ime_cursor_area: Option<Rect>,
 }
 
 /// The normalized presentation state of the native window.
@@ -220,6 +221,7 @@ impl Adapter {
             modifiers: Modifiers::NONE,
             animation_deadline: None,
             last_tick: Instant::now(),
+            ime_cursor_area: None,
         }
     }
 
@@ -564,14 +566,37 @@ impl Adapter {
     }
 
     fn render_display_list(&mut self) -> Result<RenderStatus, RunError> {
-        let window = self.window.as_ref().expect("window exists while rendering");
+        let window = Arc::clone(self.window.as_ref().expect("window exists while rendering"));
         let scale_factor = to_scale_factor(window.scale_factor())?;
         let display_list = self.application.redraw();
+        self.sync_ime_cursor_area(&window, scale_factor);
         self.renderer
             .as_mut()
             .expect("surface exists while rendering")
             .render(&display_list, scale_factor)
             .map_err(|_| RunError::InvalidSize)
+    }
+
+    /// Positions the IME candidate window at the focused caret, if reported.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn sync_ime_cursor_area(&mut self, window: &Window, scale_factor: f32) {
+        let area = self.application.ime_cursor_area();
+        if area == self.ime_cursor_area {
+            return;
+        }
+        self.ime_cursor_area = area;
+        let Some(area) = area else {
+            return;
+        };
+        let position = winit::dpi::PhysicalPosition::new(
+            (area.origin.x * scale_factor).round() as i32,
+            (area.origin.y * scale_factor).round() as i32,
+        );
+        let size = PhysicalSize::new(
+            ((area.size.width() * scale_factor).round() as u32).max(1),
+            ((area.size.height() * scale_factor).round() as u32).max(1),
+        );
+        window.set_ime_cursor_area(position, size);
     }
 }
 
