@@ -262,7 +262,19 @@ in the headings because the version itself must stay valid semver; see
   round trip is a complete observe-act-observe step.
 - Targets resolve by arena index, accessible-name substring, or role/label
   query. Exact names win, ambiguous queries fail with the candidate list, and
-  stale indices fail instead of hitting recycled slots.
+  stale indices fail instead of hitting recycled slots. Name matching uses
+  Unicode lowercasing; `press_key` accepts any single Unicode scalar value.
+- Observations are bounded: snapshots keep at most `DEFAULT_MAX_NODES` (200)
+  nodes and report `total` and `truncated`. `observe` accepts a target subtree
+  and a `max_nodes` budget, so a large application never floods the agent's
+  context; ids stay global across subtree views.
+- `advance` steps the animation clock deterministically in 60 Hz frames and
+  `wait_until_idle` advances until no frames remain scheduled, reporting a
+  timeout for live loops. Agents read settled state instead of mid-transition
+  frames.
+- `perform_accessibility_action(Focus)` now reports whether focus actually
+  landed on the target, so disabled and non-focusable widgets decline focus
+  consistently with every other refused action.
 - The `serve` feature adds `AgentServer`, a loopback JSON-lines TCP endpoint.
   Socket work runs on a `TaskPool`; commands cross to the UI thread through a
   `UiDispatcher` the application drains once per event-loop turn. The facade

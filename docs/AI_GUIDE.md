@@ -158,10 +158,13 @@ Enable the facade's `agent` feature (or `agent-serve` for the TCP endpoint)
 and use `drawen::agent`. `Agent::observe` renders the runtime's semantic tree
 as compact text or JSON; `Agent::execute` applies typed commands through the
 same accessibility and input paths a human uses, and every reply carries a
-fresh snapshot. `AgentServer::bind` serves JSON lines on loopback; drain it on
-the UI thread once per event-loop turn, exactly like a `UiDispatcher`. Do not
-screenshot the window or synthesize OS input for this — the semantic tree is
-the observation channel. See [AGENT.md](AGENT.md).
+fresh snapshot. Snapshots are bounded (`total`/`truncated`); observe subtrees
+with `{"op":"observe","target":<id>}` when the tree is large, and use
+`advance`/`wait_until_idle` to settle animations before judging a result.
+`AgentServer::bind` serves JSON lines on loopback; drain it on the UI thread
+once per event-loop turn, exactly like a `UiDispatcher`. Do not screenshot the
+window or synthesize OS input for this — the semantic tree is the observation
+channel. See [AGENT.md](AGENT.md).
 
 ### "Add a stylesheet."
 
