@@ -642,6 +642,10 @@ impl ApplicationHandler<UserEvent> for Adapter {
                 event_loop, window, proxy,
             ));
         }
+        // winit keeps IME disabled by default; without this, composition
+        // (CJK, dead-key preedit) never reaches `InputEvent::TextPreedit` and
+        // editable widgets only see plain `TextInput`.
+        window.set_ime_allowed(true);
         window.set_visible(true);
         self.state.maximized = window.is_maximized();
         self.state.fullscreen = window.fullscreen().is_some();
