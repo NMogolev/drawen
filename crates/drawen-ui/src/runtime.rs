@@ -297,8 +297,61 @@ impl LayoutContext<'_> {
             node.overlay = Some(OverlayRecord {
                 // Kept in parent-local coordinates so ancestor translation
                 // cannot stale the rectangle used for outside-click tests.
-                anchor,
+                anchor: Some(anchor),
                 dismiss: options.dismiss,
+                modal: false,
+            });
+        }
+        let relative = Point::new(
+            origin.x - self.parent_origin.x,
+            origin.y - self.parent_origin.y,
+        );
+        Ok((id, result, relative))
+    }
+
+    /// Measures the child at `index` and lays it out as a modal overlay.
+    ///
+    /// The child is centered in the runtime viewport, registered as a modal
+    /// overlay root, and painted above the normal tree over a themed scrim.
+    /// While a modal is visible it blocks pointer input to everything behind it
+    /// and confines sequential focus traversal to its subtree.
+    ///
+    /// Pass loose constraints bounded by the viewport so the child can choose
+    /// its own size. The returned origin is relative to the parent and should
+    /// be passed to [`crate::ChildLayout::new`] exactly like
+    /// [`Self::layout_child`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UiRuntimeError::InvalidWidgetId`] when `index` does not name a
+    /// direct child, or when a child handle became invalid during layout.
+    pub fn layout_child_modal(
+        &mut self,
+        index: usize,
+        constraints: Constraints,
+        dismiss: DismissPolicy,
+    ) -> Result<(WidgetId, LayoutResult, Point), UiRuntimeError> {
+        let id = *self
+            .runtime
+            .node(self.parent)
+            .and_then(|node| node.children.get(index))
+            .ok_or(UiRuntimeError::InvalidWidgetId)?;
+        // Register the root before measuring so nested overlays created by the
+        // content are painted after it.
+        self.runtime.overlay_roots.push(id);
+        let result = self.runtime.layout_node(id, constraints, Point::ZERO)?;
+        let origin = self.runtime.viewport.map_or(Point::ZERO, |viewport| {
+            Point::new(
+                viewport.origin.x + (viewport.size.width() - result.size().width()) / 2.0,
+                viewport.origin.y + (viewport.size.height() - result.size().height()) / 2.0,
+            )
+        });
+        self.runtime.translate_subtree(id, origin);
+        if let Some(node) = self.runtime.node_mut(id) {
+            node.overlay = Some(OverlayRecord {
+                anchor: None,
+                dismiss,
+                modal: true,
             });
         }
         let relative = Point::new(
@@ -364,8 +417,11 @@ struct Node {
 /// Runtime-owned placement and dismissal metadata for a floating overlay root.
 #[derive(Clone, Copy, Debug)]
 struct OverlayRecord {
-    anchor: Rect,
+    /// Anchor in the owner's local coordinates. Modals have no anchor.
+    anchor: Option<Rect>,
     dismiss: DismissPolicy,
+    /// Whether the overlay blocks the rest of the window and traps focus.
+    modal: bool,
 }
 
 /// Per-node interaction progress in linear `0.0..=1.0` space.
@@ -1194,9 +1250,17 @@ impl UiRuntime {
             let mut paint = PaintContext::new(&mut cached);
             self.paint_node(self.root, &mut paint);
             for id in self.overlay_roots.clone() {
-                if self.is_visible(id) {
-                    self.paint_node(id, &mut paint);
+                if !self.is_visible(id) {
+                    continue;
                 }
+                if self
+                    .node(id)
+                    .is_some_and(|node| node.overlay.is_some_and(|record| record.modal))
+                    && let Some(viewport) = self.viewport
+                {
+                    paint.fill_rect(viewport, self.environment.theme().scrim());
+                }
+                self.paint_node(id, &mut paint);
             }
             self.paint_floating(&mut paint);
             self.paint_focus_ring(&mut paint);
@@ -1384,25 +1448,37 @@ impl UiRuntime {
         }) {
             return;
         }
+        // While a modal is open, only the modal and overlays opened from inside
+        // it may react to a click on the scrim. Surfaces behind it stay open.
+        let mut passed_modal = false;
         let roots = self.overlay_roots.clone();
         let mut changed = false;
         for id in roots.into_iter().rev() {
             if !self.is_visible(id) {
                 continue;
             }
-            let Some((anchor, dismiss, owner)) = self.node(id).and_then(|node| {
+            if passed_modal {
+                continue;
+            }
+            let Some((anchor, dismiss, modal, owner)) = self.node(id).and_then(|node| {
                 node.overlay
-                    .map(|overlay| (overlay.anchor, overlay.dismiss, node.parent))
+                    .map(|overlay| (overlay.anchor, overlay.dismiss, overlay.modal, node.parent))
             }) else {
                 continue;
             };
+            if modal {
+                passed_modal = true;
+            }
             let Some(owner) = owner else {
                 continue;
             };
-            let anchor = self
-                .node(owner)
-                .map_or(anchor, |node| offset_rect(anchor, node.bounds.origin));
-            if dismiss != DismissPolicy::Light || anchor.contains(position) {
+            let anchor_hit = anchor.is_some_and(|anchor| {
+                let anchor = self
+                    .node(owner)
+                    .map_or(anchor, |node| offset_rect(anchor, node.bounds.origin));
+                anchor.contains(position)
+            });
+            if dismiss != DismissPolicy::Light || anchor_hit {
                 continue;
             }
             let dismissed = self
@@ -1434,6 +1510,11 @@ impl UiRuntime {
                 continue;
             };
             if record.dismiss == DismissPolicy::None {
+                if record.modal {
+                    // A modal without light dismissal owns Escape. Do not fall
+                    // through and close a surface behind it instead.
+                    return false;
+                }
                 continue;
             }
             let Some(owner) = self.node(id).and_then(|node| node.parent) else {
@@ -1750,6 +1831,16 @@ impl UiRuntime {
         self.node(id).is_some_and(|node| node.overlay.is_some())
     }
 
+    /// Returns the topmost visible modal overlay root, if one is open.
+    fn modal_overlay(&self) -> Option<WidgetId> {
+        self.overlay_roots.iter().rev().copied().find(|id| {
+            self.is_visible(*id)
+                && self
+                    .node(*id)
+                    .is_some_and(|node| node.overlay.is_some_and(|record| record.modal))
+        })
+    }
+
     /// Paints the standard keyboard focus ring around the focused control.
     ///
     /// The ring belongs to the runtime rather than each widget so custom
@@ -1920,7 +2011,12 @@ impl UiRuntime {
 
     fn focusable_nodes(&self) -> Vec<WidgetId> {
         let mut result = Vec::new();
-        self.collect_focusable(self.root, &mut result);
+        // A visible modal traps sequential focus inside its subtree.
+        if let Some(modal) = self.modal_overlay() {
+            self.collect_focusable(modal, &mut result);
+        } else {
+            self.collect_focusable(self.root, &mut result);
+        }
         // Positive tab indices sort before zero/unspecified values; equal
         // indices retain tree order thanks to the stable sort.
         result.sort_by_key(|id| {
@@ -1954,6 +2050,11 @@ impl UiRuntime {
             if let Some(hit) = self.hit_test_node(id, position) {
                 return Some(hit);
             }
+        }
+        if let Some(modal) = self.modal_overlay() {
+            // A modal owns every pointer position in the window, including the
+            // scrim around its panel, so clicks never reach the tree behind it.
+            return Some(modal);
         }
         self.hit_test_node(self.root, position)
     }
@@ -2289,8 +2390,9 @@ mod tests {
     use drawen_render::{DisplayCommand, DisplayList, PaintContext};
 
     use crate::{
-        ChildLayout, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult,
-        LightTheme, Row, Theme, UiEnvironment, UiRuntime, UiRuntimeError, Widget, event,
+        ChildLayout, DismissPolicy, EventContext, EventPhase, EventStatus, LayoutContext,
+        LayoutResult, LightTheme, Row, Theme, UiEnvironment, UiRuntime, UiRuntimeError, Widget,
+        event,
     };
 
     type EventRecord = (&'static str, EventPhase, Point);
@@ -3376,5 +3478,154 @@ mod tests {
             }
         });
         assert_eq!(last_fill, Some(Color::rgba8(0, 0, 255, 255)));
+    }
+
+    struct ModalProbe {
+        open: Rc<Cell<bool>>,
+        dismiss: DismissPolicy,
+        dismissed: Rc<Cell<usize>>,
+    }
+
+    impl Widget for ModalProbe {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let (under, _) = context
+                .layout_child(
+                    0,
+                    Constraints::tight(size(100.0, 100.0)).expect("valid tight size"),
+                )
+                .expect("under child");
+            let mut children = vec![ChildLayout::new(under, Point::ZERO)];
+            if self.open.get() {
+                let (panel, _, origin) = context
+                    .layout_child_modal(1, Constraints::loose(size(100.0, 100.0)), self.dismiss)
+                    .expect("modal child");
+                children.push(ChildLayout::new(panel, origin));
+            }
+            LayoutResult::with_children(constraints.constrain(size(100.0, 100.0)), children)
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+
+        fn dismiss_overlay(&mut self) -> bool {
+            self.dismissed.set(self.dismissed.get() + 1);
+            self.open.set(false);
+            true
+        }
+    }
+
+    fn escape() -> InputEvent {
+        InputEvent::KeyDown(drawen_core::KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            code: drawen_core::KeyCode::Unidentified,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    fn modal_runtime(
+        open: &Rc<Cell<bool>>,
+        dismiss: DismissPolicy,
+        dismissed: &Rc<Cell<usize>>,
+        hits: &Rc<RefCell<Vec<&'static str>>>,
+    ) -> (UiRuntime, drawen_core::WidgetId, drawen_core::WidgetId) {
+        let mut runtime = UiRuntime::new(ModalProbe {
+            open: Rc::clone(open),
+            dismiss,
+            dismissed: Rc::clone(dismissed),
+        });
+        let root = runtime.root();
+        let under = runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(100.0, 100.0),
+                    color: Color::rgba8(255, 0, 0, 255),
+                    name: "under",
+                    hits: Rc::clone(hits),
+                },
+            )
+            .expect("under");
+        let panel = runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(40.0, 20.0),
+                    color: Color::rgba8(0, 0, 255, 255),
+                    name: "panel",
+                    hits: Rc::clone(hits),
+                },
+            )
+            .expect("panel");
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        (runtime, under, panel)
+    }
+
+    #[test]
+    fn modal_paints_a_scrim_before_its_panel() {
+        let open = Rc::new(Cell::new(true));
+        let dismissed = Rc::new(Cell::new(0));
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let (mut runtime, _, panel) = modal_runtime(&open, DismissPolicy::None, &dismissed, &hits);
+        assert_eq!(
+            runtime.bounds(panel),
+            Some(Rect::new(Point::new(30.0, 40.0), size(40.0, 20.0)))
+        );
+
+        let mut display_list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut display_list))
+            .expect("paint succeeds");
+        let scrim = LightTheme.scrim();
+        let commands = display_list.commands();
+        let scrim_index = commands.iter().position(
+            |command| matches!(command, DisplayCommand::FillRect { color, .. } if *color == scrim),
+        );
+        let panel_index = commands.iter().position(|command| {
+            matches!(
+                command,
+                DisplayCommand::FillRect { color, .. }
+                    if *color == Color::rgba8(0, 0, 255, 255)
+            )
+        });
+        let scrim_index = scrim_index.expect("scrim is painted");
+        let panel_index = panel_index.expect("panel is painted");
+        assert!(scrim_index < panel_index, "scrim must be painted first");
+    }
+
+    #[test]
+    fn modal_blocks_pointer_input_to_the_tree_behind_it() {
+        let open = Rc::new(Cell::new(true));
+        let dismissed = Rc::new(Cell::new(0));
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let (mut runtime, _, _) = modal_runtime(&open, DismissPolicy::None, &dismissed, &hits);
+
+        // Outside the panel but inside the tree behind it: the modal still owns
+        // the position, so the underlying widget never sees the click.
+        let _ = runtime.dispatch_event(&pointer(Point::new(5.0, 5.0), true));
+        assert_eq!(*hits.borrow(), vec!["panel"]);
+
+        hits.borrow_mut().clear();
+        let _ = runtime.dispatch_event(&pointer(Point::new(50.0, 50.0), true));
+        assert_eq!(*hits.borrow(), vec!["panel"]);
+    }
+
+    #[test]
+    fn escape_dismisses_a_light_modal() {
+        let open = Rc::new(Cell::new(true));
+        let dismissed = Rc::new(Cell::new(0));
+        let hits = Rc::new(RefCell::new(Vec::new()));
+        let (mut runtime, _, _) = modal_runtime(&open, DismissPolicy::Light, &dismissed, &hits);
+
+        let _ = runtime.dispatch_event(&escape());
+        assert_eq!(dismissed.get(), 1);
+        assert!(!open.get());
     }
 }

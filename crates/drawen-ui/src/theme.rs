@@ -56,6 +56,15 @@ pub trait Theme {
         Color::rgba(0.0, 0.0, 0.0, 0.45)
     }
 
+    /// Translucent backdrop painted behind a modal overlay.
+    ///
+    /// The runtime fills the window with this color before painting a modal
+    /// panel. Return a fully transparent color to disable the dimming while
+    /// keeping input blocking and the focus trap.
+    fn scrim(&self) -> Color {
+        Color::rgba(0.0, 0.0, 0.0, 0.4)
+    }
+
     /// Text and icon color placed on top of an [`Self::accent`] fill.
     fn accent_foreground(&self) -> Color {
         Color::WHITE
