@@ -870,13 +870,15 @@ Rules that keep bindings thin:
   equality to reject bad values.
 - Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`,
   `Switch::checked()`, and `Expander::expanded()` return `Property<bool>`;
-  `Slider::value()`, `ProgressBar::progress()`, `ImageViewer::zoom()`, and
-  `Splitter::ratio()` return `Property<f32>`; `Spinner::progress()` returns
-  `Property<Option<f32>>` (`None` is indeterminate); `TabBar::selected()`,
-  `SegmentedControl::selected()`, and `Dropdown::selected()` return
-  `Property<Option<usize>>`; `RadioGroup::selected()` returns
-  `Property<Option<T>>`. A disabled button ignores activation, skips focus, and
-  matches `button:disabled` in DSS.
+  `Slider::value()`, `ProgressBar::progress()`, `ImageViewer::zoom()`,
+  `Splitter::ratio()`, `ScrollView::offset()`, and `ListView::offset()` return
+  `Property<f32>`; `Spinner::progress()` returns `Property<Option<f32>>` (`None`
+  is indeterminate); `TabBar::selected()`, `SegmentedControl::selected()`, and
+  `Dropdown::selected()` return `Property<Option<usize>>`;
+  `RadioGroup::selected()` returns `Property<Option<T>>`; `TextField::text()`,
+  `TextEdit::text()`, `Autocomplete::query()`, and `CommandPalette::query()`
+  return `Property<String>`. A disabled button ignores activation, skips focus,
+  and matches `button:disabled` in DSS.
 
 ### Binding toggles and sliders
 
@@ -996,6 +998,60 @@ let splitter = Splitter::new(SplitAxis::Horizontal, 0.5);
 let _binding = runtime.bind_layout(&splitter.ratio(), &ratio);
 ```
 
+### Binding text and scroll offsets
+
+`TextField::text()`, `TextEdit::text()`, `Autocomplete::query()`, and
+`CommandPalette::query()` are `Property<String>`. Text changes the control's
+size (or the filtered rows), so bind with `bind_layout`:
+
+```rust
+use drawen::{Property, TextField};
+
+let name = Property::new(String::new());
+let field = TextField::new();
+let text = field.text();
+let field = runtime.append_child(runtime.root(), field)?;
+let _binding = runtime.bind_layout(&text, &name);
+```
+
+The editor stays the source of truth for the caret and undo history. A user edit
+syncs the property from the editor and keeps the caret; an external write (a
+binding copy or a direct `set`) is reconciled into the editor at the next layout
+or event, which replaces the text and resets the caret. Single-line properties
+strip line breaks; `TextEdit` keeps them and folds CRLF to LF. Every write is
+normalized, so a binding copy cannot inject a newline into a single-line field.
+Read the scalar with `field.text().get()`. The property's `changed()` fires on
+every write; the widget's user `changed()` / `query_changed()` fires only on user
+edits (and, for the combobox, commits).
+
+Because user edits update the property, two opposite bindings give two-way text
+state without a special API: the reverse binding carries each edit into the
+state property, and the forward copy of the same value is deduplicated, so
+reconciliation is a no-op and the caret survives:
+
+```rust
+let _to_field = runtime.bind_layout(&text, &name); // state -> field
+let _to_name = runtime.bind(&name, &text); // field -> state
+```
+
+`ScrollView::offset()` and `ListView::offset()` are `Property<f32>` bound with
+`bind_layout` (the offset positions the child or the visible rows). Their upper
+bound depends on the measured content and viewport, which are only known at
+layout, so the property normalizer keeps the offset finite and non-negative and
+layout re-applies the dynamic upper bound, writing the clamped value back only
+when it differs. A binding copy beyond the content is clamped on the next paint:
+
+```rust
+use drawen::{Property, ScrollView};
+
+let scroll = Property::new(0.0_f32);
+let view = ScrollView::vertical();
+let offset = view.offset();
+let view = runtime.append_child(runtime.root(), view)?;
+let _binding = runtime.bind_layout(&offset, &scroll);
+scroll.set(500.0); // clamped to content - viewport on the next layout
+```
+
 ### Migrating from 0.3
 
 The property conversion is a breaking-change batch for 0.4.0:
@@ -1011,17 +1067,21 @@ The property conversion is a breaking-change batch for 0.4.0:
 | `RadioGroup::selected() -> Option<T>` | `RadioGroup::selected() -> Property<Option<T>>`; read with `.selected().get()` |
 | `ImageViewer::zoom() -> f32` (a `const fn`) | `ImageViewer::zoom() -> Property<f32>`; read with `.zoom().get()` |
 | `Splitter::ratio() -> f32` (a `const fn`) | `Splitter::ratio() -> Property<f32>`; read with `.ratio().get()` |
+| `TextField::text()` / `TextEdit::text()` / `Autocomplete::query()` / `CommandPalette::query()` were `&str` | return `Property<String>`; read with `.text().get()` / `.query().get()` |
+| `ScrollView::offset()` / `ListView::offset()` were `const fn -> f32` | return `Property<f32>`; read with `.offset().get()`; `ScrollView::new` / `vertical` / `horizontal` lose `const` |
 | `Checkbox::set_checked` / `Switch::set_checked` emitted nothing | emit `checked().changed()` on a real change (still not `toggled()`) |
 | `Slider::set_value` emitted nothing | emits `value().changed()` on a real change (still not the user `changed()`) |
 | `ProgressBar::set_progress` / `Expander::set_expanded` / the selection `set_selected` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
 | `Spinner::set_progress` / `ImageViewer::set_zoom` / `ImageViewer::reset_view` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
+| `TextField::set_text` / `TextEdit::set_text` / `Autocomplete::set_query` / `ScrollView::set_offset` / `ListView::set_offset` emitted nothing | emit the property's `changed()` on a real change (still not the user signal); `CommandPalette` gains a `set_query` |
 
 `Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`, as do
-`ImageViewer::minimum_zoom()`, `ImageViewer::maximum_zoom()`, and the viewer's
-pan and checkerboard accessors. The user-interaction signals (`toggled()`,
-`changed()`, `activated()`, `zoom_changed()`, `resized()`) are unchanged, so
-existing subscription code keeps compiling; only `const` contexts and scalar
-reads (`.value()`, `.progress()`, `.selected()`, `.zoom()`, `.ratio()`) need
-updating to `.get()`. Setter signatures are unchanged. `RadioGroup::changed()`
-keeps its 0.3 semantics (fires on every `set_selected`, silent on `clear`); only
-the `selected()` return type changed.
+`ImageViewer::minimum_zoom()`, `ImageViewer::maximum_zoom()`, the viewer's pan
+and checkerboard accessors, and `ListView::item_extent()`. The user-interaction
+signals (`toggled()`, `changed()`, `activated()`, `zoom_changed()`, `resized()`,
+`query_changed()`, `selected()`, `executed()`) are unchanged, so existing
+subscription code keeps compiling; only `const` contexts and scalar reads
+(`.value()`, `.progress()`, `.selected()`, `.zoom()`, `.ratio()`, `.text()`,
+`.query()`, `.offset()`) need updating to `.get()`. Setter signatures are
+unchanged. `RadioGroup::changed()` keeps its 0.3 semantics (fires on every
+`set_selected`, silent on `clear`); only the `selected()` return type changed.

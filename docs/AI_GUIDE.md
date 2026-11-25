@@ -54,6 +54,9 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `radio_group.selected = state.choice` | `runtime.bind(&group.selected(), &state.choice)`; `Property<Option<T>>`, `changed()` fires on every `set_selected` |
 | `viewer.zoom = state.zoom` | `runtime.bind_layout(&viewer.zoom(), &state.zoom)` — zoom changes geometry; call `with_zoom_range` before binding |
 | `splitter.ratio = state.ratio` | `runtime.bind_layout(&splitter.ratio(), &state.ratio)` — the ratio sets the pane sizes |
+| `field.text = state.name` | `runtime.bind_layout(&field.text(), &state.name)`; `TextEdit::text()`, `Autocomplete::query()`, `CommandPalette::query()` too. User edits keep the caret; an external write resets it |
+| Two-way text state | Two opposite `bind`s converge (equal writes are silent); no `bind_from` or reactive graph |
+| `view.offset = state.scroll` | `runtime.bind_layout(&view.offset(), &state.scroll)`; `ListView::offset()` too. Kept `>= 0`; the content upper bound is clamped at layout |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
@@ -132,11 +135,13 @@ is_valid.set(true);
 
 `bind` copies the current value once, then follows every source change and
 wakes redraws through `take_redraw_request`. Keep the returned `Binding` like a
-`Subscription`. Equal writes are silent, so chains and cycles converge. For the
-reverse direction (widget to state), subscribe to the widget signal and write
-the property explicitly; there is no two-way binding. Use `bind_layout` when
-the target participates in layout, and `runtime.watch(&property)` for state a
-custom widget reads at paint time.
+`Subscription`. Equal writes are silent, so chains and cycles converge. There is
+no single two-way binding API: for the reverse direction (widget to state),
+subscribe to the widget signal and write the property explicitly, or — for text
+properties, which user edits already update — add a second opposite `bind`; the
+cycle converges and keeps the caret. Use `bind_layout` when the target
+participates in layout, and `runtime.watch(&property)` for state a custom widget
+reads at paint time.
 
 ### "Can I update the UI from another thread?"
 
