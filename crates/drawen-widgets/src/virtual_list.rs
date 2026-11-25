@@ -5,7 +5,9 @@
 //! stable key, and keyboard navigation keeps the focused row visible.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -25,8 +27,122 @@ const DEFAULT_HEIGHT: f32 = 180.0;
 const ROW_HEIGHT: f32 = 28.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const HORIZONTAL_PADDING: f32 = 10.0;
+const ROW_VERTICAL_PADDING: f32 = 4.0;
 const OVERSCAN: usize = 1;
 const CACHE_LIMIT: usize = 2048;
+
+/// Fenwick tree over row heights: O(log n) offsets, updates, and row lookup.
+///
+/// Heights are stored in `f64` so a million-row content extent does not drift
+/// the way repeated `f32` accumulation would.
+#[derive(Default)]
+struct HeightIndex {
+    tree: Vec<f64>,
+    len: usize,
+}
+
+impl HeightIndex {
+    fn build(&mut self, heights: &[f64]) {
+        self.len = heights.len();
+        self.tree = vec![0.0; self.len + 1];
+        for (index, height) in heights.iter().enumerate() {
+            self.tree[index + 1] = *height;
+        }
+        for index in 1..=self.len {
+            let parent = index + (index & index.wrapping_neg());
+            if parent <= self.len {
+                self.tree[parent] += self.tree[index];
+            }
+        }
+    }
+
+    /// Sum of the heights of rows `0..end`.
+    fn prefix(&self, end: usize) -> f64 {
+        let mut sum = 0.0;
+        let mut index = end.min(self.len);
+        while index > 0 {
+            sum += self.tree[index];
+            index -= index & index.wrapping_neg();
+        }
+        sum
+    }
+
+    fn total(&self) -> f64 {
+        self.prefix(self.len)
+    }
+
+    fn add(&mut self, row: usize, delta: f64) {
+        let mut index = row + 1;
+        while index <= self.len {
+            self.tree[index] += delta;
+            index += index & index.wrapping_neg();
+        }
+    }
+
+    /// Returns the row containing `y`, or `len` when `y` is past the content.
+    fn row_at(&self, y: f64) -> usize {
+        if y < 0.0 {
+            return 0;
+        }
+        let mut index = 0usize;
+        let mut remaining = y;
+        let mut bit = (self.len + 1).next_power_of_two() >> 1;
+        while bit > 0 {
+            let next = index + bit;
+            if next <= self.len && self.tree[next] <= remaining {
+                remaining -= self.tree[next];
+                index = next;
+            }
+            bit >>= 1;
+        }
+        index
+    }
+}
+
+/// Pending scroll commands issued through a [`VirtualListHandle`].
+#[derive(Default)]
+struct ListCommands {
+    prepended: usize,
+    offset: Option<f32>,
+    to_bottom: bool,
+}
+
+/// A UI-thread handle for scrolling and anchoring a [`VirtualList`].
+///
+/// The widget owns its data, so applications that prepend history or append
+/// messages through a shared source (for example `Rc<RefCell<Vec<Message>>>`)
+/// use this handle to keep the scroll position stable, then call
+/// `UiRuntime::invalidate_layout` once per batch:
+///
+/// ```rust,ignore
+/// messages.borrow_mut().splice(0..0, older);
+/// list_handle.anchor_prepended(older_count);
+/// runtime.invalidate_layout();
+/// ```
+#[derive(Clone)]
+pub struct VirtualListHandle {
+    commands: Rc<RefCell<ListCommands>>,
+}
+
+impl VirtualListHandle {
+    /// Keeps the visible rows in place after `count` rows were prepended.
+    ///
+    /// The scroll offset grows by the prepended extent and selection indices
+    /// shift with the data, so the row the user was reading does not jump.
+    pub fn anchor_prepended(&self, count: usize) {
+        self.commands.borrow_mut().prepended += count;
+    }
+
+    /// Requests an absolute scroll offset, clamped on the next layout.
+    pub fn set_offset(&self, offset: f32) {
+        self.commands.borrow_mut().offset = Some(offset);
+    }
+
+    /// Requests a scroll to the newest row on the next layout.
+    pub fn scroll_to_bottom(&self) {
+        self.commands.borrow_mut().to_bottom = true;
+    }
+}
 
 /// Read-only data backing a [`VirtualList`].
 pub trait VirtualDataSource {
@@ -154,6 +270,13 @@ impl SelectionModel {
         }
     }
 
+    /// Shifts every row index by `count`, for rows prepended to the data.
+    pub fn shift(&mut self, count: usize) {
+        self.selected = self.selected.iter().map(|row| row + count).collect();
+        self.focused = self.focused.map(|row| row + count);
+        self.anchor = self.anchor.map(|row| row + count);
+    }
+
     /// Selects only `row` and moves keyboard focus to it.
     pub fn select_only(&mut self, row: usize) -> bool {
         let changed =
@@ -212,6 +335,14 @@ impl SelectionModel {
 }
 
 /// A virtualized, selectable list backed by a [`VirtualDataSource`].
+///
+/// By default every row uses the fixed height passed to [`Self::new`].
+/// [`Self::with_variable_heights`] switches to measured, wrapped rows: the
+/// height given at construction becomes the estimate for rows that have not
+/// been shaped yet, a Fenwick tree keeps prefix offsets, and
+/// [`VirtualListHandle::anchor_prepended`] preserves the reading position when
+/// history is inserted above.
+#[allow(clippy::struct_excessive_bools)]
 pub struct VirtualList<D> {
     data: D,
     row_height: f32,
@@ -224,6 +355,13 @@ pub struct VirtualList<D> {
     activated: Signal<usize>,
     keyboard_focus: bool,
     dragging: bool,
+    variable: bool,
+    measured: HashMap<u64, f32>,
+    heights: HeightIndex,
+    heights_dirty: bool,
+    heights_snapshot: (usize, Option<u64>, Option<u64>),
+    wrap_width: f32,
+    commands: Rc<RefCell<ListCommands>>,
 }
 
 struct VisibleRow {
@@ -231,6 +369,7 @@ struct VisibleRow {
     key: u64,
     layout: Arc<TextLayout>,
     y: f32,
+    height: f32,
 }
 
 struct RowVisual {
@@ -262,6 +401,34 @@ impl<D: VirtualDataSource> VirtualList<D> {
             activated: Signal::new(),
             keyboard_focus: false,
             dragging: false,
+            variable: false,
+            measured: HashMap::new(),
+            heights: HeightIndex::default(),
+            heights_dirty: true,
+            heights_snapshot: (0, None, None),
+            wrap_width: 0.0,
+            commands: Rc::new(RefCell::new(ListCommands::default())),
+        }
+    }
+
+    /// Enables measured, wrapped rows with variable heights.
+    ///
+    /// The height passed to [`Self::new`] becomes the estimate for unmeasured
+    /// rows. Visible rows wrap to the viewport width and their shaped height
+    /// is retained by stable row key, so scrolling and prepending history keep
+    /// using measured extents instead of re-estimating.
+    #[must_use]
+    pub fn with_variable_heights(mut self, variable: bool) -> Self {
+        self.variable = variable;
+        self.heights_dirty = true;
+        self
+    }
+
+    /// Returns a handle for scroll commands issued outside event handling.
+    #[must_use]
+    pub fn handle(&self) -> VirtualListHandle {
+        VirtualListHandle {
+            commands: Rc::clone(&self.commands),
         }
     }
 
@@ -274,6 +441,7 @@ impl<D: VirtualDataSource> VirtualList<D> {
     /// Returns mutable access to the backing data and invalidates row visuals.
     pub fn data_mut(&mut self) -> &mut D {
         self.cache.clear();
+        self.heights_dirty = true;
         &mut self.data
     }
 
@@ -323,9 +491,94 @@ impl<D: VirtualDataSource> VirtualList<D> {
         self.offset = offset.clamp(0.0, self.max_offset());
     }
 
-    fn max_offset(&self) -> f32 {
-        let content = row_extent(self.data.row_count(), self.row_height);
-        (content - self.viewport.height()).max(0.0)
+    /// Keeps the visible rows in place after `count` rows were prepended.
+    ///
+    /// Prefer [`VirtualListHandle::anchor_prepended`] once the list has been
+    /// appended to a runtime; this method serves the same purpose before that.
+    pub fn anchor_prepended(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.selection.shift(count);
+        if self.variable {
+            self.heights_dirty = true;
+            self.sync_heights();
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                self.offset += self.heights.prefix(count) as f32;
+            }
+        } else {
+            self.offset += index_offset(count, self.row_height);
+        }
+    }
+
+    /// Scrolls to the newest row.
+    pub fn scroll_to_bottom(&mut self) {
+        self.set_offset(f32::INFINITY);
+    }
+
+    fn max_offset(&mut self) -> f32 {
+        self.sync_heights();
+        (self.content_height() - self.viewport.height()).max(0.0)
+    }
+
+    /// Rebuilds the height index when the data changed since the last pass.
+    fn sync_heights(&mut self) {
+        if !self.variable {
+            return;
+        }
+        let count = self.data.row_count();
+        let snapshot = (
+            count,
+            (count > 0).then(|| self.data.row_key(0)),
+            (count > 0).then(|| self.data.row_key(count - 1)),
+        );
+        if snapshot != self.heights_snapshot {
+            self.heights_dirty = true;
+            self.heights_snapshot = snapshot;
+        }
+        if !self.heights_dirty {
+            return;
+        }
+        let estimate = f64::from(self.row_height);
+        let heights: Vec<f64> = (0..count)
+            .map(|row| {
+                self.measured
+                    .get(&self.data.row_key(row))
+                    .map_or(estimate, |height| f64::from(*height))
+            })
+            .collect();
+        self.heights.build(&heights);
+        self.heights_dirty = false;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn content_height(&self) -> f32 {
+        if self.variable {
+            self.heights.total() as f32
+        } else {
+            row_extent(self.data.row_count(), self.row_height)
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn row_offset(&self, row: usize) -> f32 {
+        if self.variable {
+            self.heights.prefix(row) as f32
+        } else {
+            index_offset(row, self.row_height)
+        }
+    }
+
+    fn row_height_of(&self, row: usize) -> f32 {
+        if self.variable {
+            self.measured
+                .get(&self.data.row_key(row))
+                .copied()
+                .unwrap_or(self.row_height)
+        } else {
+            self.row_height
+        }
     }
 
     fn announce_selection(&self) {
@@ -347,8 +600,8 @@ impl<D: VirtualDataSource> VirtualList<D> {
     }
 
     fn ensure_visible(&mut self, row: usize) {
-        let top = index_offset(row, self.row_height);
-        let bottom = top + self.row_height;
+        let top = self.row_offset(row);
+        let bottom = top + self.row_height_of(row);
         let height = self.viewport.height().max(self.row_height);
         if top < self.offset {
             self.offset = top;
@@ -363,8 +616,13 @@ impl<D: VirtualDataSource> VirtualList<D> {
         if y < 0.0 {
             return None;
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = (y / self.row_height) as usize;
+        let row = if self.variable {
+            self.heights.row_at(f64::from(y))
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row = (y / self.row_height) as usize;
+            row
+        };
         (row < self.data.row_count()).then_some(row)
     }
 
@@ -476,12 +734,32 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
             DEFAULT_HEIGHT
         };
         self.viewport = constraints.constrain(size(width, height));
+        let commands = std::mem::take(&mut *self.commands.borrow_mut());
+        if commands.prepended > 0 {
+            self.anchor_prepended(commands.prepended);
+        }
+        if let Some(offset) = commands.offset {
+            self.offset = offset;
+        }
+        if commands.to_bottom {
+            self.offset = f32::INFINITY;
+        }
+        if self.variable && (self.wrap_width - self.viewport.width()).abs() > f32::EPSILON {
+            self.wrap_width = self.viewport.width();
+            self.cache.clear();
+            self.measured.clear();
+            self.heights_dirty = true;
+        }
+        self.sync_heights();
         self.selection.retain(self.data.row_count());
         self.set_offset(self.offset);
 
         let font = environment.font_for(&style);
         let text_style =
             TextStyle::new_with_font(font, style.foreground_or(environment.theme().foreground()));
+        let wrap = self
+            .variable
+            .then_some((self.viewport.width() - HORIZONTAL_PADDING * 2.0).max(1.0));
         let first = self.first_visible();
         let last = self.last_visible();
         self.visible.clear();
@@ -496,7 +774,7 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
             let layout = if let Some(layout) = cached {
                 layout
             } else {
-                let layout = Arc::new(environment.text_shaper().layout(&text, &text_style, None));
+                let layout = Arc::new(environment.text_shaper().layout(&text, &text_style, wrap));
                 self.cache.insert(
                     key,
                     RowVisual {
@@ -506,12 +784,35 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
                 );
                 layout
             };
+            let mut row_height = self.row_height;
+            if self.variable {
+                let measured = layout.size().height() + ROW_VERTICAL_PADDING * 2.0;
+                let previous = self.measured.insert(key, measured).unwrap_or(self.row_height);
+                if (measured - previous).abs() > f32::EPSILON {
+                    self.heights.add(row, f64::from(measured - previous));
+                    // Scroll anchoring: a re-measured row fully above the
+                    // viewport must not push the visible content around.
+                    if self.row_offset(row) + measured <= self.offset {
+                        self.offset += measured - previous;
+                    }
+                }
+                row_height = measured;
+            }
             self.visible.push(VisibleRow {
                 index: row,
                 key,
                 layout,
-                y: index_offset(row, self.row_height) - self.offset,
+                y: 0.0,
+                height: row_height,
             });
+        }
+        let offsets: Vec<f32> = self
+            .visible
+            .iter()
+            .map(|row| self.row_offset(row.index))
+            .collect();
+        for (row, offset) in self.visible.iter_mut().zip(offsets) {
+            row.y = offset - self.offset;
         }
         if self.cache.len() > CACHE_LIMIT {
             let visible: BTreeSet<u64> = self.visible.iter().map(|row| row.key).collect();
@@ -543,7 +844,7 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
         for row in &self.visible {
             let row_bounds = Rect::new(
                 Point::new(bounds.origin.x, bounds.origin.y + row.y),
-                size(width, self.row_height),
+                size(width, row.height),
             );
             if self.selection.contains(row.index) {
                 context.fill_rect(row_bounds, accent.with_alpha(0.22));
@@ -556,7 +857,7 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
                     layout,
                     Point::new(
                         row_bounds.origin.x + HORIZONTAL_PADDING,
-                        row_bounds.origin.y + (self.row_height - row.layout.size().height()) / 2.0,
+                        row_bounds.origin.y + (row.height - row.layout.size().height()) / 2.0,
                     ),
                 );
             });
@@ -673,14 +974,25 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
 
 impl<D: VirtualDataSource> VirtualList<D> {
     fn first_visible(&self) -> usize {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = (self.offset / self.row_height) as usize;
-        row.saturating_sub(OVERSCAN)
+        let row = if self.variable {
+            self.heights.row_at(f64::from(self.offset))
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row = (self.offset / self.row_height) as usize;
+            row
+        };
+        row.saturating_sub(OVERSCAN).min(self.data.row_count())
     }
 
     fn last_visible(&self) -> usize {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = ((self.offset + self.viewport.height()) / self.row_height).ceil() as usize;
+        let bottom = self.offset + self.viewport.height();
+        let row = if self.variable {
+            self.heights.row_at(f64::from(bottom)) + 1
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row = (bottom / self.row_height).ceil() as usize;
+            row
+        };
         (row + OVERSCAN + 1).min(self.data.row_count())
     }
 }
@@ -1476,5 +1788,142 @@ mod tests {
             .find(|node| node.role() == AccessibilityRole::Table)
             .expect("table is exposed");
         assert_eq!(table.value(), Some("1 of 10000 selected"));
+    }
+
+    #[derive(Clone)]
+    struct Messages(Rc<RefCell<Vec<(u64, String)>>>);
+
+    impl VirtualDataSource for Messages {
+        fn row_count(&self) -> usize {
+            self.0.borrow().len()
+        }
+
+        fn row_key(&self, row: usize) -> u64 {
+            self.0.borrow()[row].0
+        }
+
+        fn row_text(&self, row: usize) -> String {
+            self.0.borrow()[row].1.clone()
+        }
+    }
+
+    fn messages(keys: std::ops::Range<u64>) -> Messages {
+        Messages(Rc::new(RefCell::new(
+            keys.map(|key| (key, format!("Message {key}"))).collect(),
+        )))
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn height_index_maps_offsets_and_survives_updates() {
+        let mut index = HeightIndex::default();
+        index.build(&[10.0, 20.0, 30.0]);
+        assert_eq!(index.total(), 60.0);
+        assert_eq!(index.prefix(2), 30.0);
+        assert_eq!(index.row_at(-5.0), 0);
+        assert_eq!(index.row_at(0.0), 0);
+        assert_eq!(index.row_at(9.9), 0);
+        assert_eq!(index.row_at(10.0), 1);
+        assert_eq!(index.row_at(29.9), 1);
+        assert_eq!(index.row_at(30.0), 2);
+        assert_eq!(index.row_at(60.0), 3);
+
+        index.add(0, 5.0);
+        assert_eq!(index.total(), 65.0);
+        assert_eq!(index.row_at(14.9), 0);
+        assert_eq!(index.row_at(15.0), 1);
+        assert_eq!(index.prefix(1), 15.0);
+    }
+
+    #[test]
+    fn variable_rows_hit_test_against_measured_extents() {
+        let mut list = VirtualList::new(messages(100..110), 20.0).with_variable_heights(true);
+        // Row 100 is a tall wrapped message; the rest keep the estimate.
+        list.measured.insert(100, 60.0);
+        list.sync_heights();
+        assert_eq!(list.row_at(Point::new(5.0, 59.0)), Some(0));
+        assert_eq!(list.row_at(Point::new(5.0, 60.0)), Some(1));
+        assert_eq!(list.row_at(Point::new(5.0, 79.0)), Some(1));
+        assert_eq!(list.row_at(Point::new(5.0, 80.0)), Some(2));
+        assert_eq!(list.row_at(Point::new(5.0, 500.0)), None);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn anchor_prepended_shifts_offset_and_selection() {
+        let mut list = VirtualList::new(messages(100..110), 20.0);
+        list.viewport = size(200.0, 100.0);
+        list.set_offset(60.0);
+        list.selection_mut().select_only(5);
+        list.anchor_prepended(3);
+        assert_eq!(list.offset(), 120.0);
+        assert_eq!(list.selection().focused(), Some(8));
+
+        let mut variable = VirtualList::new(messages(100..110), 20.0).with_variable_heights(true);
+        variable.viewport = size(200.0, 100.0);
+        variable.measured.insert(100, 60.0);
+        variable.set_offset(80.0);
+        variable.data.0.borrow_mut().splice(0..0, [(98, "a".into()), (99, "b".into())]);
+        variable.anchor_prepended(2);
+        // Two unmeasured rows at the 20px estimate extend the content by 40.
+        assert_eq!(variable.offset(), 120.0);
+    }
+
+    #[test]
+    fn prepending_history_through_the_handle_keeps_the_reading_position() {
+        let data = messages(100..130);
+        let list = VirtualList::new(data.clone(), 20.0).with_variable_heights(true);
+        let handle = list.handle();
+        let selection = list.selection_changed();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let subscription = selection.subscribe({
+            let observed = Rc::clone(&observed);
+            move |rows| observed.borrow_mut().push(rows.clone())
+        });
+        let activated = list.activated();
+        let activated_observed = Rc::new(RefCell::new(Vec::new()));
+        let activated_subscription = activated.subscribe({
+            let activated_observed = Rc::clone(&activated_observed);
+            move |row| activated_observed.borrow_mut().push(*row)
+        });
+        let mut runtime = UiRuntime::new(list);
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+
+        let scroll = InputEvent::Wheel(drawen_core::WheelEvent {
+            position: Point::new(10.0, 10.0),
+            delta: drawen_core::WheelDelta::Pixels(Point::new(0.0, -120.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert!(runtime.dispatch_event(&scroll).is_handled());
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+        assert!(runtime.dispatch_event(&pointer_down(10.0, 10.0)).is_handled());
+        let before = observed.borrow().last().cloned().expect("a row was selected");
+        let key_before = data.row_key(before[0]);
+
+        // Prepend older history above the viewport and anchor the position.
+        let older: Vec<(u64, String)> = (200..206).map(|key| (key, format!("Old {key}"))).collect();
+        data.0.borrow_mut().splice(0..0, older);
+        handle.anchor_prepended(6);
+        runtime.invalidate_layout();
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+
+        assert!(runtime.dispatch_event(&pointer_down(10.0, 10.0)).is_handled());
+        // The anchored click re-selects the shifted row without a selection
+        // change; Enter activates the focused row and proves which one it is.
+        assert!(runtime.dispatch_event(&key(NamedKey::Enter)).is_handled());
+        let after = activated_observed.borrow().last().copied().expect("a row was activated");
+        assert_eq!(after, before[0] + 6, "indices shift with the prepended rows");
+        assert_eq!(data.row_key(after), key_before, "the same message stays under the pointer");
+
+        drop(subscription);
+        drop(selection);
+        drop(activated_subscription);
+        drop(activated);
     }
 }
