@@ -215,8 +215,10 @@ impl ToastHandle {
 ///
 /// Timed dismissal runs through [`Widget::advance_animation`]; while any toast
 /// is queued the host reports [`Widget::is_animating`], so
-/// [`drawen_ui::UiRuntime::next_frame_in`] keeps scheduling frames. The queue
-/// keeps at most five toasts and drops the oldest when a sixth arrives.
+/// [`drawen_ui::UiRuntime::next_frame_in`] keeps scheduling frames. Durations
+/// keep elapsing while the window is hidden, so stale notifications do not pile
+/// up and appear on restore. The queue keeps at most five toasts and drops the
+/// oldest when a sixth arrives.
 pub struct ToastHost {
     queue: Rc<RefCell<ToastQueue>>,
     corner: ToastCorner,
@@ -432,6 +434,13 @@ impl Widget for ToastHost {
         !self.queue.borrow().entries.is_empty()
     }
 
+    fn advances_while_hidden(&self) -> bool {
+        // Toast lifetimes are queue state, not pixels: durations must keep
+        // elapsing while the window is hidden, otherwise the queue fills with
+        // stale notifications that all appear at once on restore.
+        self.is_animating()
+    }
+
     fn participates_in_hit_test(&self) -> bool {
         false
     }
@@ -606,5 +615,37 @@ mod tests {
         assert!(runtime.next_frame_in().is_some());
         runtime.advance_animations(Duration::from_millis(200));
         assert!(runtime.next_frame_in().is_none());
+    }
+
+    #[test]
+    fn toasts_expire_while_the_window_is_hidden() {
+        let (mut runtime, handle) = laid_out(ToastHost::new());
+        runtime.set_presented(false);
+        let _ = handle.show(Toast::new("Background").with_duration(Duration::from_millis(100)));
+        assert!(
+            runtime.next_frame_in().is_some(),
+            "hidden window must keep ticking queued toasts"
+        );
+        assert!(runtime.tick(Duration::from_millis(200)));
+        assert!(handle.is_empty(), "toast expired while hidden");
+        assert!(runtime.next_frame_in().is_none());
+    }
+
+    #[test]
+    fn hidden_toasts_do_not_pile_up_past_the_cap() {
+        let (mut runtime, handle) = laid_out(ToastHost::new());
+        runtime.set_presented(false);
+        for index in 0..8 {
+            let _ = handle.show(
+                Toast::new(format!("Toast {index}")).with_duration(Duration::from_millis(100)),
+            );
+            assert!(runtime.tick(Duration::from_millis(120)));
+        }
+        assert!(handle.is_empty());
+        runtime.set_presented(true);
+        assert_eq!(
+            painted_texts(&mut runtime),
+            [] as [(std::string::String, drawen_core::Point); 0]
+        );
     }
 }
