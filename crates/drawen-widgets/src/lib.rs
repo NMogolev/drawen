@@ -22,13 +22,13 @@ mod animated_image;
 mod audio_player;
 #[cfg(feature = "audio")]
 mod audio_session;
+mod autocomplete;
 mod avatar;
 mod badge;
 mod box_widget;
 mod button;
 mod card;
 mod checkbox;
-mod autocomplete;
 mod command_palette;
 mod dialog;
 mod divider;
@@ -85,10 +85,10 @@ pub use animated_image::{AnimatedImage, AnimationFrame, GifDecodeError};
 pub use audio_player::AudioPlayer;
 #[cfg(feature = "audio")]
 pub use audio_session::AudioPaleoSession;
+pub use autocomplete::{Autocomplete, AutocompletePopup};
 pub use avatar::{Avatar, AvatarStatus};
 pub use badge::{Badge, BadgeTone};
 pub use box_widget::Box;
-pub use autocomplete::{Autocomplete, AutocompletePopup};
 pub use button::{Button, ButtonStyle};
 pub use card::{Card, CardStyle};
 pub use checkbox::Checkbox;

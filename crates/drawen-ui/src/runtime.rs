@@ -19,8 +19,8 @@ use drawen_render::{
 use crate::{
     AccessibilityAction, AccessibilityActions, AccessibilityRole, AccessibilityState,
     DismissPolicy, DssStyle, EventContext, EventPhase, EventStatus, KeyboardCommand, LayoutResult,
-    OverlayOptions, OverlaySide, PseudoClass, SemanticTree, SemanticsBuilder, StyleTarget, UiEnvironment,
-    Widget, WindowCommand, event, overlay,
+    OverlayOptions, OverlaySide, PseudoClass, SemanticTree, SemanticsBuilder, StyleTarget,
+    UiEnvironment, Widget, WindowCommand, event, overlay,
 };
 use event::{EventEffects, FocusRequest};
 
@@ -762,8 +762,7 @@ impl UiRuntime {
             // An offscreen or collapsed widget must not schedule frames just
             // because it reports a live loop; only media/state clocks that opt
             // in keep ticking regardless of visibility.
-            widget.is_animating()
-                && (widget.advances_while_hidden() || self.animation_visible(id))
+            widget.is_animating() && (widget.advances_while_hidden() || self.animation_visible(id))
         });
         if !self.presented {
             // Visual transitions freeze while the window is hidden. Only
@@ -784,8 +783,7 @@ impl UiRuntime {
                 return false;
             };
             let id = WidgetId::new(index, slot.generation);
-            node.transition.is_animating(self.transition_targets(id))
-                && self.animation_visible(id)
+            node.transition.is_animating(self.transition_targets(id)) && self.animation_visible(id)
         });
         if !widget_animating && !transition_animating {
             return None;
@@ -882,9 +880,7 @@ impl UiRuntime {
             // Freeze purely visual animation when the window cannot present or
             // the widget contributes no pixels. Media and state clocks opt back
             // in through `advances_while_hidden`; `settle` completes everything.
-            if !settle
-                && !widget.advances_while_hidden()
-                && (!presented || !visibility[slot_index])
+            if !settle && !widget.advances_while_hidden() && (!presented || !visibility[slot_index])
             {
                 continue;
             }
@@ -3469,11 +3465,7 @@ mod tests {
     struct Action;
 
     impl Widget for Action {
-        fn layout(
-            &mut self,
-            _: &mut LayoutContext<'_>,
-            constraints: Constraints,
-        ) -> LayoutResult {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
             LayoutResult::new(constraints.constrain(size(40.0, 10.0)))
         }
 
@@ -3482,8 +3474,7 @@ mod tests {
             context: &mut EventContext<'_>,
             event: &InputEvent,
         ) -> EventStatus {
-            if context.phase() == EventPhase::Target
-                && matches!(event, InputEvent::PointerDown(_))
+            if context.phase() == EventPhase::Target && matches!(event, InputEvent::PointerDown(_))
             {
                 context.request_overlay_dismiss();
                 return EventStatus::Handled;
@@ -3513,12 +3504,15 @@ mod tests {
             )
             .expect("popover host");
         let content = runtime
-            .append_child(popover, Solid {
-                size: size(60.0, 40.0),
-                color: Color::BLACK,
-                name: "content",
-                hits: Rc::new(RefCell::new(Vec::new())),
-            })
+            .append_child(
+                popover,
+                Solid {
+                    size: size(60.0, 40.0),
+                    color: Color::BLACK,
+                    name: "content",
+                    hits: Rc::new(RefCell::new(Vec::new())),
+                },
+            )
             .expect("content");
         let action = runtime.append_child(popover, Action).expect("action");
         let viewport = Constraints::tight(size(320.0, 240.0)).expect("valid constraints");
@@ -3533,7 +3527,10 @@ mod tests {
             true,
         ));
         assert!(!modal_open.get(), "modal closes");
-        assert!(!popover_open.get(), "popover inside the modal closes with it");
+        assert!(
+            !popover_open.get(),
+            "popover inside the modal closes with it"
+        );
 
         // Reopening the modal must not resurrect the stale popover.
         modal_open.set(true);
@@ -3544,10 +3541,14 @@ mod tests {
         // Closing through the handle (no dismiss call) also cascades.
         popover_open.set(true);
         runtime.invalidate_layout();
-        runtime.layout(viewport).expect("popover opens inside the modal");
+        runtime
+            .layout(viewport)
+            .expect("popover opens inside the modal");
         modal_open.set(false);
         runtime.invalidate_layout();
-        runtime.layout(viewport).expect("modal closes through the handle");
+        runtime
+            .layout(viewport)
+            .expect("modal closes through the handle");
         assert!(
             !popover_open.get(),
             "settle pass dismisses overlays orphaned by a handle close"
@@ -3640,13 +3641,14 @@ mod tests {
         let root = runtime.root();
         let opener = runtime.append_child(root, Focusable).expect("opener");
         let host = runtime
-            .append_child(root, OverlayHost {
-                open: Rc::clone(&open),
-            })
+            .append_child(
+                root,
+                OverlayHost {
+                    open: Rc::clone(&open),
+                },
+            )
             .expect("overlay host");
-        let content = runtime
-            .append_child(host, Focusable)
-            .expect("content");
+        let content = runtime.append_child(host, Focusable).expect("content");
         let viewport = Constraints::tight(size(320.0, 240.0)).expect("valid constraints");
         runtime.layout(viewport).expect("layout succeeds");
         runtime.focus_widget(opener).expect("opener focuses");
@@ -3712,9 +3714,7 @@ mod tests {
 
         let mut runtime = UiRuntime::new(TallHost);
         let root = runtime.root();
-        let content = runtime
-            .append_child(root, TallContent)
-            .expect("content");
+        let content = runtime.append_child(root, TallContent).expect("content");
         runtime
             .layout(Constraints::tight(size(320.0, 200.0)).expect("valid constraints"))
             .expect("layout succeeds");
@@ -4183,7 +4183,10 @@ mod tests {
         runtime.layout(viewport).expect("relayout succeeds");
         assert!(runtime.next_frame_in().is_some());
         runtime.advance_animations(std::time::Duration::from_millis(16));
-        assert!(ticks.get() > on_screen, "the loop resumes when visible again");
+        assert!(
+            ticks.get() > on_screen,
+            "the loop resumes when visible again"
+        );
     }
 
     #[test]
@@ -4341,7 +4344,11 @@ mod tests {
         runtime.layout(viewport).expect("modal layout succeeds");
         assert!(runtime.next_frame_in().is_some());
         runtime.advance_animations(std::time::Duration::from_millis(16));
-        assert_eq!(visual.get(), visual_before, "a scrim-covered loop is frozen");
+        assert_eq!(
+            visual.get(),
+            visual_before,
+            "a scrim-covered loop is frozen"
+        );
         assert!(
             media.get() > media_before,
             "media clocks keep running under a scrim"
@@ -4761,7 +4768,11 @@ mod tests {
             ("anchor-b", Color::rgba8(128, 128, 128, 255)),
             ("popup-b", Color::rgba8(0, 255, 0, 255)),
         ] {
-            let side = if name.starts_with("anchor") { 10.0 } else { 60.0 };
+            let side = if name.starts_with("anchor") {
+                10.0
+            } else {
+                60.0
+            };
             runtime
                 .append_child(
                     root,

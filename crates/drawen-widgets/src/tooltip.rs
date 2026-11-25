@@ -468,7 +468,8 @@ mod tests {
         let tooltip = Tooltip::new("Hint")
             .with_delay(Duration::ZERO)
             .with_placement(OverlayPlacement::bottom());
-        let mut runtime = UiRuntime::new(crate::Box::new().with_padding(Insets::new(70.0, 0.0, 0.0, 0.0)));
+        let mut runtime =
+            UiRuntime::new(crate::Box::new().with_padding(Insets::new(70.0, 0.0, 0.0, 0.0)));
         let root = runtime.root();
         let tooltip = runtime.append_child(root, tooltip).expect("tooltip");
         let anchor = runtime

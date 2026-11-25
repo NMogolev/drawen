@@ -787,7 +787,10 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
             let mut row_height = self.row_height;
             if self.variable {
                 let measured = layout.size().height() + ROW_VERTICAL_PADDING * 2.0;
-                let previous = self.measured.insert(key, measured).unwrap_or(self.row_height);
+                let previous = self
+                    .measured
+                    .insert(key, measured)
+                    .unwrap_or(self.row_height);
                 if (measured - previous).abs() > f32::EPSILON {
                     self.heights.add(row, f64::from(measured - previous));
                     // Scroll anchoring: a re-measured row fully above the
@@ -1863,7 +1866,11 @@ mod tests {
         variable.viewport = size(200.0, 100.0);
         variable.measured.insert(100, 60.0);
         variable.set_offset(80.0);
-        variable.data.0.borrow_mut().splice(0..0, [(98, "a".into()), (99, "b".into())]);
+        variable
+            .data
+            .0
+            .borrow_mut()
+            .splice(0..0, [(98, "a".into()), (99, "b".into())]);
         variable.anchor_prepended(2);
         // Two unmeasured rows at the 20px estimate extend the content by 40.
         assert_eq!(variable.offset(), 120.0);
@@ -1900,8 +1907,16 @@ mod tests {
         runtime
             .layout(viewport(200.0, 100.0))
             .expect("layout succeeds");
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 10.0)).is_handled());
-        let before = observed.borrow().last().cloned().expect("a row was selected");
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 10.0))
+                .is_handled()
+        );
+        let before = observed
+            .borrow()
+            .last()
+            .cloned()
+            .expect("a row was selected");
         let key_before = data.row_key(before[0]);
 
         // Prepend older history above the viewport and anchor the position.
@@ -1913,13 +1928,29 @@ mod tests {
             .layout(viewport(200.0, 100.0))
             .expect("layout succeeds");
 
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 10.0)).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 10.0))
+                .is_handled()
+        );
         // The anchored click re-selects the shifted row without a selection
         // change; Enter activates the focused row and proves which one it is.
         assert!(runtime.dispatch_event(&key(NamedKey::Enter)).is_handled());
-        let after = activated_observed.borrow().last().copied().expect("a row was activated");
-        assert_eq!(after, before[0] + 6, "indices shift with the prepended rows");
-        assert_eq!(data.row_key(after), key_before, "the same message stays under the pointer");
+        let after = activated_observed
+            .borrow()
+            .last()
+            .copied()
+            .expect("a row was activated");
+        assert_eq!(
+            after,
+            before[0] + 6,
+            "indices shift with the prepended rows"
+        );
+        assert_eq!(
+            data.row_key(after),
+            key_before,
+            "the same message stays under the pointer"
+        );
 
         drop(subscription);
         drop(selection);

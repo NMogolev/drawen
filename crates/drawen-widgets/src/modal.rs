@@ -360,9 +360,7 @@ mod tests {
         let opener = runtime.append_child(root, Button::new()).expect("opener");
         let modal = runtime.append_child(root, modal).expect("modal host");
         let panel = runtime.append_child(modal, Dialog::new()).expect("panel");
-        runtime
-            .append_child(panel, Button::new())
-            .expect("action");
+        runtime.append_child(panel, Button::new()).expect("action");
         runtime
             .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
             .expect("closed layout succeeds");
@@ -449,9 +447,7 @@ mod tests {
             )
             .expect("inner action");
         let constraints = Constraints::tight(size(400.0, 300.0)).expect("valid constraints");
-        runtime
-            .layout(constraints)
-            .expect("closed layout succeeds");
+        runtime.layout(constraints).expect("closed layout succeeds");
         runtime.focus_widget(opener).expect("opener is focusable");
         handle.open();
         runtime.invalidate_layout();
@@ -472,7 +468,9 @@ mod tests {
                 modifiers: drawen_core::Modifiers::NONE,
             },
         ));
-        runtime.layout(constraints).expect("popover layout succeeds");
+        runtime
+            .layout(constraints)
+            .expect("popover layout succeeds");
         assert_eq!(runtime.focused_widget(), Some(anchor));
 
         let _ = runtime.dispatch_event(&tab());

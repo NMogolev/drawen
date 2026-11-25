@@ -285,7 +285,12 @@ fn available_space(
     Size::new(width, height).expect("available space is non-negative and not NaN")
 }
 
-fn overlay_origin(anchor: Rect, size: Size, placement: OverlayPlacement, edge: OverlaySide) -> Point {
+fn overlay_origin(
+    anchor: Rect,
+    size: Size,
+    placement: OverlayPlacement,
+    edge: OverlaySide,
+) -> Point {
     let offset = placement.offset.max(0.0);
     match edge {
         OverlaySide::Bottom => Point::new(

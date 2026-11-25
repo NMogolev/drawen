@@ -99,9 +99,7 @@ impl Autocomplete {
         Self {
             editor: TextEditor::with_text(false, ""),
             options,
-            filter: Box::new(|query, option| {
-                option.to_lowercase().contains(&query.to_lowercase())
-            }),
+            filter: Box::new(|query, option| option.to_lowercase().contains(&query.to_lowercase())),
             filtered,
             active: None,
             open: false,
@@ -357,7 +355,11 @@ impl Autocomplete {
                 EventStatus::Handled
             }
             Key::Named(NamedKey::Enter) if !key.repeat => {
-                if self.open && self.active.is_some_and(|active| self.commit(active, context)) {
+                if self.open
+                    && self
+                        .active
+                        .is_some_and(|active| self.commit(active, context))
+                {
                     EventStatus::Handled
                 } else {
                     EventStatus::Ignored
@@ -477,9 +479,7 @@ impl Widget for Autocomplete {
         let font = environment.font_for(&style);
         let text_style = TextStyle::new_with_font(font.clone(), self.text_color);
         let (text, _) = self.display();
-        self.query_layout = environment
-            .text_shaper()
-            .layout(&text, &text_style, None);
+        self.query_layout = environment.text_shaper().layout(&text, &text_style, None);
         self.placeholder_layout = self.placeholder.as_ref().map(|placeholder| {
             environment.text_shaper().layout(
                 placeholder,
@@ -584,7 +584,10 @@ impl Widget for Autocomplete {
                 let caret = self.caret_rect();
                 context.fill_rect(
                     Rect::new(
-                        Point::new(caret.origin.x + surface.origin.x, caret.origin.y + surface.origin.y),
+                        Point::new(
+                            caret.origin.x + surface.origin.x,
+                            caret.origin.y + surface.origin.y,
+                        ),
                         caret.size,
                     ),
                     self.text_color,
@@ -737,9 +740,7 @@ impl Widget for AutocompletePopup {
                 shared.scroll = active + 1 - visible;
             }
         }
-        shared.scroll = shared
-            .scroll
-            .min(shared.rows.len().saturating_sub(visible));
+        shared.scroll = shared.scroll.min(shared.rows.len().saturating_sub(visible));
         #[allow(clippy::cast_precision_loss)]
         let height = visible as f32 * POPUP_ROW_HEIGHT;
         self.size = constraints.constrain(size(shared.width.max(1.0), height.max(1.0)));
@@ -936,11 +937,19 @@ mod tests {
     #[test]
     fn typing_filters_and_enter_commits_the_active_option() {
         let (mut runtime, selected, observed, _subscription) = setup();
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 5.0)).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 5.0))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
         assert!(expanded(&runtime), "focus opens the full list");
 
-        assert!(runtime.dispatch_event(&InputEvent::TextInput("bo".into())).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&InputEvent::TextInput("bo".into()))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
         assert!(runtime.dispatch_event(&key(NamedKey::Enter)).is_handled());
         runtime.layout(viewport()).expect("layout succeeds");
@@ -953,8 +962,16 @@ mod tests {
     #[test]
     fn clicking_a_popup_row_commits_it() {
         let (mut runtime, selected, observed, _subscription) = setup();
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 5.0)).is_handled());
-        let field_height = runtime.layout(viewport()).expect("layout succeeds").size().height();
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 5.0))
+                .is_handled()
+        );
+        let field_height = runtime
+            .layout(viewport())
+            .expect("layout succeeds")
+            .size()
+            .height();
 
         // The popup floats below the field with the default overlay margin;
         // with an empty query the second row is bob (option index 1).
@@ -970,7 +987,11 @@ mod tests {
     #[test]
     fn escape_closes_the_list_without_committing() {
         let (mut runtime, selected, observed, _subscription) = setup();
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 5.0)).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 5.0))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
         assert!(expanded(&runtime));
 
@@ -984,12 +1005,24 @@ mod tests {
     #[test]
     fn arrow_keys_walk_the_filtered_rows() {
         let (mut runtime, selected, observed, _subscription) = setup();
-        assert!(runtime.dispatch_event(&pointer_down(10.0, 5.0)).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&pointer_down(10.0, 5.0))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
-        assert!(runtime.dispatch_event(&InputEvent::TextInput("a".into())).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&InputEvent::TextInput("a".into()))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
         // "a" matches alice and carol; step to the second match and commit.
-        assert!(runtime.dispatch_event(&key(NamedKey::ArrowDown)).is_handled());
+        assert!(
+            runtime
+                .dispatch_event(&key(NamedKey::ArrowDown))
+                .is_handled()
+        );
         runtime.layout(viewport()).expect("layout succeeds");
         assert!(runtime.dispatch_event(&key(NamedKey::Enter)).is_handled());
         runtime.layout(viewport()).expect("layout succeeds");
