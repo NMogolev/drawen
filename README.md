@@ -1,6 +1,8 @@
 # Drawen
 
 [![CI](https://github.com/NMogolev/drawen/actions/workflows/ci.yml/badge.svg)](https://github.com/NMogolev/drawen/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/drawen.svg)](https://crates.io/crates/drawen)
+[![docs.rs](https://img.shields.io/docsrs/drawen.svg)](https://docs.rs/drawen)
 
 **Drawen** is a Rust UI toolkit for native desktop applications. It combines a
 retained widget tree, backend-neutral display lists, CSS-inspired stylesheets,
