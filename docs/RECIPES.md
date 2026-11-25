@@ -868,10 +868,12 @@ Rules that keep bindings thin:
   treats `0.0`/`-0.0` as equal; keep its domain sanitized with
   `Property::normalized` (as `Slider::value` does) rather than relying on
   equality to reject bad values.
-- Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`, and
-  `Switch::checked()` return `Property<bool>`; `Slider::value()` returns
-  `Property<f32>`. A disabled button ignores activation, skips focus, and
-  matches `button:disabled` in DSS.
+- Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`,
+  `Switch::checked()`, and `Expander::expanded()` return `Property<bool>`;
+  `Slider::value()` and `ProgressBar::progress()` return `Property<f32>`;
+  `TabBar::selected()`, `SegmentedControl::selected()`, and
+  `Dropdown::selected()` return `Property<Option<usize>>`. A disabled button
+  ignores activation, skips focus, and matches `button:disabled` in DSS.
 
 ### Binding toggles and sliders
 
@@ -915,6 +917,40 @@ Read a scalar with `.get()`: `checkbox.is_checked()`, `slider.value().get()`.
 A property's `changed()` fires on every write; the widget's `toggled()` /
 `changed()` signal fires only on user interaction.
 
+### Binding progress, expanders, and selection
+
+`ProgressBar::progress()` is a passive clamped float, exactly like the slider
+but without a user signal: bind it with `runtime.bind(&bar.progress(),
+&state.fraction)` and every copy stays in `0.0..=1.0`.
+
+Choose `bind` versus `bind_layout` by whether the value changes geometry.
+`Expander::expanded()` and `TabBar::selected()` change what is laid out (the
+body section, the active page), so bind them with `bind_layout`; the next paint
+re-measures the tree. `SegmentedControl::selected()` and `Dropdown::selected()`
+only repaint, so plain `bind` is enough:
+
+```rust
+use drawen::{Expander, Property, TabBar};
+
+let open = Property::new(false);
+let expander = Expander::new("Advanced");
+let expanded = expander.expanded();
+let expander = runtime.append_child(runtime.root(), expander)?;
+let _binding = runtime.bind_layout(&expanded, &open); // geometry -> bind_layout
+
+let tab = Property::new(Some(0_usize));
+let tabs = TabBar::new(["Home", "Settings"]);
+let selected = tabs.selected();
+let tabs = runtime.append_child(runtime.root(), tabs)?;
+let _binding = runtime.bind_layout(&selected, &tab);
+```
+
+Selection properties normalize against the fixed item count: a binding copy of
+an out-of-range index resolves to `None` (no selection) rather than panicking,
+so a stale source index cannot select a nonexistent tab. The direct setters
+(`set_selected`) still panic on an invalid index, exactly as `Slider::set_value`
+asserts finiteness while its normalizer stays lenient for binding copies.
+
 ### Migrating from 0.3
 
 The property conversion is a breaking-change batch for 0.4.0:
@@ -923,10 +959,15 @@ The property conversion is a breaking-change batch for 0.4.0:
 | --- | --- |
 | `Checkbox::is_checked` / `Switch::is_checked` were `const fn` | still return `bool`, but are no longer `const` |
 | `Slider::value() -> f32` (a `const fn`) | `Slider::value() -> Property<f32>`; read with `slider.value().get()` |
+| `ProgressBar::progress() -> f32` (a `const fn`) | `ProgressBar::progress() -> Property<f32>`; read with `.progress().get()`; `new()` also loses `const` |
+| `Expander::is_expanded` was a `const fn` | still returns `bool`, but is no longer `const`; `with_expanded` loses `const` |
+| `TabBar::selected` / `SegmentedControl::selected` / `Dropdown::selected` were `const fn -> Option<usize>` | return `Property<Option<usize>>`; read with `.selected().get()` |
 | `Checkbox::set_checked` / `Switch::set_checked` emitted nothing | emit `checked().changed()` on a real change (still not `toggled()`) |
 | `Slider::set_value` emitted nothing | emits `value().changed()` on a real change (still not the user `changed()`) |
+| `ProgressBar::set_progress` / `Expander::set_expanded` / the selection `set_selected` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
 
 `Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`. The
 user-interaction signals (`toggled()`, `changed()`, `activated()`) are
 unchanged, so existing subscription code keeps compiling; only `const`
-contexts and scalar `Slider::value()` reads need updating.
+contexts and scalar reads (`.value()`, `.progress()`, `.selected()`) need
+updating to `.get()`. Setter signatures are unchanged.

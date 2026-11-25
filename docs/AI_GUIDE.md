@@ -46,6 +46,10 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `checkbox.checked = state.agreed` | `runtime.bind(&checkbox.checked(), &state.agreed)`; `Switch::checked()` too |
 | `slider.value = state.volume` | `runtime.bind(&slider.value(), &state.volume)`; copies are clamped to the range |
 | Reading a slider value | `slider.value().get()` (`value()` returns `Property<f32>`); `minimum()`/`maximum()` stay `f32` |
+| `progress.value = state.fraction` | `runtime.bind(&bar.progress(), &state.fraction)`; copies are clamped to `0.0..=1.0` |
+| `expander.open = state.open` | `runtime.bind_layout(&expander.expanded(), &state.open)` — expanding changes geometry |
+| `tabs.selected = state.tab` | `runtime.bind_layout(&tabs.selected(), &state.tab)`; `SegmentedControl`/`Dropdown` use `bind` |
+| Reading a selection | `tabs.selected().get()` returns `Option<usize>`; an out-of-range binding copy resolves to `None` |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |
