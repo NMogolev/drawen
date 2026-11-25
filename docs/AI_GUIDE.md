@@ -56,7 +56,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | `splitter.ratio = state.ratio` | `runtime.bind_layout(&splitter.ratio(), &state.ratio)` — the ratio sets the pane sizes |
 | `field.text = state.name` | `runtime.bind_layout(&field.text(), &state.name)`; `TextEdit::text()`, `Autocomplete::query()`, `CommandPalette::query()` too. User edits keep the caret; an external write resets it |
 | Two-way text state | Two opposite `bind`s converge (equal writes are silent); no `bind_from` or reactive graph |
-| `view.offset = state.scroll` | `runtime.bind_layout(&view.offset(), &state.scroll)`; `ListView::offset()` too. Kept `>= 0`; the content upper bound is clamped at layout |
+| `view.offset = state.scroll` | `runtime.bind_layout(&view.offset(), &state.scroll)`; `ListView`, `VirtualList`, `VirtualTable` too. Kept `>= 0`; the content upper bound is clamped at layout. `VirtualListHandle` commands write the same property |
 | `std::thread::spawn` that captures a widget | `drawen::tasks::TaskPool` + `UiDispatcher`; workers own plain data |
 | An audio widget with its own timer | `AudioPlayer` + `MediaSession`; audio is part of the media session, not a second clock |
 | `drawen::MediaDirector` by default | Enable the `director` feature; `AudioPaleoSession` needs `audio` |

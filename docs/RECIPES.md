@@ -871,7 +871,8 @@ Rules that keep bindings thin:
 - Bindable widget properties: `Button::enabled()`, `Checkbox::checked()`,
   `Switch::checked()`, and `Expander::expanded()` return `Property<bool>`;
   `Slider::value()`, `ProgressBar::progress()`, `ImageViewer::zoom()`,
-  `Splitter::ratio()`, `ScrollView::offset()`, and `ListView::offset()` return
+  `Splitter::ratio()`, `ScrollView::offset()`, `ListView::offset()`,
+  `VirtualList::offset()`, and `VirtualTable::offset()` return
   `Property<f32>`; `Spinner::progress()` returns `Property<Option<f32>>` (`None`
   is indeterminate); `TabBar::selected()`, `SegmentedControl::selected()`, and
   `Dropdown::selected()` return `Property<Option<usize>>`;
@@ -1052,6 +1053,14 @@ let _binding = runtime.bind_layout(&offset, &scroll);
 scroll.set(500.0); // clamped to content - viewport on the next layout
 ```
 
+`VirtualList::offset()` and `VirtualTable::offset()` are the same
+`Property<f32>` bound with `bind_layout`. The data-driven list keeps its
+`VirtualListHandle` command queue: `anchor_prepended`, `set_offset`, and
+`scroll_to_bottom` still batch for the next layout and write the same property,
+so a bound offset stays consistent with programmatic scrolling and history
+anchoring. The `scroll_to_bottom` infinity sentinel is resolved against the
+measured content end at layout, never stored in the property.
+
 ### Migrating from 0.3
 
 The property conversion is a breaking-change batch for 0.4.0:
@@ -1069,11 +1078,13 @@ The property conversion is a breaking-change batch for 0.4.0:
 | `Splitter::ratio() -> f32` (a `const fn`) | `Splitter::ratio() -> Property<f32>`; read with `.ratio().get()` |
 | `TextField::text()` / `TextEdit::text()` / `Autocomplete::query()` / `CommandPalette::query()` were `&str` | return `Property<String>`; read with `.text().get()` / `.query().get()` |
 | `ScrollView::offset()` / `ListView::offset()` were `const fn -> f32` | return `Property<f32>`; read with `.offset().get()`; `ScrollView::new` / `vertical` / `horizontal` lose `const` |
+| `VirtualList::offset()` was a `const fn -> f32` | returns `Property<f32>`; read with `.offset().get()`; the handle command queue is unchanged |
+| `VirtualTable` had no public offset accessor | gains `offset() -> Property<f32>` and `set_offset` (additive) |
 | `Checkbox::set_checked` / `Switch::set_checked` emitted nothing | emit `checked().changed()` on a real change (still not `toggled()`) |
 | `Slider::set_value` emitted nothing | emits `value().changed()` on a real change (still not the user `changed()`) |
 | `ProgressBar::set_progress` / `Expander::set_expanded` / the selection `set_selected` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
 | `Spinner::set_progress` / `ImageViewer::set_zoom` / `ImageViewer::reset_view` emitted nothing | emit the property's `changed()` on a real change (still not the user signal) |
-| `TextField::set_text` / `TextEdit::set_text` / `Autocomplete::set_query` / `ScrollView::set_offset` / `ListView::set_offset` emitted nothing | emit the property's `changed()` on a real change (still not the user signal); `CommandPalette` gains a `set_query` |
+| `TextField::set_text` / `TextEdit::set_text` / `Autocomplete::set_query` / `ScrollView::set_offset` / `ListView::set_offset` / `VirtualList::set_offset` emitted nothing | emit the property's `changed()` on a real change (still not the user signal); `CommandPalette` gains a `set_query` |
 
 `Slider::minimum()` and `Slider::maximum()` stay `const fn -> f32`, as do
 `ImageViewer::minimum_zoom()`, `ImageViewer::maximum_zoom()`, the viewer's pan
