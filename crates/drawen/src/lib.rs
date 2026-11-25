@@ -85,16 +85,16 @@ pub use drawen_ui::{
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
 pub use drawen_widgets::{
-    Alert, AlertTone, Align, Alignment, Avatar, AvatarStatus, Badge, BadgeTone, Box, Button,
-    ButtonStyle, Card, CardStyle, Checkbox, ComboBox, CommandPalette, Container, Dialog, Divider,
-    DividerAxis, DockArea, DockAreaError, DockItem, Dropdown, Expander, Image, ImageFit,
-    ImageViewer, ListView, Menu, MenuBar, MenuEntry, Modal, ModalHandle, Padding, PaletteCommand,
-    Popover, PopoverTrigger, ProgressBar, RadioButton, RadioGroup, ScrollAxis, ScrollView,
-    SegmentedControl, SelectionMode, SelectionModel, SizedBox, Skeleton, Slider, Spinner,
-    SplitAxis, SplitButton, Splitter, Stack, Switch, TabBar, Text, TextEdit, TextField, TextInput,
-    TitleBar, TitleBarStyle, Toast, ToastCorner, ToastHandle, ToastHost, ToastTone, Toolbar,
-    Tooltip, VirtualDataSource, VirtualList, VirtualTable, VirtualTableSource, WindowChromeState,
-    WindowControl, WindowFrame,
+    Alert, AlertTone, Align, Alignment, Autocomplete, AutocompletePopup, Avatar, AvatarStatus,
+    Badge, BadgeTone, Box, Button, ButtonStyle, Card, CardStyle, Checkbox, ComboBox,
+    CommandPalette, Container, Dialog, Divider, DividerAxis, DockArea, DockAreaError, DockItem,
+    Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, Menu, MenuBar, MenuEntry, Modal,
+    ModalHandle, Padding, PaletteCommand, Popover, PopoverTrigger, ProgressBar, RadioButton,
+    RadioGroup, ScrollAxis, ScrollView, SegmentedControl, SelectionMode, SelectionModel,
+    SizedBox, Skeleton, Slider, Spinner, SplitAxis, SplitButton, Splitter, Stack, Switch, TabBar,
+    Text, TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toast, ToastCorner, ToastHandle,
+    ToastHost, ToastTone, Toolbar, Tooltip, VirtualDataSource, VirtualList, VirtualListHandle,
+    VirtualTable, VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
 };
 #[cfg(feature = "media")]
 pub use drawen_widgets::{

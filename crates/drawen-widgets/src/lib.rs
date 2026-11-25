@@ -28,6 +28,7 @@ mod box_widget;
 mod button;
 mod card;
 mod checkbox;
+mod autocomplete;
 mod command_palette;
 mod dialog;
 mod divider;
@@ -87,6 +88,7 @@ pub use audio_session::AudioPaleoSession;
 pub use avatar::{Avatar, AvatarStatus};
 pub use badge::{Badge, BadgeTone};
 pub use box_widget::Box;
+pub use autocomplete::{Autocomplete, AutocompletePopup};
 pub use button::{Button, ButtonStyle};
 pub use card::{Card, CardStyle};
 pub use checkbox::Checkbox;
@@ -148,8 +150,8 @@ pub use video_ffmpeg::{FfmpegConfig, VideoError};
 #[cfg(feature = "media")]
 pub type VideoPlayer = Video;
 pub use virtual_list::{
-    Column, SelectionMode, SelectionModel, VirtualDataSource, VirtualList, VirtualTable,
-    VirtualTableSource,
+    Column, SelectionMode, SelectionModel, VirtualDataSource, VirtualList, VirtualListHandle,
+    VirtualTable, VirtualTableSource,
 };
 pub use window_frame::WindowFrame;
 
