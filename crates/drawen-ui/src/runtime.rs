@@ -15,6 +15,7 @@ use drawen_core::{
 use drawen_render::{
     DisplayList, DisplayListStats, PaintContext, PaintTransition, TextLayoutCacheStats,
 };
+use drawen_signals::{Binding, Property, PropertyDamage};
 
 use crate::{
     AccessibilityAction, AccessibilityActions, AccessibilityRole, AccessibilityState,
@@ -425,6 +426,7 @@ pub struct UiRuntime {
     commands: Vec<KeyboardCommand>,
     window_commands: Vec<WindowCommand>,
     redraw_requested: bool,
+    property_damage: Rc<PropertyDamage>,
     environment: UiEnvironment,
     overlay_roots: Vec<WidgetId>,
     /// Focus target to restore when each open overlay root closes, captured
@@ -621,6 +623,7 @@ impl UiRuntime {
             commands: Vec::new(),
             window_commands: Vec::new(),
             redraw_requested: true,
+            property_damage: Rc::new(PropertyDamage::new()),
             environment,
             overlay_roots: Vec::new(),
             overlay_restore_focus: HashMap::new(),
@@ -682,6 +685,75 @@ impl UiRuntime {
         }
     }
 
+    /// Watches `property` so each changed value invalidates retained paint.
+    ///
+    /// The property keeps a weak handle to this runtime's damage flag, so
+    /// writes from application code or signal handlers wake the next
+    /// [`Self::take_redraw_request`], [`Self::tick`], or [`Self::paint`]
+    /// without an explicit invalidation call. Use [`Self::watch_layout`]
+    /// when the value participates in layout.
+    pub fn watch<T: Clone + PartialEq + 'static>(&self, property: &Property<T>) {
+        property.watch(&self.property_damage, false);
+    }
+
+    /// Watches `property` so each changed value invalidates layout and paint.
+    ///
+    /// Use this for values a widget reads during [`Widget::layout`], such as
+    /// content that changes an intrinsic size. The next [`Self::paint`]
+    /// re-runs layout automatically when the retained layout was cleared.
+    pub fn watch_layout<T: Clone + PartialEq + 'static>(&self, property: &Property<T>) {
+        property.watch(&self.property_damage, true);
+    }
+
+    /// Binds `target` to follow `source`, synchronizing the current value now.
+    ///
+    /// The target is watched for paint damage, copied from the source once,
+    /// and then updated on every source change until the returned [`Binding`]
+    /// is dropped. Equal writes are silent, so chains and cycles of bindings
+    /// converge instead of looping. Keep the binding alive exactly like a
+    /// [`Subscription`](crate::Subscription). Use [`Self::bind_layout`] when
+    /// the target participates in layout.
+    pub fn bind<T: Clone + PartialEq + 'static>(
+        &self,
+        target: &Property<T>,
+        source: &Property<T>,
+    ) -> Binding {
+        self.watch(target);
+        target.set(source.get());
+        let target = target.clone();
+        Binding::new(source.changed().subscribe(move |value| {
+            target.set(value.clone());
+        }))
+    }
+
+    /// Binds `target` to follow `source`, invalidating layout on each change.
+    ///
+    /// This is [`Self::bind`] for targets a widget reads during
+    /// [`Widget::layout`]; every copied change clears the retained layout so
+    /// the next paint re-measures the tree.
+    pub fn bind_layout<T: Clone + PartialEq + 'static>(
+        &self,
+        target: &Property<T>,
+        source: &Property<T>,
+    ) -> Binding {
+        self.watch_layout(target);
+        target.set(source.get());
+        let target = target.clone();
+        Binding::new(source.changed().subscribe(move |value| {
+            target.set(value.clone());
+        }))
+    }
+
+    fn drain_property_damage(&mut self) {
+        let layout = self.property_damage.take_layout();
+        let paint = self.property_damage.take_paint();
+        if layout {
+            self.invalidate_layout();
+        } else if paint {
+            self.invalidate_paint();
+        }
+    }
+
     /// Advances hover, press, focus, and widget-owned animations by `delta`.
     ///
     /// [`Self::paint`] calls this automatically with the wall-clock time since
@@ -732,6 +804,7 @@ impl UiRuntime {
     /// `WindowApplication::tick` when this reports that a repaint is needed
     /// after the window becomes visible again.
     pub fn tick(&mut self, delta: Duration) -> bool {
+        self.drain_property_damage();
         self.advance_animations(delta);
         self.redraw_requested || self.animating
     }
@@ -1320,6 +1393,7 @@ impl UiRuntime {
 
     /// Returns whether a handler requested another frame since the last call.
     pub fn take_redraw_request(&mut self) -> bool {
+        self.drain_property_damage();
         std::mem::replace(&mut self.redraw_requested, false)
     }
 
@@ -1338,6 +1412,7 @@ impl UiRuntime {
     ///
     /// Returns [`UiRuntimeError::WidgetPanicked`] when widget paint code panics.
     pub fn paint(&mut self, context: &mut PaintContext<'_>) -> Result<(), UiRuntimeError> {
+        self.drain_property_damage();
         if self.layout.is_none()
             && let Some(constraints) = self.last_constraints
         {
@@ -2775,8 +2850,8 @@ mod tests {
 
     use crate::{
         ChildLayout, DismissPolicy, EventContext, EventPhase, EventStatus, LayoutContext,
-        LayoutResult, LightTheme, Row, Theme, UiEnvironment, UiRuntime, UiRuntimeError, Widget,
-        event,
+        LayoutResult, LightTheme, Property, Row, Theme, UiEnvironment, UiRuntime, UiRuntimeError,
+        Widget, event,
     };
 
     type EventRecord = (&'static str, EventPhase, Point);
@@ -2799,6 +2874,15 @@ mod tests {
     }
 
     struct PaintRecorder;
+
+    struct PropertyView {
+        value: Property<u32>,
+        painted: Rc<Cell<u32>>,
+    }
+
+    struct SizedByProperty {
+        width: Property<u32>,
+    }
 
     struct CountingPaintRecorder {
         paints: Rc<Cell<usize>>,
@@ -2851,6 +2935,26 @@ mod tests {
 
         fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, _: Rect) {
             context.fill_rect(Rect::ZERO, Color::BLACK);
+        }
+    }
+
+    impl Widget for PropertyView {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(Size::ZERO))
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, _: Rect) {
+            self.painted.set(self.value.get());
+            context.fill_rect(Rect::ZERO, Color::BLACK);
+        }
+    }
+
+    impl Widget for SizedByProperty {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            let width = f32::from(u16::try_from(self.width.get()).expect("test width fits"));
+            LayoutResult::new(
+                constraints.constrain(Size::new(width, 10.0).expect("test size is valid")),
+            )
         }
     }
 
@@ -3888,6 +3992,161 @@ mod tests {
 
         assert_eq!(paints.get(), 2);
         assert!(runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn watched_property_wakes_the_redraw_path() {
+        let value = Property::new(1_u32);
+        let painted = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(PropertyView {
+            value: value.clone(),
+            painted: Rc::clone(&painted),
+        });
+        runtime.watch(&value);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+        assert_eq!(painted.get(), 1);
+        assert!(runtime.take_redraw_request());
+
+        value.set(2);
+
+        assert!(runtime.take_redraw_request());
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("invalidated paint succeeds");
+        assert_eq!(painted.get(), 2);
+    }
+
+    #[test]
+    fn unwatched_property_does_not_request_redraw() {
+        let value = Property::new(1_u32);
+        let painted = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(PropertyView {
+            value: value.clone(),
+            painted: Rc::clone(&painted),
+        });
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+        assert!(runtime.take_redraw_request());
+
+        value.set(2);
+
+        assert!(!runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn bind_synchronizes_now_and_follows_source_changes() {
+        let source = Property::new(7_u32);
+        let target = Property::new(0_u32);
+        let painted = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(PropertyView {
+            value: target.clone(),
+            painted: Rc::clone(&painted),
+        });
+        let binding = runtime.bind(&target, &source);
+        assert_eq!(target.get(), 7);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+        assert_eq!(painted.get(), 7);
+
+        source.set(9);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("bound paint succeeds");
+        assert_eq!(painted.get(), 9);
+
+        drop(binding);
+        source.set(11);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("unbound paint succeeds");
+        assert_eq!(painted.get(), 9);
+    }
+
+    #[test]
+    fn bind_layout_relays_out_through_paint() {
+        let source = Property::new(20_u32);
+        let width = Property::new(10_u32);
+        let mut runtime = UiRuntime::new(SizedByProperty {
+            width: width.clone(),
+        });
+        let _binding = runtime.bind_layout(&width, &source);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("layout succeeds");
+        let root = runtime.root();
+        assert!(
+            (runtime.bounds(root).expect("root is laid out").size.width() - 20.0).abs()
+                < f32::EPSILON
+        );
+
+        source.set(48);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("bound paint succeeds");
+
+        assert!(
+            (runtime.bounds(root).expect("root is laid out").size.width() - 48.0).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn cyclic_bindings_converge() {
+        let left = Property::new(0_u32);
+        let right = Property::new(0_u32);
+        let runtime = UiRuntime::new(PaintRecorder);
+        let _left_binding = runtime.bind(&left, &right);
+        let _right_binding = runtime.bind(&right, &left);
+
+        right.set(5);
+
+        assert_eq!(left.get(), 5);
+        assert_eq!(right.get(), 5);
+    }
+
+    #[test]
+    fn tick_drains_property_damage_while_hidden() {
+        let value = Property::new(1_u32);
+        let painted = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(PropertyView {
+            value: value.clone(),
+            painted: Rc::clone(&painted),
+        });
+        runtime.watch(&value);
+        runtime.set_presented(false);
+        assert!(!runtime.take_redraw_request());
+
+        value.set(2);
+
+        assert!(runtime.tick(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn dropped_runtime_leaves_bound_properties_usable() {
+        let source = Property::new(1_u32);
+        let target = Property::new(0_u32);
+        let binding = {
+            let runtime = UiRuntime::new(PaintRecorder);
+            runtime.bind(&target, &source)
+        };
+        assert!(source.set(3));
+        assert_eq!(target.get(), 3);
+        drop(binding);
+        assert!(source.set(4));
+        assert_eq!(target.get(), 3);
     }
 
     #[test]

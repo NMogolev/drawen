@@ -9,7 +9,8 @@
 //!
 //! [`UiEnvironment`] carries the theme, logical DPI, locale, default font, and
 //! text shaper. [`Signal`] and [`Subscription`] provide typed, UI-thread-local
-//! notifications without a global event bus.
+//! notifications without a global event bus; [`Property`] adds a stored value
+//! that [`UiRuntime::bind`] copies into widget properties.
 
 mod accessibility;
 mod column;
@@ -39,7 +40,7 @@ pub use accessibility::{
 };
 pub use column::Column;
 pub use command::{KeyChord, KeyboardCommand};
-pub use drawen_signals::{Signal, Subscription};
+pub use drawen_signals::{Binding, Property, PropertyDamage, Signal, Subscription};
 pub use dss::{
     ChildPosition, DssError, DssStyle, DssTheme, PseudoClass, Selector, StyleRule, StyleSheet,
     StyleTarget,
