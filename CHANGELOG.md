@@ -67,6 +67,24 @@ in the headings because the version itself must stay valid semver; see
   the widget's single child, anchored below the button through the overlay
   layer with light dismissal. `opened()` / `closed()` report menu transitions,
   Enter and Space activate the primary segment, and `ArrowDown` opens the menu.
+- Closing an overlay now cascades to the overlays opened from inside its
+  subtree. The runtime records the nearest ancestor overlay root that owns each
+  open root, so a popover opened inside a modal closes with the modal instead of
+  lingering as a state orphan that reappears on reopen. The cascade runs both on
+  the dismissal paths and after a layout that drops a surface closed through its
+  own handle, syncing the owner widgets' open flags.
+- Focus restore on close now validates the remembered opener. When that widget
+  was removed or hidden while the overlay was open, focus falls back to the root
+  (if it accepts focus) instead of being cleared or pointed at a dead handle.
+- `place_overlay` returns a `ResolvedOverlay` with the placement `origin`, the
+  resolved `side` after flipping, and the `available` size that fits on that
+  side. When neither side fits, the side with more room wins. The runtime
+  re-measures an oversized overlay child with constraints capped to `available`,
+  so long content shrinks and scrolls instead of covering its anchor.
+- `Menu` scrolls when its height is capped: the wheel and keyboard navigation
+  keep the active row visible, and hit testing and paint account for the scroll
+  offset. `Tooltip` paints an anchor-facing nib that follows the resolved side
+  after a flip, and shrinks its bubble to the available space.
 
 ### Fonts
 

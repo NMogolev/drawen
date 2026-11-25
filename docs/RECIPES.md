@@ -488,10 +488,24 @@ opposite side when it would leave the window along that side's axis, clamps it
 inside the viewport margin, paints it above the rest of the tree, and hit tests
 it first. Open overlays stack LIFO by open time: the surface opened last paints
 on top and receives hits first, regardless of where its owner sits in the tree,
-and a nested menu always stacks above the modal that contains it. Closing an
-overlay returns keyboard focus to the widget that held it when the overlay
-opened. Overlay content stays a normal retained subtree, so bubbling, focus, and
-accessibility keep working.
+and a nested menu always stacks above the modal that contains it.
+
+Stacking orders the layer but does not own it. The runtime also records which
+overlay opened each surface, so closing a modal or popover cascades to the
+overlays opened from inside it: they close in the same pass and their owners'
+open flags are synced, so nothing reappears when the surface is reopened.
+Closing an overlay returns keyboard focus to the widget that held it when the
+overlay opened; if that opener was removed or hidden in the meantime, focus
+falls back to the root instead of a dead handle. Overlay content stays a normal
+retained subtree, so bubbling, focus, and accessibility keep working.
+
+Placement resolves to a side and a budget. `place_overlay` returns a
+`ResolvedOverlay` carrying the origin, the side actually used after flipping,
+and the largest size that fits on that side without covering the anchor. When
+the measured content is bigger than that budget, the runtime re-measures it with
+capped constraints, so a long menu shrinks and scrolls instead of overflowing.
+The resolved side is also what anchor-facing decorations, such as the tooltip
+nib, follow after a flip.
 
 `Tooltip` wraps one anchor and adds a non-interactive hover hint:
 
@@ -509,7 +523,10 @@ runtime.append_child(button, Text::styled("Refresh", TextStyle::new(14.0, Color:
 
 The bubble is painted through the runtime's floating pass, so toolbars and later
 siblings cannot cover it, and it is skipped by hit testing: moving the pointer
-onto the bubble dismisses it. Reduced motion removes the fade.
+onto the bubble dismisses it. A small nib points at the anchor and follows the
+resolved side after a flip. Near a window edge the bubble shrinks to the space
+available and clips its text rather than covering the anchor. Reduced motion
+removes the fade.
 
 `Popover` has exactly two children: the anchor and the floating content.
 
@@ -536,7 +553,10 @@ the panel at the pointer, which is the usual context-menu shape.
 `open_at`, or `close` and reacts to the `opened()` and `closed()` signals.
 
 `Menu` supplies the rows for a dropdown or context menu. It is data-driven,
-paints its own surface, and handles pointer and keyboard navigation:
+paints its own surface, and handles pointer and keyboard navigation. When the
+overlay layer caps its height, the list scrolls: the wheel and the arrow keys
+keep the active row visible, and clicks land on the scrolled row under the
+pointer:
 
 ```rust
 use drawen::{Button, Menu, MenuEntry, Popover, PopoverTrigger};
@@ -568,6 +588,8 @@ Rules that keep overlays predictable:
 
 - Placement is a request, not a coordinate. Choose a side and an alignment with
   `OverlayPlacement` and let the runtime flip and clamp.
+- Oversized content shrinks to the space available on the resolved side and
+  scrolls there; do not force a fixed height that would cover the anchor.
 - Overlay content is still a normal subtree. Do not also position it absolutely.
 - A closed popover does not lay out its panel, so hidden menus cost no geometry
   work.

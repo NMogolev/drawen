@@ -78,7 +78,7 @@ pub use drawen_ui::{
     EventPhase, EventStatus, Font, FontDatabase, FontDescriptor, FontFamily, FontMetrics, FontSize,
     FontStyle, FontWeight, FrameDiagnostics, KeyChord, KeyboardCommand, LayoutContext,
     LayoutResult, LightTheme, OverlayAlign, OverlayOptions, OverlayPlacement, OverlaySide,
-    PseudoClass, ResizeEdge, Row, RuntimeStats, Selector, Signal, StyleRule, StyleSheet,
+    PseudoClass, ResizeEdge, ResolvedOverlay, Row, RuntimeStats, Selector, Signal, StyleRule, StyleSheet,
     StyleTarget, Styled, Subscription, SurfaceStyle, SystemAppearance, SystemTheme, Theme,
     UiEnvironment, UiRuntime, UiRuntimeError, Widget, WindowCommand, place_overlay,
 };
