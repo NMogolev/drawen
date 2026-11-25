@@ -195,9 +195,13 @@ pub fn place_overlay(
     }
     let margin = options.margin.max(0.0);
     let mut candidate = origin(placement.side);
-    if !fits(candidate, size, viewport, margin) {
-        let flipped = origin(placement.side.opposite());
-        if fits(flipped, size, viewport, margin) {
+    // The flip decision only looks at the axis the side extends along.
+    // Cross-axis overflow is resolved by clamping, so a wide overlay near the
+    // right edge still flips vertically instead of covering its anchor.
+    if !fits_side(candidate, size, viewport, margin, placement.side) {
+        let opposite = placement.side.opposite();
+        let flipped = origin(opposite);
+        if fits_side(flipped, size, viewport, margin, opposite) {
             candidate = flipped;
         }
     }
@@ -220,15 +224,21 @@ fn align_y(anchor: Rect, size: Size, align: OverlayAlign) -> f32 {
     }
 }
 
-fn fits(origin: Point, size: Size, viewport: Rect, margin: f32) -> bool {
-    let left = viewport.origin.x + margin;
-    let top = viewport.origin.y + margin;
-    let right = viewport.right() - margin;
-    let bottom = viewport.bottom() - margin;
-    origin.x >= left
-        && origin.y >= top
-        && origin.x + size.width() <= right
-        && origin.y + size.height() <= bottom
+/// Whether the overlay fits along the axis the requested side extends along.
+///
+/// The cross axis is deliberately ignored: it is clamped into the viewport
+/// after the side is chosen, and must not veto a flip on the primary axis.
+fn fits_side(origin: Point, size: Size, viewport: Rect, margin: f32, along: OverlaySide) -> bool {
+    match along {
+        OverlaySide::Top | OverlaySide::Bottom => {
+            origin.y >= viewport.origin.y + margin
+                && origin.y + size.height() <= viewport.bottom() - margin
+        }
+        OverlaySide::Left | OverlaySide::Right => {
+            origin.x >= viewport.origin.x + margin
+                && origin.x + size.width() <= viewport.right() - margin
+        }
+    }
 }
 
 fn clamp_to_viewport(origin: Point, size: Size, viewport: Rect, margin: f32) -> Point {
@@ -300,6 +310,47 @@ mod tests {
 
         assert!((origin.x - 0.0).abs() < f32::EPSILON);
         assert!((origin.y + 24.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cross_axis_overflow_does_not_block_the_vertical_flip() {
+        // The overlay overflows the right edge on X and the bottom edge on Y.
+        // Only the Y overflow may veto the requested side; the flip upward
+        // must still happen so the overlay does not cover its anchor.
+        let anchor = Rect::new(Point::new(280.0, 170.0), size(20.0, 20.0));
+        let options = OverlayOptions::new(OverlayPlacement::new(
+            OverlaySide::Bottom,
+            OverlayAlign::Center,
+        ));
+        let origin = place_overlay(
+            anchor,
+            size(120.0, 80.0),
+            Some(viewport(320.0, 200.0)),
+            options,
+        );
+
+        assert!((origin.x - 192.0).abs() < f32::EPSILON);
+        assert!((origin.y - 86.0).abs() < f32::EPSILON);
+        assert!(origin.y + 80.0 <= anchor.origin.y, "overlay covers its anchor");
+    }
+
+    #[test]
+    fn cross_axis_overflow_does_not_block_the_horizontal_flip() {
+        let anchor = Rect::new(Point::new(300.0, 170.0), size(20.0, 20.0));
+        let options = OverlayOptions::new(OverlayPlacement::new(
+            OverlaySide::Right,
+            OverlayAlign::Start,
+        ));
+        let origin = place_overlay(
+            anchor,
+            size(120.0, 80.0),
+            Some(viewport(320.0, 200.0)),
+            options,
+        );
+
+        assert!((origin.x - 176.0).abs() < f32::EPSILON);
+        assert!((origin.y - 112.0).abs() < f32::EPSILON);
+        assert!(origin.x + 120.0 <= anchor.origin.x, "overlay covers its anchor");
     }
 
     #[test]
