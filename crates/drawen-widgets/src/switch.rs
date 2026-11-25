@@ -5,7 +5,7 @@ use drawen_render::PaintContext;
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const DEFAULT_WIDTH: f32 = 42.0;
@@ -15,10 +15,12 @@ const DEFAULT_INSET: f32 = 3.0;
 /// A compact two-state control with a sliding knob.
 ///
 /// A switch is a more visual alternative to [`crate::Checkbox`] for settings
-/// that take effect immediately. It owns no children and reports user changes
-/// through [`Self::toggled`].
+/// that take effect immediately. It owns no children. The checked state is a
+/// [`Property`]: bind application state to it with
+/// `runtime.bind(&switch.checked(), &state.enabled)`. User interaction
+/// additionally emits [`Self::toggled`].
 pub struct Switch {
-    checked: bool,
+    checked: Property<bool>,
     toggled: Signal<bool>,
     pressed_pointer: Option<PointerId>,
     size: Size,
@@ -41,7 +43,7 @@ impl Switch {
     #[must_use]
     pub fn with_checked(checked: bool) -> Self {
         Self {
-            checked,
+            checked: Property::new(checked),
             toggled: Signal::new(),
             pressed_pointer: None,
             size: Size::ZERO,
@@ -54,15 +56,31 @@ impl Switch {
         }
     }
 
-    /// Returns whether the switch is on.
-    #[must_use]
-    pub const fn is_checked(&self) -> bool {
-        self.checked
+    /// Returns the checked property shared with this switch.
+    ///
+    /// Bind application state to it with
+    /// `runtime.bind(&switch.checked(), &state.enabled)`; the binding keeps
+    /// the switch in sync and wakes redraws on every change. The property's
+    /// `changed` signal fires on every write, including programmatic ones;
+    /// [`Self::toggled`] fires only on user interaction.
+    pub fn checked(&self) -> Property<bool> {
+        self.checked.clone()
     }
 
-    /// Sets the state without emitting [`Self::toggled`].
+    /// Returns whether the switch is on.
+    #[must_use]
+    pub fn is_checked(&self) -> bool {
+        self.checked.get()
+    }
+
+    /// Sets the state.
+    ///
+    /// Emits `checked().changed()` when the value differs, but not
+    /// [`Self::toggled`], which is reserved for user interaction. When the
+    /// property is watched or bound through the runtime, the change
+    /// invalidates paint.
     pub fn set_checked(&mut self, checked: bool) {
-        self.checked = checked;
+        self.checked.set(checked);
     }
 
     /// Returns a signal emitted after user interaction changes the state.
@@ -114,8 +132,9 @@ impl Switch {
     }
 
     fn toggle_state(&mut self) {
-        self.checked = !self.checked;
-        self.toggled.emit(&self.checked);
+        let checked = !self.checked.get();
+        self.checked.set(checked);
+        self.toggled.emit(&checked);
     }
 }
 
@@ -147,6 +166,7 @@ impl Widget for Switch {
         style: &DssStyle,
     ) {
         let theme = environment.theme();
+        let checked = self.checked.get();
         let height = bounds.size.height().max(1.0);
         let radius = style
             .corner_radius
@@ -160,7 +180,7 @@ impl Widget for Switch {
             .off_color
             .or(style.background)
             .unwrap_or_else(|| theme.border());
-        let track = if self.checked {
+        let track = if checked {
             checked_color
         } else {
             unchecked_color
@@ -183,7 +203,7 @@ impl Widget for Switch {
             .min((bounds.size.height() - 2.0).max(0.0) / 2.0);
         let knob_diameter = (height - inset * 2.0).max(0.0);
         let travel = (bounds.size.width() - knob_diameter - inset * 2.0).max(0.0);
-        let knob_x = bounds.origin.x + inset + if self.checked { travel } else { 0.0 };
+        let knob_x = bounds.origin.x + inset + if checked { travel } else { 0.0 };
         let knob = Rect::new(
             Point::new(knob_x, bounds.origin.y + inset),
             size(knob_diameter, knob_diameter),
@@ -245,7 +265,7 @@ impl Widget for Switch {
                     | AccessibilityActions::CLICK
                     | AccessibilityActions::TOGGLE,
             );
-        if self.checked {
+        if self.checked.get() {
             accessibility = accessibility.with_states(AccessibilityState::CHECKED);
         }
         accessibility
@@ -295,6 +315,54 @@ mod tests {
         let _ = runtime.dispatch_event(&key());
 
         assert_eq!(*values.borrow(), vec![true, false]);
+    }
+
+    #[test]
+    fn bound_checked_follows_application_state() {
+        let enabled = Property::new(false);
+        let switch = Switch::new();
+        let checked = switch.checked();
+        let mut runtime = UiRuntime::new(switch);
+        let _binding = runtime.bind(&checked, &enabled);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("switch layout succeeds");
+        assert!(!checked.get());
+
+        enabled.set(true);
+        assert!(checked.get());
+
+        enabled.set(false);
+        assert!(!checked.get());
+    }
+
+    #[test]
+    fn set_checked_emits_changed_but_not_toggled() {
+        let switch = Switch::new();
+        let checked = switch.checked();
+        let changed_values = Rc::new(RefCell::new(Vec::new()));
+        let toggled_values = Rc::new(RefCell::new(Vec::new()));
+        let _changed = checked.subscribe({
+            let changed_values = Rc::clone(&changed_values);
+            move |value| changed_values.borrow_mut().push(*value)
+        });
+        let _toggled = switch.toggled().subscribe({
+            let toggled_values = Rc::clone(&toggled_values);
+            move |value| toggled_values.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(switch);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("switch layout succeeds");
+
+        checked.set(true);
+        assert_eq!(*changed_values.borrow(), vec![true]);
+        assert!(toggled_values.borrow().is_empty());
+
+        let _ = runtime.dispatch_event(&pointer(true));
+        let _ = runtime.dispatch_event(&pointer(false));
+        assert_eq!(*changed_values.borrow(), vec![true, false]);
+        assert_eq!(*toggled_values.borrow(), vec![false]);
     }
 
     fn pointer(down: bool) -> InputEvent {

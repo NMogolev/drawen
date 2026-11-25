@@ -3,15 +3,19 @@ use drawen_render::PaintContext;
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, Border, ChildLayout, DssStyle, EventContext, EventPhase, EventStatus,
-    LayoutContext, LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutContext, LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const CONTROL_SIZE: f32 = 18.0;
 const MARK_INSET: f32 = 5.0;
 
 /// A two-state control with an optional runtime-owned label child.
+///
+/// The checked state is a [`Property`]: bind application state to it with
+/// `runtime.bind(&checkbox.checked(), &state.agreed)`, or read and write it
+/// directly. User interaction additionally emits [`Self::toggled`].
 pub struct Checkbox {
-    checked: bool,
+    checked: Property<bool>,
     toggled: Signal<bool>,
     pressed_pointer: Option<drawen_core::PointerId>,
     size: Size,
@@ -28,22 +32,38 @@ impl Checkbox {
     #[must_use]
     pub fn with_checked(checked: bool) -> Self {
         Self {
-            checked,
+            checked: Property::new(checked),
             toggled: Signal::new(),
             pressed_pointer: None,
             size: Size::ZERO,
         }
     }
 
-    /// Returns whether this checkbox is checked.
-    #[must_use]
-    pub const fn is_checked(&self) -> bool {
-        self.checked
+    /// Returns the checked property shared with this checkbox.
+    ///
+    /// Bind application state to it with
+    /// `runtime.bind(&checkbox.checked(), &state.agreed)`; the binding keeps
+    /// the checkbox in sync and wakes redraws on every change. The property's
+    /// `changed` signal fires on every write, including programmatic ones;
+    /// [`Self::toggled`] fires only on user interaction.
+    pub fn checked(&self) -> Property<bool> {
+        self.checked.clone()
     }
 
-    /// Sets the checked state without emitting [`Self::toggled`].
+    /// Returns whether this checkbox is checked.
+    #[must_use]
+    pub fn is_checked(&self) -> bool {
+        self.checked.get()
+    }
+
+    /// Sets the checked state.
+    ///
+    /// Emits `checked().changed()` when the value differs, but not
+    /// [`Self::toggled`], which is reserved for user interaction. When the
+    /// property is watched or bound through the runtime, the change
+    /// invalidates paint.
     pub fn set_checked(&mut self, checked: bool) {
-        self.checked = checked;
+        self.checked.set(checked);
     }
 
     /// Returns a signal emitted after user interaction changes the checked state.
@@ -58,8 +78,9 @@ impl Checkbox {
     }
 
     fn toggle_state(&mut self) {
-        self.checked = !self.checked;
-        self.toggled.emit(&self.checked);
+        let checked = !self.checked.get();
+        self.checked.set(checked);
+        self.toggled.emit(&checked);
     }
 }
 
@@ -126,11 +147,12 @@ impl Widget for Checkbox {
         style: &DssStyle,
     ) {
         let indicator = indicator_bounds(bounds);
+        let checked = self.checked.get();
         let theme = environment.theme();
         let accent = style.accent.unwrap_or_else(|| theme.accent());
         let transition = context.transition();
         let background = style.background.unwrap_or_else(|| {
-            if self.checked {
+            if checked {
                 transition.control_color(accent, accent.lighten(0.08), accent.darken(0.08))
             } else {
                 transition.control_color(
@@ -141,7 +163,7 @@ impl Widget for Checkbox {
             }
         });
         let border = style.border.unwrap_or_else(|| {
-            let color = if self.checked {
+            let color = if checked {
                 accent
             } else {
                 transition.control_color(theme.border(), accent.mix(theme.border(), 0.45), accent)
@@ -154,7 +176,7 @@ impl Widget for Checkbox {
             .min(CONTROL_SIZE / 2.0);
         context.fill_rounded_rect(indicator, radius, background);
         context.stroke_rounded_rect(indicator, radius, border.width, border.color);
-        if self.checked {
+        if checked {
             context.fill_rect(
                 indicator.inset(drawen_core::Insets::all(MARK_INSET)),
                 style
@@ -216,7 +238,7 @@ impl Widget for Checkbox {
                     | AccessibilityActions::CLICK
                     | AccessibilityActions::TOGGLE,
             );
-        if self.checked {
+        if self.checked.get() {
             accessibility = accessibility.with_states(AccessibilityState::CHECKED);
         }
         accessibility
@@ -276,6 +298,56 @@ mod tests {
         let _ = runtime.dispatch_event(&key());
 
         assert_eq!(*values.borrow(), vec![true, false]);
+    }
+
+    #[test]
+    fn bound_checked_follows_application_state() {
+        let agreed = Property::new(false);
+        let checkbox = Checkbox::new();
+        let checked = checkbox.checked();
+        let mut runtime = UiRuntime::new(checkbox);
+        let _binding = runtime.bind(&checked, &agreed);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("checkbox layout succeeds");
+        assert!(!checked.get());
+
+        agreed.set(true);
+        assert!(checked.get());
+
+        agreed.set(false);
+        assert!(!checked.get());
+    }
+
+    #[test]
+    fn set_checked_emits_changed_but_not_toggled() {
+        let checkbox = Checkbox::new();
+        let checked = checkbox.checked();
+        let changed_values = Rc::new(RefCell::new(Vec::new()));
+        let toggled_values = Rc::new(RefCell::new(Vec::new()));
+        let _changed = checked.subscribe({
+            let changed_values = Rc::clone(&changed_values);
+            move |value| changed_values.borrow_mut().push(*value)
+        });
+        let _toggled = checkbox.toggled().subscribe({
+            let toggled_values = Rc::clone(&toggled_values);
+            move |value| toggled_values.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(checkbox);
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("checkbox layout succeeds");
+
+        // A programmatic write emits changed, never toggled.
+        checked.set(true);
+        assert_eq!(*changed_values.borrow(), vec![true]);
+        assert!(toggled_values.borrow().is_empty());
+
+        // User interaction emits both.
+        let _ = runtime.dispatch_event(&pointer(true));
+        let _ = runtime.dispatch_event(&pointer(false));
+        assert_eq!(*changed_values.borrow(), vec![true, false]);
+        assert_eq!(*toggled_values.borrow(), vec![false]);
     }
 
     fn pointer(down: bool) -> InputEvent {
