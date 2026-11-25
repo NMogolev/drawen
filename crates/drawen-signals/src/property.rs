@@ -56,6 +56,7 @@ struct Inner<T> {
     value: RefCell<T>,
     changed: Signal<T>,
     watchers: RefCell<Vec<Watcher>>,
+    normalize: Option<Box<dyn Fn(T) -> T>>,
 }
 
 /// A value-carrying property with a synchronous change signal.
@@ -71,6 +72,11 @@ struct Inner<T> {
 /// [`PropertyDamage`] flag the runtime drains into paint or layout
 /// invalidation; `UiRuntime::watch` and `UiRuntime::bind` install that flag
 /// for widget properties.
+///
+/// A property created with [`Self::normalized`] passes every write through a
+/// normalizer before storing it, so a widget can keep its value inside a valid
+/// domain (a slider clamps to its range) even when the write comes from a
+/// binding, which copies the source value verbatim.
 #[must_use = "a property handle keeps its shared value alive"]
 pub struct Property<T> {
     inner: Rc<Inner<T>>,
@@ -79,11 +85,32 @@ pub struct Property<T> {
 impl<T: Clone + PartialEq + 'static> Property<T> {
     /// Creates a property holding `value`.
     pub fn new(value: T) -> Self {
+        Self::with_normalizer(value, None)
+    }
+
+    /// Creates a property that passes every write through `normalize` first.
+    ///
+    /// The initial value is normalized too, and [`Self::set`] normalizes before
+    /// comparing, so equal-after-normalization writes are silent. Use this for
+    /// widget properties that must stay inside a domain: a slider clamps to its
+    /// range, so direct writes and `UiRuntime::bind` copies alike stay valid.
+    /// The normalizer is a plain function applied on write; it adds no
+    /// scheduling, dependency tracking, or validation errors.
+    pub fn normalized(value: T, normalize: impl Fn(T) -> T + 'static) -> Self {
+        Self::with_normalizer(value, Some(Box::new(normalize)))
+    }
+
+    fn with_normalizer(value: T, normalize: Option<Box<dyn Fn(T) -> T>>) -> Self {
+        let value = match &normalize {
+            Some(normalize) => normalize(value),
+            None => value,
+        };
         Self {
             inner: Rc::new(Inner {
                 value: RefCell::new(value),
                 changed: Signal::new(),
                 watchers: RefCell::new(Vec::new()),
+                normalize,
             }),
         }
     }
@@ -96,12 +123,17 @@ impl<T: Clone + PartialEq + 'static> Property<T> {
 
     /// Stores `value` and returns whether it differed from the current one.
     ///
-    /// A changed value notifies watched damage flags, then emits
-    /// [`Self::changed`] with the new value. An equal value changes nothing
-    /// and emits nothing, so bindings built on properties cannot ping-pong.
-    /// A set from inside a running listener is stored, but that listener is
-    /// not re-entered, matching [`Signal::emit`].
+    /// A property created with [`Self::normalized`] first passes `value`
+    /// through its normalizer. A changed value notifies watched damage flags,
+    /// then emits [`Self::changed`] with the stored (normalized) value. An
+    /// equal value changes nothing and emits nothing, so bindings built on
+    /// properties cannot ping-pong. A set from inside a running listener is
+    /// stored, but that listener is not re-entered, matching [`Signal::emit`].
     pub fn set(&self, value: T) -> bool {
+        let value = match &self.inner.normalize {
+            Some(normalize) => normalize(value),
+            None => value,
+        };
         {
             let mut current = self.inner.value.borrow_mut();
             if *current == value {
@@ -317,5 +349,50 @@ mod tests {
         }
         assert!(property.set(1));
         assert_eq!(property.get(), 1);
+    }
+
+    #[test]
+    fn normalized_clamps_the_initial_value_and_every_write() {
+        let property = Property::normalized(150_i32, |value| value.clamp(0, 100));
+        assert_eq!(property.get(), 100);
+
+        assert!(property.set(-20));
+        assert_eq!(property.get(), 0);
+
+        assert!(property.set(50));
+        assert_eq!(property.get(), 50);
+    }
+
+    #[test]
+    fn normalized_deduplicates_after_clamping() {
+        let property = Property::normalized(100_i32, |value| value.clamp(0, 100));
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = property.subscribe({
+            let observed = Rc::clone(&observed);
+            move |value| observed.borrow_mut().push(*value)
+        });
+
+        // Both writes clamp to the stored 100, so neither emits.
+        assert!(!property.set(150));
+        assert!(!property.set(200));
+        assert!(observed.borrow().is_empty());
+
+        assert!(property.set(40));
+        assert_eq!(*observed.borrow(), vec![40]);
+    }
+
+    #[test]
+    fn normalized_emits_the_stored_value_not_the_raw_write() {
+        let property = Property::normalized(0_i32, |value| value.clamp(0, 100));
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = property.subscribe({
+            let observed = Rc::clone(&observed);
+            move |value| observed.borrow_mut().push(*value)
+        });
+
+        property.set(500);
+
+        assert_eq!(property.get(), 100);
+        assert_eq!(*observed.borrow(), vec![100]);
     }
 }
