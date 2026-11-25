@@ -21,6 +21,7 @@ use drawen_ui::{
 /// and report `total` and `truncated` so the agent can narrow the observation
 /// with `{"op":"observe","target":<id>}` instead of reading the root again.
 pub const DEFAULT_MAX_NODES: usize = 200;
+const _: () = assert!(DEFAULT_MAX_NODES > 0);
 
 /// One semantic node in a [`Snapshot`].
 ///
@@ -103,6 +104,7 @@ pub struct Snapshot {
 }
 
 #[cfg(feature = "json")]
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -373,7 +375,7 @@ pub(crate) fn normalize(text: &str) -> String {
 mod tests {
     use drawen::{Button, Color, Column, Constraints, Size, Text, UiRuntime, render::TextStyle};
 
-    use super::{DEFAULT_MAX_NODES, Snapshot};
+    use super::Snapshot;
 
     fn button_app() -> UiRuntime {
         let mut runtime = UiRuntime::new(drawen::Box::new());
@@ -443,7 +445,6 @@ mod tests {
                 assert!(cut.node(*child).is_some());
             }
         }
-        assert!(DEFAULT_MAX_NODES > 0);
     }
 
     #[test]
