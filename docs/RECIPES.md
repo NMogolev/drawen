@@ -278,6 +278,73 @@ lays out only the visible range for a fixed row extent. Use `VirtualList` when
 row count is large or row data is expensive to shape; use `ListView` when each
 row is a real composed widget.
 
+### Variable-height chat history
+
+For a messenger timeline, rows wrap to the viewport width and keep different
+heights. Enable measured rows and keep a handle for scroll commands:
+
+```rust
+use std::{cell::RefCell, rc::Rc};
+use drawen::{VirtualDataSource, VirtualList};
+
+#[derive(Clone)]
+struct Messages(Rc<RefCell<Vec<(u64, String)>>>);
+
+impl VirtualDataSource for Messages {
+    fn row_count(&self) -> usize {
+        self.0.borrow().len()
+    }
+    fn row_key(&self, row: usize) -> u64 {
+        self.0.borrow()[row].0 // stable id, not the index
+    }
+    fn row_text(&self, row: usize) -> String {
+        self.0.borrow()[row].1.clone()
+    }
+}
+
+let messages = Messages(Rc::new(RefCell::new(initial)));
+let list = VirtualList::new(messages.clone(), 28.0).with_variable_heights(true);
+let list_handle = list.handle();
+let list = runtime.append_child(runtime.root(), list)?;
+```
+
+When older history arrives from the network, prepend it through the shared
+source and anchor the reading position in the same UI-thread pass:
+
+```rust
+messages.0.borrow_mut().splice(0..0, older);
+list_handle.anchor_prepended(older_count);
+runtime.invalidate_layout();
+```
+
+The offset grows by the prepended extent, selection indices shift with the
+data, and measured heights survive because they are keyed by `row_key`. Use
+`list_handle.scroll_to_bottom()` after appending a new message while the user
+is already at the bottom. Rows are shaped only for the visible window; the
+construction height is the estimate for rows that have not been shaped yet.
+
+### Autocomplete and mentions
+
+`Autocomplete` is an editable combobox: typing filters options into a floating
+list, `Enter` or a click commits one. Append its popup as the single child:
+
+```rust
+use drawen::Autocomplete;
+
+let field = Autocomplete::new(["alice", "bob", "carol"])
+    .with_placeholder("Search people");
+let selected = field.selected();
+let popup = field.popup(); // obtain before moving the field into the runtime
+let field = runtime.append_child(runtime.root(), field)?;
+runtime.append_child(field, popup)?;
+let _subscription = selected.subscribe(|index| println!("picked {index}"));
+```
+
+For mention-style completion inside a composition flow, anchor the popup at
+the caret with `.with_caret_anchor(true)` and replace the match predicate with
+`.with_filter(|query, option| ...)`. The field handles IME preedit, and the
+platform positions the candidate window at its caret automatically.
+
 ## 6. A docking workspace
 
 `WorkspaceLayout` is serializable layout data; `DockArea` is the widget that

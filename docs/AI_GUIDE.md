@@ -55,6 +55,8 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A searchable command palette | `Modal` + `CommandPalette::new([PaletteCommand::new("...")])`; `executed(index)` dismisses the modal |
 | Transient corner notifications | `ToastHost` + `ToastHandle::show(Toast::new("..."))`; cards paint above the tree and expire on their own |
 | A primary action plus a dropdown | `SplitButton::new("Save")` with one `Menu` child; `activated()` runs the action, the arrow floats the menu |
+| An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
+| A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
 ## Q&A
 

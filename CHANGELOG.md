@@ -131,6 +131,32 @@ in the headings because the version itself must stay valid semver; see
 - The winit adapter enables IME on the window, so composition (CJK input,
   dead-key preedit) reaches editable widgets through `InputEvent::TextPreedit`
   and `InputEvent::TextInput` instead of being silently disabled.
+- The IME candidate window now opens at the caret: `Widget::ime_cursor_area`
+  reports a local caret rectangle, `UiRuntime::ime_cursor_area` offsets it by
+  the focused node's bounds, and the winit adapter forwards it to
+  `Window::set_ime_cursor_area` in physical pixels after every redraw.
+  `TextField`, `TextEdit`, `CommandPalette`, and `Autocomplete` report it.
+
+### Widgets
+
+- `VirtualList::with_variable_heights` switches the list to measured, wrapped
+  rows: the construction height becomes the estimate for unshaped rows, a
+  Fenwick tree keeps prefix offsets in `f64`, and measured heights are retained
+  by stable row key across scrolling and data changes. Re-measuring a row above
+  the viewport adjusts the scroll offset so the visible content stays put. The
+  uniform path is unchanged.
+- Added `VirtualListHandle` for scroll commands issued outside event handling:
+  `anchor_prepended(count)` keeps the reading position when history is inserted
+  above (shifting selection indices with the data), `set_offset`, and
+  `scroll_to_bottom`. `VirtualList` also gained the same methods directly for
+  use before the widget moves into a runtime.
+- Added `Autocomplete` and `AutocompletePopup`, an editable combobox whose
+  typing filters options into a floating suggestion list. It supports IME
+  preedit, selection and clipboard editing, `ArrowUp`/`ArrowDown` navigation,
+  `Enter` and pointer commits, `Escape` and light dismissal, a custom
+  `with_filter` predicate, `with_placeholder`, `with_caret_anchor` for
+  mention-style completion, and `query_changed` / `selected` signals. Append
+  the popup returned by `Autocomplete::popup` as the field's single child.
 
 ### Player widgets
 
