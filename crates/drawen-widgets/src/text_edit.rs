@@ -472,6 +472,20 @@ impl Widget for TextEdit {
         }
     }
 
+    fn ime_cursor_area(&self) -> Option<Rect> {
+        if !self.focused {
+            return None;
+        }
+        let caret = self.text_layout.caret_rect(self.display().1, 1.0);
+        Some(Rect::new(
+            Point::new(
+                self.padding.left + caret.origin.x,
+                self.padding.top + caret.origin.y - self.scroll_y,
+            ),
+            Size::new(1.0, caret.size.height().max(1.0)).ok()?,
+        ))
+    }
+
     fn accepts_focus(&self) -> bool {
         true
     }

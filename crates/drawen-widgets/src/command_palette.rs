@@ -822,6 +822,20 @@ impl Widget for CommandPalette {
         }
     }
 
+    fn ime_cursor_area(&self) -> Option<Rect> {
+        if !self.focused {
+            return None;
+        }
+        let caret = self.query_layout.caret_rect(self.display().1, 1.0);
+        Some(Rect::new(
+            Point::new(
+                self.padding.left + ITEM_INSET + caret.origin.x - self.query_scroll_x,
+                self.padding.top + QUERY_VERTICAL_PADDING + caret.origin.y,
+            ),
+            size(1.0, caret.size.height().max(1.0)),
+        ))
+    }
+
     fn accepts_focus(&self) -> bool {
         true
     }
