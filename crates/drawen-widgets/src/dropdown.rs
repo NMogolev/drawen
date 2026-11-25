@@ -5,7 +5,7 @@ use drawen_render::{PaintContext, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const DEFAULT_WIDTH: f32 = 120.0;
@@ -19,9 +19,14 @@ const ARROW_WIDTH: f32 = 16.0;
 /// options compatible with the retained tree's clipping, hit testing, and focus
 /// model; a floating overlay can be introduced later without changing the
 /// selection API.
+///
+/// The selection is a [`Property`]: bind application state to it with
+/// `runtime.bind(&dropdown.selected(), &state.option)`. A binding copy of an
+/// out-of-range index resolves to no selection. The open/closed popup state is
+/// transient interaction state, not a bindable property.
 pub struct Dropdown {
     options: Vec<String>,
-    selected: Option<usize>,
+    selected: Property<Option<usize>>,
     changed: Signal<usize>,
     open: bool,
     size: Size,
@@ -36,9 +41,13 @@ impl Dropdown {
     where
         T: Into<String>,
     {
+        let options = options.into_iter().map(Into::into).collect::<Vec<_>>();
+        let count = options.len();
         Self {
-            options: options.into_iter().map(Into::into).collect(),
-            selected: None,
+            selected: Property::normalized(None, move |selected| {
+                selected.filter(|&index| index < count)
+            }),
+            options,
             changed: Signal::new(),
             open: false,
             size: Size::ZERO,
@@ -53,27 +62,38 @@ impl Dropdown {
         &self.options
     }
 
-    /// Returns the selected option index, if one is selected.
-    #[must_use]
-    pub const fn selected(&self) -> Option<usize> {
-        self.selected
+    /// Returns the selection property shared with this dropdown.
+    ///
+    /// The stored value is the selected option index, or `None` when no option
+    /// is selected. Every write is normalized: an out-of-range index resolves to
+    /// `None`, including `UiRuntime::bind` copies. Bind state with
+    /// `runtime.bind(&dropdown.selected(), &state.option)` and read the scalar
+    /// with `dropdown.selected().get()`. The property's `changed` signal fires
+    /// on every write; [`Self::changed`] fires only on user interaction.
+    pub fn selected(&self) -> Property<Option<usize>> {
+        self.selected.clone()
     }
 
     /// Returns the selected option text, if one is selected.
     #[must_use]
     pub fn selected_option(&self) -> Option<&str> {
         self.selected
+            .get()
             .and_then(|index| self.options.get(index).map(String::as_str))
     }
 
-    /// Sets the selected option without emitting [`Self::changed`].
+    /// Sets the selected option.
+    ///
+    /// Emits `selected().changed()` when the value differs, but not the
+    /// user-only [`Self::changed`] signal. When the property is watched or bound
+    /// through the runtime, the change invalidates paint.
     ///
     /// # Panics
     ///
     /// Panics if `selected` does not refer to an available option.
     pub fn set_selected(&mut self, selected: Option<usize>) {
         self.assert_valid_selection(selected);
-        self.selected = selected;
+        self.selected.set(selected);
     }
 
     /// Returns whether the options list is currently expanded.
@@ -98,11 +118,11 @@ impl Dropdown {
 
     fn select_user(&mut self, selected: usize, context: &mut EventContext<'_>) {
         self.assert_valid_selection(Some(selected));
-        if self.selected == Some(selected) {
+        if self.selected.get() == Some(selected) {
             self.set_open(false, context);
             return;
         }
-        self.selected = Some(selected);
+        self.selected.set(Some(selected));
         self.changed.emit(&selected);
         self.set_open(false, context);
         context.request_redraw();
@@ -114,6 +134,7 @@ impl Dropdown {
         };
         let selected = self
             .selected
+            .get()
             .unwrap_or(if offset.is_negative() { last } else { 0 });
         let next = selected.saturating_add_signed(offset).min(last);
         self.select_user(next, context);
@@ -138,8 +159,8 @@ impl Dropdown {
 
     fn select_without_context(&mut self, selected: usize) {
         self.assert_valid_selection(Some(selected));
-        if self.selected != Some(selected) {
-            self.selected = Some(selected);
+        if self.selected.get() != Some(selected) {
+            self.selected.set(Some(selected));
             self.changed.emit(&selected);
         }
         self.open = false;
@@ -159,6 +180,7 @@ impl Dropdown {
         };
         let selected = self
             .selected
+            .get()
             .unwrap_or(if offset.is_negative() { last } else { 0 });
         let next = selected.saturating_add_signed(offset).min(last);
         self.select_without_context(next);
@@ -284,7 +306,7 @@ impl Widget for Dropdown {
                     ),
                     size(bounds.size.width(), self.row_height),
                 );
-                if self.selected == Some(index) {
+                if self.selected.get() == Some(index) {
                     context.fill_rect(row, style.background.unwrap_or_else(|| theme.selection()));
                     context.fill_rect(Rect::new(row.origin, size(3.0, row.size.height())), accent);
                 }
@@ -455,6 +477,53 @@ mod tests {
         let _ = runtime.dispatch_event(&key(NamedKey::ArrowDown));
 
         assert!(runtime.last_layout().is_none());
+    }
+
+    #[test]
+    fn bound_selected_follows_application_state() {
+        let option = Property::new(Some(0_usize));
+        let dropdown = Dropdown::new(["One", "Two", "Three"]);
+        let selected = dropdown.selected();
+        let mut runtime = UiRuntime::new(dropdown);
+        let _binding = runtime.bind(&selected, &option);
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("dropdown layout succeeds");
+        assert_eq!(selected.get(), Some(0));
+
+        option.set(Some(2));
+        assert_eq!(selected.get(), Some(2));
+
+        // A binding copies the source verbatim; an out-of-range index resolves
+        // to no selection rather than panicking.
+        option.set(Some(99));
+        assert_eq!(selected.get(), None);
+    }
+
+    #[test]
+    fn set_selected_emits_property_changed_but_not_user_changed() {
+        let dropdown = Dropdown::new(["One", "Two"]);
+        let selected = dropdown.selected();
+        let changed = dropdown.changed();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = selected.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = changed.subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |index| user_changes.borrow_mut().push(*index)
+        });
+        let mut runtime = UiRuntime::new(dropdown);
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("dropdown layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        selected.set(Some(1));
+        assert_eq!(*property_changes.borrow(), vec![Some(1)]);
+        assert!(user_changes.borrow().is_empty());
     }
 
     fn pointer(y: f32) -> InputEvent {
