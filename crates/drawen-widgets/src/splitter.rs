@@ -2,7 +2,7 @@ use drawen_core::{Constraints, InputEvent, Point, PointerButton, PointerId, Rect
 use drawen_render::PaintContext;
 use drawen_ui::{
     ChildLayout, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult,
-    Signal, StyleTarget, UiEnvironment, Widget,
+    Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 /// Direction in which a [`Splitter`] divides its two children.
@@ -16,9 +16,15 @@ pub enum SplitAxis {
 }
 
 /// A two-pane container with a pointer-draggable divider.
+///
+/// The first-pane ratio is a clamped [`Property`]: bind application state (for
+/// example a persisted layout) to it with
+/// `runtime.bind_layout(&splitter.ratio(), &state.ratio)`. The ratio changes the
+/// pane sizes, so use `bind_layout` rather than `bind`. Every write is normalized
+/// to `0.0..=1.0`; read the scalar with `splitter.ratio().get()`.
 pub struct Splitter {
     axis: SplitAxis,
-    ratio: f32,
+    ratio: Property<f32>,
     thickness: f32,
     dragging: Option<PointerId>,
     length: f32,
@@ -31,7 +37,13 @@ impl Splitter {
     pub fn new(axis: SplitAxis, ratio: f32) -> Self {
         Self {
             axis,
-            ratio: ratio.clamp(0.0, 1.0),
+            ratio: Property::normalized(ratio, |ratio: f32| {
+                if ratio.is_finite() {
+                    ratio.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            }),
             thickness: 4.0,
             dragging: None,
             length: 0.0,
@@ -39,10 +51,15 @@ impl Splitter {
         }
     }
 
-    /// Returns the current first-pane ratio.
-    #[must_use]
-    pub const fn ratio(&self) -> f32 {
-        self.ratio
+    /// Returns the first-pane ratio property shared with this splitter.
+    ///
+    /// The stored value is clamped to `0.0..=1.0`. Every write is normalized,
+    /// including `UiRuntime::bind` copies; a non-finite write falls back to `0.0`.
+    /// Bind state with `runtime.bind_layout(&splitter.ratio(), &state.ratio)` and
+    /// read the scalar with `splitter.ratio().get()`. The property's `changed`
+    /// signal fires on every write; [`Self::resized`] fires only on pointer drag.
+    pub fn ratio(&self) -> Property<f32> {
+        self.ratio.clone()
     }
 
     /// Returns a signal notified when pointer dragging changes the ratio.
@@ -76,7 +93,7 @@ impl Widget for Splitter {
             SplitAxis::Vertical => size.height(),
         };
         let content_length = (self.length - self.thickness).max(0.0);
-        let first_length = content_length * self.ratio;
+        let first_length = content_length * self.ratio.get();
         let second_length = content_length - first_length;
         let mut children = Vec::new();
         for index in 0..context.child_count() {
@@ -133,7 +150,7 @@ impl Widget for Splitter {
         if let Some(background) = style.background {
             context.fill_rect(bounds, background);
         }
-        let first = (self.length - self.thickness).max(0.0) * self.ratio;
+        let first = (self.length - self.thickness).max(0.0) * self.ratio.get();
         let divider = match self.axis {
             SplitAxis::Horizontal => rect(
                 bounds.origin.x + first,
@@ -178,8 +195,8 @@ impl Widget for Splitter {
                 };
                 let content_length = (self.length - self.thickness).max(0.0);
                 if content_length > 0.0 {
-                    self.ratio = (coordinate / content_length).clamp(0.0, 1.0);
-                    self.resized.emit(&self.ratio);
+                    self.ratio.set(coordinate / content_length);
+                    self.resized.emit(&self.ratio.get());
                     context.request_layout();
                 }
                 EventStatus::Handled
@@ -198,7 +215,7 @@ impl Widget for Splitter {
 
 impl Splitter {
     fn divider_contains(&self, point: Point) -> bool {
-        let first = (self.length - self.thickness).max(0.0) * self.ratio;
+        let first = (self.length - self.thickness).max(0.0) * self.ratio.get();
         match self.axis {
             SplitAxis::Horizontal => point.x >= first && point.x < first + self.thickness,
             SplitAxis::Vertical => point.y >= first && point.y < first + self.thickness,
@@ -216,6 +233,8 @@ fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use drawen_core::{Modifiers, PointerButtons, PointerEvent};
     use drawen_render::{DisplayList, PaintContext};
     use drawen_ui::UiRuntime;
@@ -267,5 +286,90 @@ mod tests {
             runtime.bounds(second),
             Some(Rect::new(Point::new(84.0, 0.0), valid_size(16.0, 40.0)))
         );
+    }
+
+    #[test]
+    fn bound_ratio_is_clamped_and_relayouts_panes() {
+        let ratio_state = Property::new(0.5_f32);
+        let splitter = Splitter::new(SplitAxis::Horizontal, 0.5);
+        let ratio = splitter.ratio();
+        let mut runtime = UiRuntime::new(splitter);
+        let first = runtime
+            .append_child(runtime.root(), SizedBox::new(None, None))
+            .expect("splitter exists");
+        let _binding = runtime.bind_layout(&ratio, &ratio_state);
+        runtime
+            .layout(Constraints::tight(valid_size(100.0, 40.0)).expect("canvas is finite"))
+            .expect("initial layout succeeds");
+        assert_eq!(
+            runtime.bounds(first),
+            Some(Rect::new(Point::ZERO, valid_size(48.0, 40.0)))
+        );
+
+        // A binding copies the source verbatim; the property clamps it and the
+        // layout damage relayouts the panes before the next paint.
+        ratio_state.set(0.75);
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint after a bound ratio change succeeds");
+        assert_eq!(
+            runtime.bounds(first),
+            Some(Rect::new(Point::ZERO, valid_size(72.0, 40.0)))
+        );
+
+        ratio_state.set(2.0);
+        assert!((ratio.get() - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn ratio_write_emits_property_changed_but_not_resized() {
+        let splitter = Splitter::new(SplitAxis::Horizontal, 0.5);
+        let ratio = splitter.ratio();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = ratio.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = splitter.resized().subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(splitter);
+        runtime
+            .append_child(runtime.root(), SizedBox::new(None, None))
+            .expect("splitter exists");
+        runtime
+            .append_child(runtime.root(), SizedBox::new(None, None))
+            .expect("splitter exists");
+        runtime
+            .layout(Constraints::tight(valid_size(100.0, 40.0)).expect("canvas is finite"))
+            .expect("initial layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        ratio.set(0.25);
+        assert_eq!(property_changes.borrow().len(), 1);
+        assert!(user_changes.borrow().is_empty());
+
+        // User drag emits both.
+        let down = InputEvent::PointerDown(PointerEvent {
+            pointer_id: PointerId(1),
+            position: Point::new(24.0, 20.0),
+            button: Some(PointerButton::Primary),
+            buttons: PointerButtons::PRIMARY,
+            modifiers: Modifiers::NONE,
+        });
+        let move_right = InputEvent::PointerMove(PointerEvent {
+            pointer_id: PointerId(1),
+            position: Point::new(80.0, 20.0),
+            button: None,
+            buttons: PointerButtons::PRIMARY,
+            modifiers: Modifiers::NONE,
+        });
+        assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
+        assert_eq!(runtime.dispatch_event(&move_right), EventStatus::Handled);
+        assert_eq!(property_changes.borrow().len(), 2);
+        assert_eq!(user_changes.borrow().len(), 1);
     }
 }
