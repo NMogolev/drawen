@@ -5,11 +5,11 @@ use drawen_core::{
 use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
-    AccessibilityState, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult, Signal,
-    StyleTarget, UiEnvironment, Widget,
+    AccessibilityState, EventContext, EventPhase, EventStatus, LayoutContext, LayoutResult,
+    Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
-use crate::text_editor::TextEditor;
+use crate::text_editor::{TextEditor, normalize};
 
 const MIN_WIDTH: f32 = 320.0;
 const ROW_HEIGHT: f32 = 32.0;
@@ -93,10 +93,16 @@ impl PaletteCommand {
 /// the original list and asks the runtime to dismiss the surrounding overlay,
 /// which closes a light-dismiss [`crate::Modal`]. Escape is handled by the
 /// runtime's overlay dismissal, not by the palette itself.
+///
+/// The query is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&palette.query(), &state.query)`. A binding copy replaces
+/// the query, refilters the commands, and resets the caret; user typing keeps the
+/// caret and updates the property. Read the scalar with `palette.query().get()`.
 pub struct CommandPalette {
     commands: Vec<PaletteCommand>,
     placeholder: String,
     editor: TextEditor,
+    query: Property<String>,
     preedit: Option<TextPreedit>,
     filtered: Vec<usize>,
     active: Option<usize>,
@@ -131,10 +137,15 @@ impl CommandPalette {
     pub fn new(commands: impl IntoIterator<Item = PaletteCommand>) -> Self {
         let commands: Vec<PaletteCommand> = commands.into_iter().collect();
         let filtered: Vec<usize> = (0..commands.len()).collect();
+        let editor = TextEditor::with_text(false, "");
+        let query = Property::normalized(editor.text().to_owned(), |text: String| {
+            normalize(false, &text)
+        });
         Self {
             commands,
             placeholder: DEFAULT_PLACEHOLDER.to_owned(),
-            editor: TextEditor::with_text(false, ""),
+            editor,
+            query,
             preedit: None,
             active: (!filtered.is_empty()).then_some(0),
             filtered,
@@ -177,10 +188,28 @@ impl CommandPalette {
         &self.commands
     }
 
-    /// Returns the current query text.
-    #[must_use]
-    pub fn query(&self) -> &str {
-        self.editor.text()
+    /// Returns the query property shared with this palette.
+    ///
+    /// The stored value is the current query with line breaks stripped. Every
+    /// write is normalized, including `UiRuntime::bind` copies, and refilters the
+    /// commands on the next layout or event. Bind state with
+    /// `runtime.bind_layout(&palette.query(), &state.query)` and read the scalar
+    /// with `palette.query().get()`. The property's `changed` signal fires on
+    /// every write, including user typing.
+    pub fn query(&self) -> Property<String> {
+        self.query.clone()
+    }
+
+    /// Replaces the query and refilters the commands.
+    ///
+    /// Emits `query().changed()` when the normalized query differs. This is a
+    /// programmatic replacement, so it resets the caret and undo history.
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.editor.set_text(query);
+        self.query.set(self.editor.text().to_owned());
+        self.preedit = None;
+        self.query_scroll_x = 0.0;
+        self.refilter();
     }
 
     /// Returns the original indices of the commands matching the query.
@@ -202,6 +231,21 @@ impl CommandPalette {
     #[must_use]
     pub fn executed(&self) -> Signal<usize> {
         self.executed.clone()
+    }
+
+    /// Applies an external property write (for example a binding copy) to the
+    /// editor and refilters the commands. User edits keep the editor and the
+    /// property equal, so this is a no-op for them and preserves the caret.
+    fn reconcile_query(&mut self) {
+        // Compare without cloning; only an external write (a binding copy or a
+        // direct `set`) diverges from the editor, and only then do we clone.
+        if self.query.with(|stored| stored != self.editor.text()) {
+            let text = self.query.get();
+            self.editor.set_text(text);
+            self.preedit = None;
+            self.query_scroll_x = 0.0;
+            self.refilter();
+        }
     }
 
     /// Recomputes the matching rows, keeping the active command when it still
@@ -371,6 +415,7 @@ impl CommandPalette {
             return true;
         }
         self.refilter();
+        self.query.set(self.editor.text().to_owned());
         self.ensure_query_caret_visible();
         context.request_layout();
         true
@@ -614,6 +659,7 @@ impl Widget for CommandPalette {
         context: &mut LayoutContext<'_>,
         constraints: Constraints,
     ) -> LayoutResult {
+        self.reconcile_query();
         let style = context.style();
         let environment = context.environment();
         let theme = environment.theme();
@@ -712,6 +758,7 @@ impl Widget for CommandPalette {
         if context.phase() != EventPhase::Target {
             return EventStatus::Ignored;
         }
+        self.reconcile_query();
         match event {
             InputEvent::PointerDown(pointer) if pointer.button == Some(PointerButton::Primary) => {
                 context.request_focus();
@@ -864,10 +911,7 @@ impl Widget for CommandPalette {
     fn accessibility_action(&mut self, action: &AccessibilityAction) -> bool {
         match action {
             AccessibilityAction::SetValue(value) => {
-                self.editor.set_text(value.clone());
-                self.preedit = None;
-                self.query_scroll_x = 0.0;
-                self.refilter();
+                self.set_query(value.clone());
                 true
             }
             AccessibilityAction::Select => {
@@ -903,9 +947,12 @@ mod tests {
         Constraints, InputEvent, Key, KeyCode, Modifiers, NamedKey, Point, PointerButtons,
         PointerEvent, PointerId, Rect, Size,
     };
+    use drawen_render::{DisplayList, PaintContext};
     use drawen_ui::UiRuntime;
 
-    use super::{CommandPalette, DEFAULT_PADDING, DIVIDER_GAP, PaletteCommand, ROW_HEIGHT};
+    use super::{
+        CommandPalette, DEFAULT_PADDING, DIVIDER_GAP, PaletteCommand, Property, ROW_HEIGHT,
+    };
     use crate::Modal;
 
     fn size(width: f32, height: f32) -> Size {
@@ -1097,5 +1144,72 @@ mod tests {
         let _ = runtime.dispatch_event(&InputEvent::TextInput("zzz".to_string()));
         let _ = runtime.dispatch_event(&key(NamedKey::Enter));
         assert!(executed.borrow().is_empty());
+    }
+
+    #[test]
+    fn bound_query_follows_application_state() {
+        let state = Property::new(String::new());
+        let palette = sample_palette();
+        let query = palette.query();
+        let mut runtime = UiRuntime::new(palette);
+        let _binding = runtime.bind_layout(&query, &state);
+        runtime
+            .layout(Constraints::loose(size(600.0, 600.0)))
+            .expect("layout succeeds");
+
+        // A binding copy replaces the query; the next paint reconciles the editor.
+        state.set("copy".to_string());
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint after a bound query change succeeds");
+        assert_eq!(query.get(), "copy");
+
+        // Line breaks are stripped for the single-line query, even on a bind copy.
+        state.set("a\nb".to_string());
+        assert_eq!(query.get(), "ab");
+    }
+
+    #[test]
+    fn set_query_and_user_typing_emit_the_property_signal() {
+        let palette = sample_palette();
+        let query = palette.query();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = query.subscribe({
+            let changes = Rc::clone(&changes);
+            move |value| changes.borrow_mut().push(value.clone())
+        });
+        let mut runtime = UiRuntime::new(palette);
+        runtime
+            .layout(Constraints::loose(size(600.0, 600.0)))
+            .expect("layout succeeds");
+        runtime
+            .focus_widget(runtime.root())
+            .expect("palette is focusable");
+
+        // A programmatic replacement emits the property signal.
+        query.set("save".to_string());
+        assert_eq!(*changes.borrow(), vec!["save".to_string()]);
+
+        // User typing also emits it and keeps the caret.
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("x".to_string()));
+        assert_eq!(query.get(), "savex");
+        assert_eq!(changes.borrow().len(), 2);
+    }
+
+    #[test]
+    fn user_typing_updates_the_query_property() {
+        let palette = sample_palette();
+        let query = palette.query();
+        let mut runtime = UiRuntime::new(palette);
+        runtime
+            .layout(Constraints::loose(size(600.0, 600.0)))
+            .expect("layout succeeds");
+        runtime
+            .focus_widget(runtime.root())
+            .expect("palette is focusable");
+
+        let _ = runtime.dispatch_event(&InputEvent::TextInput("copy".to_string()));
+        assert_eq!(query.get(), "copy");
     }
 }
