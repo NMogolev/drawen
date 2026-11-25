@@ -19,7 +19,7 @@ use drawen_render::{PaintContext, TextLayout, TextStyle};
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const DEFAULT_WIDTH: f32 = 240.0;
@@ -342,11 +342,20 @@ impl SelectionModel {
 /// been shaped yet, a Fenwick tree keeps prefix offsets, and
 /// [`VirtualListHandle::anchor_prepended`] preserves the reading position when
 /// history is inserted above.
+///
+/// The scroll offset is a [`Property`]: bind application state to it with
+/// `runtime.bind_layout(&list.offset(), &state.offset)`. The offset selects the
+/// visible rows and their positions, so use `bind_layout`. The stored value is
+/// kept finite and non-negative; the upper bound depends on the measured content
+/// and viewport and is applied on the next layout. Read the scalar with
+/// `list.offset().get()`. [`VirtualListHandle`] scroll commands and
+/// [`Self::anchor_prepended`] write the same property, so a bound offset stays
+/// consistent with programmatic scrolling.
 #[allow(clippy::struct_excessive_bools)]
 pub struct VirtualList<D> {
     data: D,
     row_height: f32,
-    offset: f32,
+    offset: Property<f32>,
     viewport: Size,
     visible: Vec<VisibleRow>,
     cache: HashMap<u64, RowVisual>,
@@ -392,7 +401,7 @@ impl<D: VirtualDataSource> VirtualList<D> {
         Self {
             data,
             row_height,
-            offset: 0.0,
+            offset: Property::normalized(0.0, normalize_offset),
             viewport: Size::ZERO,
             visible: Vec::new(),
             cache: HashMap::new(),
@@ -468,10 +477,16 @@ impl<D: VirtualDataSource> VirtualList<D> {
         self.activated.clone()
     }
 
-    /// Returns the current vertical scroll offset.
-    #[must_use]
-    pub const fn offset(&self) -> f32 {
-        self.offset
+    /// Returns the scroll offset property shared with this list.
+    ///
+    /// The stored value is finite and non-negative; the upper bound depends on
+    /// the measured content and viewport and is applied on the next layout. Bind
+    /// state with `runtime.bind_layout(&list.offset(), &state.offset)` and read
+    /// the scalar with `list.offset().get()`. The property's `changed` signal
+    /// fires on every write, including wheel scrolling, handle commands, and
+    /// [`Self::anchor_prepended`].
+    pub fn offset(&self) -> Property<f32> {
+        self.offset.clone()
     }
 
     /// Returns the number of rows measured for the current viewport.
@@ -487,8 +502,12 @@ impl<D: VirtualDataSource> VirtualList<D> {
     }
 
     /// Sets the vertical scroll offset, clamped to the content bounds.
+    ///
+    /// Emits `offset().changed()` when the clamped offset differs. The upper bound
+    /// is re-applied on the next layout once the content is measured.
     pub fn set_offset(&mut self, offset: f32) {
-        self.offset = offset.clamp(0.0, self.max_offset());
+        let clamped = offset.clamp(0.0, self.max_offset());
+        self.offset.set(clamped);
     }
 
     /// Keeps the visible rows in place after `count` rows were prepended.
@@ -505,10 +524,12 @@ impl<D: VirtualDataSource> VirtualList<D> {
             self.sync_heights();
             #[allow(clippy::cast_possible_truncation)]
             {
-                self.offset += self.heights.prefix(count) as f32;
+                let extent = self.heights.prefix(count) as f32;
+                self.offset.set(self.offset.get() + extent);
             }
         } else {
-            self.offset += index_offset(count, self.row_height);
+            self.offset
+                .set(self.offset.get() + index_offset(count, self.row_height));
         }
     }
 
@@ -603,16 +624,19 @@ impl<D: VirtualDataSource> VirtualList<D> {
         let top = self.row_offset(row);
         let bottom = top + self.row_height_of(row);
         let height = self.viewport.height().max(self.row_height);
-        if top < self.offset {
-            self.offset = top;
-        } else if bottom > self.offset + height {
-            self.offset = bottom - height;
-        }
-        self.set_offset(self.offset);
+        let offset = self.offset.get();
+        let target = if top < offset {
+            top
+        } else if bottom > offset + height {
+            bottom - height
+        } else {
+            offset
+        };
+        self.set_offset(target);
     }
 
     fn row_at(&self, position: Point) -> Option<usize> {
-        let y = position.y + self.offset;
+        let y = position.y + self.offset.get();
         if y < 0.0 {
             return None;
         }
@@ -738,12 +762,6 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
         if commands.prepended > 0 {
             self.anchor_prepended(commands.prepended);
         }
-        if let Some(offset) = commands.offset {
-            self.offset = offset;
-        }
-        if commands.to_bottom {
-            self.offset = f32::INFINITY;
-        }
         if self.variable && (self.wrap_width - self.viewport.width()).abs() > f32::EPSILON {
             self.wrap_width = self.viewport.width();
             self.cache.clear();
@@ -752,7 +770,15 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
         }
         self.sync_heights();
         self.selection.retain(self.data.row_count());
-        self.set_offset(self.offset);
+        // Resolve handle commands against the freshly measured bounds: an
+        // explicit offset is clamped, and `scroll_to_bottom`'s infinity sentinel
+        // clamps to the content end. A bound offset is re-clamped the same way.
+        let target = if commands.to_bottom {
+            f32::INFINITY
+        } else {
+            commands.offset.unwrap_or_else(|| self.offset.get())
+        };
+        self.set_offset(target);
 
         let font = environment.font_for(&style);
         let text_style =
@@ -795,8 +821,8 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
                     self.heights.add(row, f64::from(measured - previous));
                     // Scroll anchoring: a re-measured row fully above the
                     // viewport must not push the visible content around.
-                    if self.row_offset(row) + measured <= self.offset {
-                        self.offset += measured - previous;
+                    if self.row_offset(row) + measured <= self.offset.get() {
+                        self.offset.set(self.offset.get() + measured - previous);
                     }
                 }
                 row_height = measured;
@@ -815,7 +841,7 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
             .map(|row| self.row_offset(row.index))
             .collect();
         for (row, offset) in self.visible.iter_mut().zip(offsets) {
-            row.y = offset - self.offset;
+            row.y = offset - self.offset.get();
         }
         if self.cache.len() > CACHE_LIMIT {
             let visible: BTreeSet<u64> = self.visible.iter().map(|row| row.key).collect();
@@ -919,9 +945,9 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
                     WheelDelta::Pixels(delta) => delta.y,
                     WheelDelta::Lines(delta) => delta.y * self.row_height * 3.0,
                 };
-                let old = self.offset;
-                self.set_offset(self.offset - delta);
-                if (self.offset - old).abs() <= f32::EPSILON {
+                let old = self.offset.get();
+                self.set_offset(old - delta);
+                if (self.offset.get() - old).abs() <= f32::EPSILON {
                     return EventStatus::Ignored;
                 }
                 context.request_layout();
@@ -977,18 +1003,19 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
 
 impl<D: VirtualDataSource> VirtualList<D> {
     fn first_visible(&self) -> usize {
+        let offset = self.offset.get();
         let row = if self.variable {
-            self.heights.row_at(f64::from(self.offset))
+            self.heights.row_at(f64::from(offset))
         } else {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let row = (self.offset / self.row_height) as usize;
+            let row = (offset / self.row_height) as usize;
             row
         };
         row.saturating_sub(OVERSCAN).min(self.data.row_count())
     }
 
     fn last_visible(&self) -> usize {
-        let bottom = self.offset + self.viewport.height();
+        let bottom = self.offset.get() + self.viewport.height();
         let row = if self.variable {
             self.heights.row_at(f64::from(bottom)) + 1
         } else {
@@ -1602,6 +1629,16 @@ fn index_offset(index: usize, row_height: f32) -> f32 {
     index as f32 * row_height
 }
 
+/// Keeps a scroll offset finite and non-negative; the dynamic upper bound is
+/// applied at layout once the content and viewport are measured.
+fn normalize_offset(offset: f32) -> f32 {
+    if offset.is_finite() {
+        offset.max(0.0)
+    } else {
+        0.0
+    }
+}
+
 fn default_insets() -> drawen_core::Insets {
     drawen_core::Insets::new(0.0, HORIZONTAL_PADDING, 0.0, HORIZONTAL_PADDING)
 }
@@ -1859,7 +1896,7 @@ mod tests {
         list.set_offset(60.0);
         list.selection_mut().select_only(5);
         list.anchor_prepended(3);
-        assert_eq!(list.offset(), 120.0);
+        assert_eq!(list.offset().get(), 120.0);
         assert_eq!(list.selection().focused(), Some(8));
 
         let mut variable = VirtualList::new(messages(100..110), 20.0).with_variable_heights(true);
@@ -1873,7 +1910,7 @@ mod tests {
             .splice(0..0, [(98, "a".into()), (99, "b".into())]);
         variable.anchor_prepended(2);
         // Two unmeasured rows at the 20px estimate extend the content by 40.
-        assert_eq!(variable.offset(), 120.0);
+        assert_eq!(variable.offset().get(), 120.0);
     }
 
     #[test]
@@ -1956,5 +1993,100 @@ mod tests {
         drop(selection);
         drop(activated_subscription);
         drop(activated);
+    }
+
+    #[test]
+    fn bound_offset_is_clamped_to_the_content_bounds() {
+        let state = Property::new(0.0_f32);
+        let list = VirtualList::new(Rows(100), 20.0);
+        let offset = list.offset();
+        let mut runtime = UiRuntime::new(list);
+        let _binding = runtime.bind_layout(&offset, &state);
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+
+        // content = 100 rows * 20 = 2000, viewport 100, so the upper bound is 1900.
+        state.set(5000.0);
+        let mut display_list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut display_list))
+            .expect("paint after a bound offset change succeeds");
+        assert!((offset.get() - 1900.0).abs() <= f32::EPSILON);
+
+        // Negative writes normalize to zero even before the next layout.
+        state.set(-5.0);
+        assert!(offset.get().abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn wheel_scrolling_emits_the_offset_property() {
+        let list = VirtualList::new(Rows(100), 20.0);
+        let offset = list.offset();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = offset.subscribe({
+            let changes = Rc::clone(&changes);
+            move |value| changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(list);
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+
+        let wheel = InputEvent::Wheel(drawen_core::WheelEvent {
+            position: Point::new(10.0, 10.0),
+            delta: drawen_core::WheelDelta::Pixels(Point::new(0.0, -60.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert!(runtime.dispatch_event(&wheel).is_handled());
+        assert!((offset.get() - 60.0).abs() <= f32::EPSILON);
+        assert_eq!(changes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn handle_scroll_to_bottom_clamps_to_the_content_end() {
+        let list = VirtualList::new(Rows(100), 20.0);
+        let offset = list.offset();
+        let handle = list.handle();
+        let mut runtime = UiRuntime::new(list);
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+
+        // The infinity sentinel must still clamp to the content end now that the
+        // offset is a property whose normalizer rejects non-finite writes.
+        handle.scroll_to_bottom();
+        runtime.invalidate_layout();
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+        assert!((offset.get() - 1900.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn anchor_prepended_emits_the_offset_property() {
+        let list = VirtualList::new(Rows(100), 20.0);
+        let offset = list.offset();
+        let handle = list.handle();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = offset.subscribe({
+            let changes = Rc::clone(&changes);
+            move |value| changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(list);
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+        offset.set(60.0);
+        changes.borrow_mut().clear();
+
+        // Prepending 3 rows at 20px shifts the offset by 60 and emits the property.
+        handle.anchor_prepended(3);
+        runtime.invalidate_layout();
+        runtime
+            .layout(viewport(200.0, 100.0))
+            .expect("layout succeeds");
+        assert!((offset.get() - 120.0).abs() <= f32::EPSILON);
+        assert_eq!(changes.borrow().len(), 1);
     }
 }
