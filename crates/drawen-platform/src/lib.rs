@@ -11,7 +11,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use drawen_core::{InputEvent, Size};
+use drawen_core::{InputEvent, Rect, Size};
 use drawen_render::DisplayList;
 
 /// A cloneable, thread-safe handle that wakes a native event loop.
@@ -381,6 +381,16 @@ pub trait WindowApplication {
     /// macOS Accessibility API. Returning `None` leaves accessibility disabled
     /// for applications that do not expose semantics.
     fn accessibility_tree(&self) -> Option<accesskit::TreeUpdate> {
+        None
+    }
+
+    /// Returns the focused caret area for input-method composition, if any.
+    ///
+    /// Adapters position the native IME candidate window at this rectangle,
+    /// in logical window coordinates. Applications that use a `UiRuntime`
+    /// normally forward [`UiRuntime::ime_cursor_area`](https://docs.rs/drawen-ui/latest/drawen_ui/struct.UiRuntime.html#method.ime_cursor_area)
+    /// here. The default keeps the candidate window at its previous position.
+    fn ime_cursor_area(&self) -> Option<Rect> {
         None
     }
 

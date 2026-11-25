@@ -100,6 +100,16 @@ pub trait Widget {
         false
     }
 
+    /// Returns the caret area for input-method composition, in local coordinates.
+    ///
+    /// Editable widgets return the caret rectangle so platform adapters can
+    /// position the IME candidate window next to the insertion point. The
+    /// runtime translates the rectangle to window coordinates for the focused
+    /// widget; `None` leaves the candidate window at its previous position.
+    fn ime_cursor_area(&self) -> Option<Rect> {
+        None
+    }
+
     /// Handles an input event during capture, target, or bubble propagation.
     fn handle_event(
         &mut self,
@@ -215,6 +225,10 @@ where
 
     fn advances_while_hidden(&self) -> bool {
         (**self).advances_while_hidden()
+    }
+
+    fn ime_cursor_area(&self) -> Option<Rect> {
+        (**self).ime_cursor_area()
     }
 
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {

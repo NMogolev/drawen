@@ -1080,6 +1080,25 @@ impl UiRuntime {
         self.focused
     }
 
+    /// Returns the focused widget's IME caret area in window coordinates.
+    ///
+    /// Platform adapters forward this to the native window so the input-method
+    /// candidate window opens next to the insertion point. Returns `None`
+    /// when nothing focused reports a caret area through
+    /// [`Widget::ime_cursor_area`].
+    #[must_use]
+    pub fn ime_cursor_area(&self) -> Option<Rect> {
+        let node = self.node(self.focused?)?;
+        let local = node.widget.as_ref()?.ime_cursor_area()?;
+        Some(Rect::new(
+            Point::new(
+                node.bounds.origin.x + local.origin.x,
+                node.bounds.origin.y + local.origin.y,
+            ),
+            local.size,
+        ))
+    }
+
     /// Moves keyboard focus to `node` when it accepts focus.
     ///
     /// Passing a stale handle or a widget that does not accept focus clears
@@ -3045,6 +3064,64 @@ mod tests {
         assert!((*radius - 10.0).abs() < f32::EPSILON);
         assert!((*width - 2.0).abs() < f32::EPSILON);
         assert_eq!(*color, LightTheme.focus_ring());
+    }
+
+    #[test]
+    fn ime_cursor_area_offsets_the_focused_caret_by_node_bounds() {
+        struct OffsetHost;
+        struct CaretReporter;
+
+        impl Widget for OffsetHost {
+            fn layout(
+                &mut self,
+                context: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                let (child, _) = context
+                    .layout_child(0, Constraints::loose(constraints.max()))
+                    .expect("valid child");
+                LayoutResult::with_children(
+                    constraints.constrain(size(200.0, 100.0)),
+                    vec![ChildLayout::new(child, Point::new(30.0, 40.0))],
+                )
+            }
+        }
+
+        impl Widget for CaretReporter {
+            fn layout(
+                &mut self,
+                _: &mut LayoutContext<'_>,
+                constraints: Constraints,
+            ) -> LayoutResult {
+                LayoutResult::new(constraints.constrain(size(60.0, 20.0)))
+            }
+
+            fn accepts_focus(&self) -> bool {
+                true
+            }
+
+            fn ime_cursor_area(&self) -> Option<Rect> {
+                Some(Rect::new(Point::new(5.0, 7.0), size(1.0, 12.0)))
+            }
+        }
+
+        let mut runtime = UiRuntime::new(OffsetHost);
+        let root = runtime.root();
+        let caret = runtime
+            .append_child(root, CaretReporter)
+            .expect("child appends");
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("layout succeeds");
+
+        assert_eq!(runtime.ime_cursor_area(), None, "no focus, no caret area");
+        runtime.focus_widget(caret).expect("focus succeeds");
+        assert_eq!(
+            runtime.ime_cursor_area(),
+            Some(Rect::new(Point::new(35.0, 47.0), size(1.0, 12.0)))
+        );
+        runtime.clear_focus();
+        assert_eq!(runtime.ime_cursor_area(), None);
     }
 
     #[test]
