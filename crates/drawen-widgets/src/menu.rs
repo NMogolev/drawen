@@ -116,6 +116,8 @@ pub struct Menu {
     pressed: Option<usize>,
     selected: Signal<usize>,
     size: Size,
+    content_height: f32,
+    scroll_y: f32,
     padding: Insets,
     text_layouts: Vec<Option<TextLayout>>,
     shortcut_layouts: Vec<Option<TextLayout>>,
@@ -138,6 +140,8 @@ impl Menu {
             pressed: None,
             selected: Signal::new(),
             size: Size::ZERO,
+            content_height: 0.0,
+            scroll_y: 0.0,
             padding: DEFAULT_PADDING,
             text_layouts: Vec::new(),
             shortcut_layouts: Vec::new(),
@@ -180,10 +184,14 @@ impl Menu {
     }
 
     fn index_at(&self, point: Point) -> Option<usize> {
-        if point.x < 0.0 || point.x > self.size.width() {
+        if point.x < 0.0
+            || point.x > self.size.width()
+            || point.y < 0.0
+            || point.y > self.size.height()
+        {
             return None;
         }
-        let mut y = self.padding.top;
+        let mut y = self.padding.top - self.scroll_y;
         for (index, entry) in self.entries.iter().enumerate() {
             let height = Self::entry_height(entry);
             if point.y >= y && point.y < y + height {
@@ -194,11 +202,44 @@ impl Menu {
         None
     }
 
+    fn max_scroll_y(&self) -> f32 {
+        (self.content_height - self.size.height()).max(0.0)
+    }
+
+    /// Top and bottom of a row in content coordinates (before scrolling).
+    fn row_extent(&self, index: usize) -> (f32, f32) {
+        let mut y = self.padding.top;
+        for (current, entry) in self.entries.iter().enumerate() {
+            let height = Self::entry_height(entry);
+            if current == index {
+                return (y, y + height);
+            }
+            y += height;
+        }
+        (y, y)
+    }
+
+    fn ensure_active_visible(&mut self) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let (top, bottom) = self.row_extent(active);
+        let view_top = self.scroll_y + self.padding.top;
+        let view_bottom = self.scroll_y + self.size.height() - self.padding.bottom;
+        if top < view_top {
+            self.scroll_y = (top - self.padding.top).max(0.0);
+        } else if bottom > view_bottom {
+            self.scroll_y = bottom - self.size.height() + self.padding.bottom;
+        }
+        self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll_y());
+    }
+
     fn set_active(&mut self, active: Option<usize>, context: &mut EventContext<'_>) {
         if self.active == active {
             return;
         }
         self.active = active;
+        self.ensure_active_visible();
         context.request_redraw();
     }
 
@@ -313,7 +354,9 @@ impl Widget for Menu {
         };
         let width = (label_width + shortcut_space + self.padding.horizontal() + ITEM_INSET * 2.0)
             .max(MIN_WIDTH);
+        self.content_height = height;
         self.size = constraints.constrain(size(width, height));
+        self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll_y());
         LayoutResult::new(self.size)
     }
 
@@ -330,65 +373,74 @@ impl Widget for Menu {
         context.fill_rounded_rect(surface, self.radius, self.surface_color);
         context.stroke_rounded_rect(surface, self.radius, 1.0, self.border_color);
 
-        let mut y = surface.origin.y + self.padding.top;
-        for (index, entry) in self.entries.iter().enumerate() {
-            let height = Self::entry_height(entry);
-            if entry.is_separator() {
-                let line = Rect::new(
-                    Point::new(surface.origin.x + self.padding.left, y + height / 2.0),
-                    size(surface.size.width() - self.padding.horizontal(), 1.0),
-                );
-                context.fill_rect(line, self.border_color);
-                y += height;
-                continue;
-            }
+        context.with_clip(surface, |context| {
+            let mut y = surface.origin.y + self.padding.top - self.scroll_y;
+            for (index, entry) in self.entries.iter().enumerate() {
+                let height = Self::entry_height(entry);
+                let visible = y + height > surface.origin.y && y < surface.bottom();
+                if entry.is_separator() {
+                    if visible {
+                        let line = Rect::new(
+                            Point::new(surface.origin.x + self.padding.left, y + height / 2.0),
+                            size(surface.size.width() - self.padding.horizontal(), 1.0),
+                        );
+                        context.fill_rect(line, self.border_color);
+                    }
+                    y += height;
+                    continue;
+                }
+                if !visible {
+                    y += height;
+                    continue;
+                }
 
-            let row = Rect::new(
-                Point::new(surface.origin.x + self.padding.left, y),
-                size(
-                    surface.size.width() - self.padding.horizontal(),
-                    ITEM_HEIGHT,
-                ),
-            );
-            if self.active == Some(index) && entry.is_enabled() {
-                context.fill_rounded_rect(row, self.radius * 0.6, self.hover_color);
-            }
-            let text_color = if entry.is_enabled() {
-                self.text_color
-            } else {
-                self.text_color.with_alpha(DISABLED_ALPHA)
-            };
-            if let Some(text) = &self.text_layouts[index] {
-                let text = text.clone().with_color(text_color);
-                let text_height = text.size().height();
-                context.draw_text(
-                    text,
-                    Point::new(
-                        row.origin.x + ITEM_INSET,
-                        row.origin.y + (ITEM_HEIGHT - text_height) / 2.0,
+                let row = Rect::new(
+                    Point::new(surface.origin.x + self.padding.left, y),
+                    size(
+                        surface.size.width() - self.padding.horizontal(),
+                        ITEM_HEIGHT,
                     ),
                 );
+                if self.active == Some(index) && entry.is_enabled() {
+                    context.fill_rounded_rect(row, self.radius * 0.6, self.hover_color);
+                }
+                let text_color = if entry.is_enabled() {
+                    self.text_color
+                } else {
+                    self.text_color.with_alpha(DISABLED_ALPHA)
+                };
+                if let Some(text) = &self.text_layouts[index] {
+                    let text = text.clone().with_color(text_color);
+                    let text_height = text.size().height();
+                    context.draw_text(
+                        text,
+                        Point::new(
+                            row.origin.x + ITEM_INSET,
+                            row.origin.y + (ITEM_HEIGHT - text_height) / 2.0,
+                        ),
+                    );
+                }
+                if let Some(shortcut) = &self.shortcut_layouts[index] {
+                    let shortcut = shortcut.clone().with_color(self.muted_color.with_alpha(
+                        if entry.is_enabled() {
+                            1.0
+                        } else {
+                            DISABLED_ALPHA
+                        },
+                    ));
+                    let shortcut_width = shortcut.size().width();
+                    let shortcut_height = shortcut.size().height();
+                    context.draw_text(
+                        shortcut,
+                        Point::new(
+                            row.right() - ITEM_INSET - shortcut_width,
+                            row.origin.y + (ITEM_HEIGHT - shortcut_height) / 2.0,
+                        ),
+                    );
+                }
+                y += height;
             }
-            if let Some(shortcut) = &self.shortcut_layouts[index] {
-                let shortcut = shortcut.clone().with_color(self.muted_color.with_alpha(
-                    if entry.is_enabled() {
-                        1.0
-                    } else {
-                        DISABLED_ALPHA
-                    },
-                ));
-                let shortcut_width = shortcut.size().width();
-                let shortcut_height = shortcut.size().height();
-                context.draw_text(
-                    shortcut,
-                    Point::new(
-                        row.right() - ITEM_INSET - shortcut_width,
-                        row.origin.y + (ITEM_HEIGHT - shortcut_height) / 2.0,
-                    ),
-                );
-            }
-            y += height;
-        }
+        });
     }
 
     fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
@@ -428,6 +480,21 @@ impl Widget for Menu {
             InputEvent::PointerCancel(_) => {
                 self.pressed = None;
                 EventStatus::Ignored
+            }
+            InputEvent::Wheel(wheel) => {
+                if self.max_scroll_y() <= 0.0 {
+                    return EventStatus::Ignored;
+                }
+                let delta = match wheel.delta {
+                    drawen_core::WheelDelta::Pixels(delta) => delta.y,
+                    drawen_core::WheelDelta::Lines(delta) => delta.y * ITEM_HEIGHT,
+                };
+                let next = (self.scroll_y - delta).clamp(0.0, self.max_scroll_y());
+                if (next - self.scroll_y).abs() > f32::EPSILON {
+                    self.scroll_y = next;
+                    context.request_redraw();
+                }
+                EventStatus::Handled
             }
             InputEvent::PointerLeave(_) => {
                 if self.pressed.is_none() {
@@ -613,6 +680,58 @@ mod tests {
         let _ = runtime.dispatch_event(&pointer(point, false));
         let _ = runtime.dispatch_event(&pointer(point, true));
         assert!(selected.borrow().is_empty());
+    }
+
+    #[test]
+    fn constrained_height_scrolls_and_clicks_hit_scrolled_rows() {
+        let menu = Menu::new((0..10).map(|index| MenuEntry::item(format!("Item {index}"))));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = menu.selected().subscribe({
+            let selected = Rc::clone(&selected);
+            move |index| selected.borrow_mut().push(*index)
+        });
+        let mut runtime = UiRuntime::new(menu);
+        runtime
+            .layout(Constraints::loose(size(400.0, 100.0)))
+            .expect("layout succeeds");
+        let bounds = runtime.bounds(runtime.root()).expect("root has bounds");
+        assert!((bounds.size.height() - 100.0).abs() < f32::EPSILON);
+
+        let wheel = InputEvent::Wheel(drawen_core::WheelEvent {
+            position: drawen_core::Point::new(20.0, 50.0),
+            delta: drawen_core::WheelDelta::Pixels(drawen_core::Point::new(0.0, -60.0)),
+            modifiers: Modifiers::NONE,
+        });
+        assert!(runtime.dispatch_event(&wheel).is_handled());
+        // After scrolling 60px, row 2 starts at 4 + 60 - 60 = 4 local pixels.
+        let point = drawen_core::Point::new(20.0, 10.0);
+        let _ = runtime.dispatch_event(&pointer(point, false));
+        let _ = runtime.dispatch_event(&pointer(point, true));
+        assert_eq!(*selected.borrow(), vec![2]);
+    }
+
+    #[test]
+    fn keyboard_end_scrolls_the_last_row_into_view() {
+        let menu = Menu::new((0..10).map(|index| MenuEntry::item(format!("Item {index}"))));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = menu.selected().subscribe({
+            let selected = Rc::clone(&selected);
+            move |index| selected.borrow_mut().push(*index)
+        });
+        let mut runtime = UiRuntime::new(menu);
+        runtime
+            .layout(Constraints::loose(size(400.0, 100.0)))
+            .expect("layout succeeds");
+        runtime
+            .focus_widget(runtime.root())
+            .expect("menu is focusable");
+        let _ = runtime.dispatch_event(&key(NamedKey::End));
+        // Content is 8 + 300 = 308 tall; the last row sits at 274..304, so the
+        // scroll must be 208 and the row visible at 66..96 local pixels.
+        let point = drawen_core::Point::new(20.0, 70.0);
+        let _ = runtime.dispatch_event(&pointer(point, false));
+        let _ = runtime.dispatch_event(&pointer(point, true));
+        assert_eq!(*selected.borrow(), vec![9]);
     }
 
     #[test]

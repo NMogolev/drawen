@@ -187,7 +187,7 @@ impl Widget for Popover {
             let max = context
                 .viewport()
                 .map_or_else(|| constraints.max(), |viewport| viewport.size);
-            let (panel, panel_layout, origin) = context
+            let (panel, panel_layout, origin, _side) = context
                 .layout_child_overlay(
                     1,
                     Constraints::loose(max),

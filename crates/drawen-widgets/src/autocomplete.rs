@@ -522,7 +522,7 @@ impl Widget for Autocomplete {
             } else {
                 Rect::new(Point::ZERO, self.size)
             };
-            let (panel, _, origin) = context
+            let (panel, _, origin, _side) = context
                 .layout_child_overlay(
                     0,
                     Constraints::loose(max),
