@@ -5,7 +5,7 @@ use drawen_render::PaintContext;
 use drawen_ui::{
     Accessibility, AccessibilityAction, AccessibilityActions, AccessibilityRole,
     AccessibilityState, DssStyle, EventContext, EventPhase, EventStatus, LayoutContext,
-    LayoutResult, Signal, StyleTarget, UiEnvironment, Widget,
+    LayoutResult, Property, Signal, StyleTarget, UiEnvironment, Widget,
 };
 
 const DEFAULT_WIDTH: f32 = 160.0;
@@ -14,10 +14,15 @@ const TRACK_HEIGHT: f32 = 4.0;
 const THUMB_RADIUS: f32 = 8.0;
 
 /// A horizontal control for selecting a continuous value from a finite range.
+///
+/// The value is a clamped [`Property`]: bind application state to it with
+/// `runtime.bind(&slider.value(), &state.volume)` and every copied write stays
+/// inside `[minimum, maximum]`. User interaction additionally emits
+/// [`Self::changed`].
 pub struct Slider {
     minimum: f32,
     maximum: f32,
-    value: f32,
+    value: Property<f32>,
     changed: Signal<f32>,
     dragging: Option<PointerId>,
     size: Size,
@@ -47,7 +52,13 @@ impl Slider {
         Self {
             minimum,
             maximum,
-            value: value.clamp(minimum, maximum),
+            value: Property::normalized(value, move |value: f32| {
+                if value.is_finite() {
+                    value.clamp(minimum, maximum)
+                } else {
+                    minimum
+                }
+            }),
             changed: Signal::new(),
             dragging: None,
             size: Size::ZERO,
@@ -66,20 +77,30 @@ impl Slider {
         self.maximum
     }
 
-    /// Returns the current value.
-    #[must_use]
-    pub const fn value(&self) -> f32 {
-        self.value
+    /// Returns the value property shared with this slider.
+    ///
+    /// Every write is clamped to `[minimum, maximum]` before it is stored,
+    /// including `UiRuntime::bind` copies, so bound application state stays in
+    /// range; a non-finite write falls back to `minimum`. Bind state with
+    /// `runtime.bind(&slider.value(), &state.volume)` and read the scalar with
+    /// `slider.value().get()`. The property's `changed` signal fires on every
+    /// write; [`Self::changed`] fires only on user interaction.
+    pub fn value(&self) -> Property<f32> {
+        self.value.clone()
     }
 
-    /// Sets the current value without emitting [`Self::changed`].
+    /// Sets the current value, clamped to the finite inclusive range.
+    ///
+    /// Emits `value().changed()` when the clamped value differs, but not the
+    /// user-only [`Self::changed`] signal. When the property is watched or
+    /// bound through the runtime, the change invalidates paint.
     ///
     /// # Panics
     ///
     /// Panics when `value` is non-finite.
     pub fn set_value(&mut self, value: f32) {
         assert!(value.is_finite(), "slider value must be finite");
-        self.value = value.clamp(self.minimum, self.maximum);
+        self.value.set(value);
     }
 
     /// Returns a signal emitted when the user changes the value.
@@ -90,12 +111,13 @@ impl Slider {
 
     fn set_user_value(&mut self, value: f32, context: &mut EventContext<'_>) {
         let value = value.clamp(self.minimum, self.maximum);
-        if (self.value - value).abs() <= f32::EPSILON {
+        if (self.value.get() - value).abs() <= f32::EPSILON {
             return;
         }
-        self.value = value;
-        self.changed.emit(&self.value);
-        context.request_redraw();
+        if self.value.set(value) {
+            self.changed.emit(&value);
+            context.request_redraw();
+        }
     }
 
     fn set_value_from_position(&mut self, position: Point, context: &mut EventContext<'_>) {
@@ -231,11 +253,11 @@ impl Widget for Slider {
             }
             InputEvent::KeyDown(key) if !key.repeat => match key.key {
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowDown) => {
-                    self.set_user_value(self.value - self.keyboard_step(), context);
+                    self.set_user_value(self.value.get() - self.keyboard_step(), context);
                     EventStatus::Handled
                 }
                 Key::Named(NamedKey::ArrowRight | NamedKey::ArrowUp) => {
-                    self.set_user_value(self.value + self.keyboard_step(), context);
+                    self.set_user_value(self.value.get() + self.keyboard_step(), context);
                     EventStatus::Handled
                 }
                 Key::Named(NamedKey::Home) => {
@@ -259,7 +281,7 @@ impl Widget for Slider {
     fn accessibility(&self) -> Accessibility {
         Accessibility::new(AccessibilityRole::Slider)
             .with_numeric_value(
-                f64::from(self.value),
+                f64::from(self.value.get()),
                 f64::from(self.minimum),
                 f64::from(self.maximum),
             )
@@ -282,11 +304,11 @@ impl Widget for Slider {
                 true
             }
             AccessibilityAction::Increment => {
-                self.set_accessibility_value(self.value + self.keyboard_step());
+                self.set_accessibility_value(self.value.get() + self.keyboard_step());
                 true
             }
             AccessibilityAction::Decrement => {
-                self.set_accessibility_value(self.value - self.keyboard_step());
+                self.set_accessibility_value(self.value.get() - self.keyboard_step());
                 true
             }
             _ => false,
@@ -299,14 +321,15 @@ impl Slider {
         if !value.is_finite() {
             return;
         }
-        self.value = value.clamp(self.minimum, self.maximum);
-        self.changed.emit(&self.value);
+        if self.value.set(value) {
+            self.changed.emit(&self.value.get());
+        }
     }
 
     fn value_ratio(&self) -> f32 {
         let range = self.maximum - self.minimum;
         if range > 0.0 {
-            (self.value - self.minimum) / range
+            (self.value.get() - self.minimum) / range
         } else {
             0.0
         }
@@ -373,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn programmatic_value_is_clamped_without_emitting() {
+    fn programmatic_value_is_clamped_without_emitting_user_changed() {
         let mut slider = Slider::with_value(10.0, 20.0, 30.0);
         let changes = Rc::new(RefCell::new(Vec::new()));
         let _subscription = slider.changed().subscribe({
@@ -383,8 +406,59 @@ mod tests {
 
         slider.set_value(-5.0);
 
-        assert!((slider.value() - 10.0).abs() <= f32::EPSILON);
+        assert!((slider.value().get() - 10.0).abs() <= f32::EPSILON);
         assert!(changes.borrow().is_empty());
+    }
+
+    #[test]
+    fn bound_value_is_clamped_to_the_range() {
+        let volume = Property::new(0.5_f32);
+        let slider = Slider::new(0.0, 1.0);
+        let value = slider.value();
+        let mut runtime = UiRuntime::new(slider);
+        let _binding = runtime.bind(&value, &volume);
+        runtime
+            .layout(Constraints::tight(size(100.0, CONTROL_HEIGHT)).expect("valid constraints"))
+            .expect("slider layout succeeds");
+        assert!((value.get() - 0.5).abs() <= f32::EPSILON);
+
+        // A binding copies the source verbatim; the property clamps it.
+        volume.set(2.0);
+        assert!((value.get() - 1.0).abs() <= f32::EPSILON);
+
+        volume.set(-1.0);
+        assert!(value.get().abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn set_value_emits_property_changed_but_not_user_changed() {
+        let slider = Slider::new(0.0, 100.0);
+        let value = slider.value();
+        let property_changes = Rc::new(RefCell::new(Vec::new()));
+        let user_changes = Rc::new(RefCell::new(Vec::new()));
+        let _property = value.subscribe({
+            let property_changes = Rc::clone(&property_changes);
+            move |value| property_changes.borrow_mut().push(*value)
+        });
+        let _user = slider.changed().subscribe({
+            let user_changes = Rc::clone(&user_changes);
+            move |value| user_changes.borrow_mut().push(*value)
+        });
+        let mut runtime = UiRuntime::new(slider);
+        runtime
+            .layout(Constraints::tight(size(100.0, CONTROL_HEIGHT)).expect("valid constraints"))
+            .expect("slider layout succeeds");
+
+        // A programmatic write emits the property signal, never the user one.
+        value.set(40.0);
+        assert_eq!(*property_changes.borrow(), vec![40.0]);
+        assert!(user_changes.borrow().is_empty());
+
+        // User interaction emits both.
+        let _ = runtime.dispatch_event(&pointer(InputEventKind::Down, 92.0));
+        let _ = runtime.dispatch_event(&pointer(InputEventKind::Up, 92.0));
+        assert_eq!(property_changes.borrow().len(), 2);
+        assert_eq!(user_changes.borrow().len(), 1);
     }
 
     #[derive(Clone, Copy)]
