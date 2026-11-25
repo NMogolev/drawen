@@ -351,4 +351,142 @@ mod tests {
         assert_eq!(runtime.focused_widget(), Some(first));
         assert_ne!(runtime.focused_widget(), Some(outside));
     }
+
+    fn focus_restore_runtime() -> (UiRuntime, super::ModalHandle, drawen_core::WidgetId) {
+        let modal = Modal::new();
+        let handle = modal.handle();
+        let mut runtime = UiRuntime::new(crate::Stack::new());
+        let root = runtime.root();
+        let opener = runtime.append_child(root, Button::new()).expect("opener");
+        let modal = runtime.append_child(root, modal).expect("modal host");
+        let panel = runtime.append_child(modal, Dialog::new()).expect("panel");
+        runtime
+            .append_child(panel, Button::new())
+            .expect("action");
+        runtime
+            .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
+            .expect("closed layout succeeds");
+        runtime.focus_widget(opener).expect("opener is focusable");
+        (runtime, handle, opener)
+    }
+
+    #[test]
+    fn escape_restores_focus_to_the_opener() {
+        let (mut runtime, handle, opener) = focus_restore_runtime();
+        handle.open();
+        runtime.invalidate_layout();
+        runtime
+            .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
+            .expect("open layout succeeds");
+        assert_eq!(runtime.focused_widget(), Some(opener));
+
+        let _ = runtime.dispatch_event(&tab());
+        assert_ne!(runtime.focused_widget(), Some(opener));
+        let _ = runtime.dispatch_event(&escape());
+        assert!(!handle.is_open());
+        assert_eq!(
+            runtime.focused_widget(),
+            Some(opener),
+            "closing the modal must return focus to the widget that opened it"
+        );
+    }
+
+    #[test]
+    fn closing_through_the_handle_restores_focus_after_layout() {
+        let (mut runtime, handle, opener) = focus_restore_runtime();
+        handle.open();
+        runtime.invalidate_layout();
+        runtime
+            .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
+            .expect("open layout succeeds");
+        let _ = runtime.dispatch_event(&tab());
+        assert_ne!(runtime.focused_widget(), Some(opener));
+
+        handle.close();
+        runtime.invalidate_layout();
+        runtime
+            .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
+            .expect("closed layout succeeds");
+        assert_eq!(runtime.focused_widget(), Some(opener));
+    }
+
+    #[test]
+    fn nested_overlay_restores_focus_step_by_step() {
+        use std::{cell::Cell, rc::Rc};
+
+        use crate::{Popover, PopoverTrigger};
+
+        let modal = Modal::new();
+        let handle = modal.handle();
+        let popover = Popover::new().with_trigger(PopoverTrigger::Primary);
+        let popover_closed = Rc::new(Cell::new(0));
+        let _closed = popover.closed().subscribe({
+            let popover_closed = Rc::clone(&popover_closed);
+            move |()| popover_closed.set(popover_closed.get() + 1)
+        });
+        let mut runtime = UiRuntime::new(crate::Stack::new());
+        let root = runtime.root();
+        let opener = runtime.append_child(root, Button::new()).expect("opener");
+        let modal = runtime.append_child(root, modal).expect("modal host");
+        let panel = runtime.append_child(modal, Dialog::new()).expect("panel");
+        let column = runtime
+            .append_child(panel, drawen_ui::Column)
+            .expect("column");
+        let popover = runtime.append_child(column, popover).expect("popover");
+        let anchor = runtime
+            .append_child(
+                popover,
+                Button::new().with_padding(drawen_core::Insets::all(12.0)),
+            )
+            .expect("anchor");
+        let content = runtime
+            .append_child(popover, crate::Box::new())
+            .expect("content");
+        let inner = runtime
+            .append_child(
+                content,
+                Button::new().with_padding(drawen_core::Insets::all(12.0)),
+            )
+            .expect("inner action");
+        let constraints = Constraints::tight(size(400.0, 300.0)).expect("valid constraints");
+        runtime
+            .layout(constraints)
+            .expect("closed layout succeeds");
+        runtime.focus_widget(opener).expect("opener is focusable");
+        handle.open();
+        runtime.invalidate_layout();
+        runtime.layout(constraints).expect("open layout succeeds");
+
+        // Click the popover anchor inside the modal to open the nested menu.
+        let anchor_bounds = runtime.bounds(anchor).expect("anchor has bounds");
+        let center = drawen_core::Point::new(
+            anchor_bounds.origin.x + anchor_bounds.size.width() / 2.0,
+            anchor_bounds.origin.y + anchor_bounds.size.height() / 2.0,
+        );
+        let _ = runtime.dispatch_event(&drawen_core::InputEvent::PointerDown(
+            drawen_core::PointerEvent {
+                pointer_id: drawen_core::PointerId(1),
+                position: center,
+                button: Some(drawen_core::PointerButton::Primary),
+                buttons: drawen_core::PointerButtons::PRIMARY,
+                modifiers: drawen_core::Modifiers::NONE,
+            },
+        ));
+        runtime.layout(constraints).expect("popover layout succeeds");
+        assert_eq!(runtime.focused_widget(), Some(anchor));
+
+        let _ = runtime.dispatch_event(&tab());
+        assert_eq!(runtime.focused_widget(), Some(inner));
+
+        // First Escape closes the popover and returns focus to its anchor.
+        let _ = runtime.dispatch_event(&escape());
+        assert_eq!(popover_closed.get(), 1);
+        assert!(handle.is_open());
+        assert_eq!(runtime.focused_widget(), Some(anchor));
+
+        // Second Escape closes the modal and returns focus to the opener.
+        let _ = runtime.dispatch_event(&escape());
+        assert!(!handle.is_open());
+        assert_eq!(runtime.focused_widget(), Some(opener));
+    }
 }

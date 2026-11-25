@@ -638,7 +638,7 @@ mod tests {
         let mut runtime = UiRuntime::new(Box::new().with_padding(Insets::all(10.0)));
         let root = runtime.root();
         let popover = runtime.append_child(root, popover).expect("popover");
-        runtime
+        let anchor = runtime
             .append_child(popover, Button::new().with_padding(Insets::all(10.0)))
             .expect("anchor");
         let menu = runtime.append_child(popover, menu).expect("content");
@@ -658,6 +658,10 @@ mod tests {
         let _ = runtime.dispatch_event(&pointer(point, true));
         assert_eq!(*selected.borrow(), vec![0]);
         assert_eq!(closed.get(), 1);
-        assert_eq!(runtime.focused_widget(), None);
+        assert_eq!(
+            runtime.focused_widget(),
+            Some(anchor),
+            "focus returns to the anchor that opened the popover"
+        );
     }
 }
