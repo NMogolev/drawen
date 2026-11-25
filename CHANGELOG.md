@@ -143,6 +143,16 @@ in the headings because the version itself must stay valid semver; see
   building a display list. `Video` and `AudioPlayer` opt into background ticks,
   and `ToastHost` keeps expiring queued toasts, while `AnimatedImage` and other
   visual widgets freeze.
+- Freezing now extends from the window to the widget tree. On every tick the
+  runtime computes per-node visibility: a widget scrolled out of the viewport,
+  clipped away by a scrolling ancestor, inside a collapsed subtree, or covered
+  by the topmost modal's scrim stops advancing purely visual animation and stops
+  scheduling frames through `UiRuntime::next_frame_in`, even while the window is
+  presented. Overlay roots float free of ancestor clips, and surfaces opened
+  above a modal animate over its scrim. Widgets that opt in through
+  `Widget::advances_while_hidden` (media clocks, toast queue lifetimes) keep
+  ticking regardless, and `settle_animations` still completes everything for
+  tests and screenshots.
 - `MediaDirector` now includes `WindowAction::RequestRedraw` in the window action
   when a window is restored, so the documented single-director snippet repaints
   the first visible frame without checking the separate `redraw` flag.

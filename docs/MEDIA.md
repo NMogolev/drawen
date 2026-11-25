@@ -134,7 +134,10 @@ the requested position.
   controls, and reports track changes through signals instead of guessing a
   playlist.
 - `AnimatedImage` and `Image` are not sessions. A GIF is a small, fully decoded
-  timeline, not a media pipeline, and it keeps its own frame index.
+  timeline, not a media pipeline, and it keeps its own frame index. The frame
+  clock is purely visual: the runtime freezes it while the widget is scrolled
+  offscreen, clipped away, inside a collapsed subtree, or under a modal scrim,
+  and resumes from the same frame when it becomes visible again.
 - Neither player owns a timer, spawns a thread, or calls a platform API. They
   paint, tick through `Widget::advance_animation`, and emit typed signals. Audio
   output still lives in `paleo-audio` and `AudioPaleoSession`.

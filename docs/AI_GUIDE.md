@@ -261,6 +261,12 @@ Common causes:
   runtime keeps scheduling visible frames while the window is hidden. With the
   forwarding in place, `next_frame_in()` returns the background interval only
   for media widgets and queued toasts, and `None` for purely visual animation.
+- A visual loop (sticker, spinner) sits outside the scroll viewport, inside a
+  collapsed branch, or under a modal scrim. Freezing is a property of the tree:
+  the runtime stops purely visual animation per widget visibility, not just per
+  window, and resumes it when the widget is visible again. Media clocks and
+  toast lifetimes keep running through `Widget::advances_while_hidden`; do not
+  "fix" an offscreen loop by forcing frames.
 - A long decode or file read runs inside `paint`; paint must only record display
   commands. Move blocking work out of the UI thread.
 - A worker thread tries to mutate the runtime; that is not supported.
