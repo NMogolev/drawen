@@ -278,7 +278,7 @@ mod tests {
         runtime
             .layout(Constraints::tight(size(400.0, 300.0)).expect("valid constraints"))
             .expect("closed layout succeeds");
-        assert!(runtime.tab_order().is_empty());
+        assert_eq!(runtime.tab_order(), [] as [drawen_core::WidgetId; 0]);
 
         handle.open();
         assert!(handle.is_open());
