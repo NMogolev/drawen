@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/cubex",
     "crates/paleo",
     "crates/paleo-audio",
     "crates/paleo-av1",
