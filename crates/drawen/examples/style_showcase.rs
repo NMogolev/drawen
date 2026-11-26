@@ -15,12 +15,17 @@ use std::{
 
 use drawen::{
     Alert, AlertTone, Avatar, AvatarStatus, Badge, BadgeTone, Box as DrawenBox, Button, Checkbox,
-    ChildLayout, Color, Constraints, Divider, DockArea, DockAxis, Dropdown, Expander, Image,
-    Insets, LayoutContext, LayoutNode, LayoutResult, ListView, MenuBar, PanelId, Point,
-    ProgressBar, RadioButton, RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton,
-    Slider, Spinner, SplitAxis, Splitter, Styled, Subscription, Switch, TabBar, Text, TextEdit,
-    TextField, Theme, Toolbar, UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
-    platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
+    ChildLayout, Color, CommandPalette, Constraints, Divider, DockArea, DockAxis, Dropdown,
+    Expander, Image, Insets, LayoutContext, LayoutNode, LayoutResult, ListView, Menu, MenuBar,
+    MenuEntry, Modal, PaletteCommand, PanelId, Point, Popover, PopoverTrigger, ProgressBar,
+    RadioButton, RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner,
+    SplitAxis, SplitButton, Splitter, Styled, Subscription, Switch, TabBar, Text, TextEdit,
+    TextField, Theme, TitleBar, TitleBarStyle, Toast, ToastHandle, ToastHost, ToastTone, Toolbar,
+    Tooltip, UiEnvironment, UiRuntime, Widget, WindowChromeState, WindowControl, WindowFrame,
+    WorkspaceLayout,
+    platform::{
+        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation, action_for,
+    },
     render::{DisplayList, PaintContext, RasterImage, TextLayout, TextStyle},
 };
 
@@ -34,6 +39,7 @@ const WINDOW_HEIGHT_PX: u32 = 860;
 const MENU_MAX_HEIGHT: f32 = 58.0;
 const TOOLBAR_MAX_HEIGHT: f32 = 78.0;
 const STATUS_HEIGHT: f32 = 28.0;
+const TITLE_BAR_HEIGHT: f32 = 42.0;
 const PAGE_PADDING: f32 = 24.0;
 const BASE_FONT_SIZE: f32 = 14.0;
 const BASE_SPACING: f32 = 8.0;
@@ -82,6 +88,9 @@ fn write_snapshots() {
         "layout",
         "workspace",
         "dss",
+        "servo",
+        "agents",
+        "overlays",
     ]
     .iter()
     .enumerate()
@@ -447,8 +456,15 @@ impl Theme for ShowcaseTheme {
 struct StyleShowcase {
     runtime: UiRuntime,
     size: Size,
+    chrome: WindowChromeState,
     appearance: Rc<RefCell<Appearance>>,
     dirty: Rc<Cell<bool>>,
+    #[cfg(feature = "agent")]
+    agent_observation_requested: Rc<Cell<bool>>,
+    #[cfg(feature = "agent")]
+    agent_report: Rc<RefCell<String>>,
+    toast_requested: Rc<Cell<bool>>,
+    toast_handle: ToastHandle,
     #[cfg(feature = "media")]
     media_import_requested: Rc<Cell<Option<MediaImport>>>,
     #[cfg(feature = "audio")]
@@ -474,8 +490,17 @@ impl StyleShowcase {
         let size = valid_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         let appearance = Rc::new(RefCell::new(Appearance::default()));
         let dirty = Rc::new(Cell::new(false));
+        #[cfg(feature = "agent")]
+        let agent_observation_requested = Rc::new(Cell::new(false));
+        #[cfg(feature = "agent")]
+        let agent_report = Rc::new(RefCell::new(
+            "Press \"Capture semantic tree\" to inspect this retained UI through drawen-agent."
+                .to_owned(),
+        ));
+        let toast_requested = Rc::new(Cell::new(false));
         #[cfg(feature = "media")]
         let media_import_requested = Rc::new(Cell::new(None));
+        let chrome = WindowChromeState::new();
         let mut environment = UiEnvironment::from_dss(
             ShowcaseTheme {
                 appearance: Rc::clone(&appearance),
@@ -485,8 +510,31 @@ impl StyleShowcase {
         .expect("showcase DSS is valid");
         environment.use_system_fallback_fonts();
         environment.set_animations_enabled(appearance.borrow().animations);
-        let mut runtime = UiRuntime::with_environment(ShowcaseShell, environment);
+        let frame = WindowFrame::new()
+            .with_title_bar_height(TITLE_BAR_HEIGHT)
+            .with_resize_border(7.0);
+        let mut runtime = UiRuntime::with_environment(frame, environment);
         let root = runtime.root();
+        let title_bar = TitleBar::new("Drawen Style Lab")
+            .with_icon("◆")
+            .with_subtitle("  component and platform laboratory")
+            .with_controls([
+                WindowControl::Minimize,
+                WindowControl::Maximize,
+                WindowControl::ToggleFullscreen,
+                WindowControl::Close,
+            ])
+            .with_state(chrome.clone())
+            .with_style(TitleBarStyle {
+                height: TITLE_BAR_HEIGHT,
+                ..TitleBarStyle::default()
+            });
+        runtime
+            .append_child(root, title_bar)
+            .expect("window frame exists");
+        let root = runtime
+            .append_child(root, ShowcaseShell)
+            .expect("window frame exists");
         let mut subscriptions = Vec::new();
 
         let menu = MenuBar::new(["File", "Edit", "View", "Help"]);
@@ -520,8 +568,11 @@ impl StyleShowcase {
             "Layout",
             "Workspace",
             "DSS",
+            "Servo",
+            "Agents",
+            "Overlays",
         ]);
-        tabs.set_selected(Some(selected_tab.min(5)));
+        tabs.set_selected(Some(selected_tab.min(8)));
         subscriptions.push(
             tabs.changed()
                 .subscribe(|index| println!("TabBar: opened page {}.", index + 1)),
@@ -547,6 +598,23 @@ impl StyleShowcase {
         append_layout_page(&mut runtime, tabs);
         append_workspace_page(&mut runtime, tabs);
         append_dss_page(&mut runtime, tabs);
+        append_servo_page(&mut runtime, tabs);
+        append_agent_page(
+            &mut runtime,
+            &mut subscriptions,
+            #[cfg(feature = "agent")]
+            &agent_observation_requested,
+            #[cfg(feature = "agent")]
+            &agent_report,
+            tabs,
+        );
+        let toast_handle = append_overlay_page(
+            &mut runtime,
+            &mut subscriptions,
+            &dirty,
+            &toast_requested,
+            tabs,
+        );
 
         runtime
             .append_child(root, StatusBar::new(Rc::clone(&appearance)))
@@ -555,8 +623,15 @@ impl StyleShowcase {
         let mut app = Self {
             runtime,
             size,
+            chrome,
             appearance,
             dirty,
+            #[cfg(feature = "agent")]
+            agent_observation_requested,
+            #[cfg(feature = "agent")]
+            agent_report,
+            toast_requested,
+            toast_handle,
             #[cfg(feature = "media")]
             media_import_requested,
             #[cfg(feature = "audio")]
@@ -644,6 +719,9 @@ impl StyleShowcase {
 impl WindowApplication for StyleShowcase {
     fn window_options(&self) -> WindowOptions {
         WindowOptions::new("Drawen — Style Lab / Appearance Studio", self.size)
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_min_size(valid_size(720.0, 520.0))
     }
 
     fn window_event(&mut self, event: WindowEvent) -> WindowAction {
@@ -653,8 +731,28 @@ impl WindowApplication for StyleShowcase {
                 self.layout(size);
                 WindowAction::RequestRedraw
             }
+            WindowEvent::Maximized(maximized) => {
+                self.chrome.set_maximized(maximized);
+                WindowAction::RequestRedraw
+            }
+            WindowEvent::Fullscreen(fullscreen) => {
+                self.chrome.set_fullscreen(fullscreen);
+                WindowAction::RequestRedraw
+            }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                if self.toast_requested.replace(false) {
+                    let _ = self
+                        .toast_handle
+                        .show(Toast::new("Overlay queue updated").with_tone(ToastTone::Success));
+                    self.runtime.invalidate_paint();
+                }
+                #[cfg(feature = "agent")]
+                if self.agent_observation_requested.replace(false) {
+                    let snapshot = drawen::agent::Agent::new().observe(&self.runtime);
+                    *self.agent_report.borrow_mut() = compact_agent_report(&snapshot.to_text());
+                    self.runtime.invalidate_layout();
+                }
                 #[cfg(feature = "media")]
                 if let Some(import) = self.media_import_requested.replace(None) {
                     self.import_media(import);
@@ -666,10 +764,14 @@ impl WindowApplication for StyleShowcase {
                         .set_animations_enabled(animations);
                     self.runtime.invalidate_layout();
                 }
-                if self.runtime.take_redraw_request() {
+                let mut action = WindowAction::None;
+                for command in self.runtime.take_window_commands() {
+                    action = action_for(command);
+                }
+                if action == WindowAction::None && self.runtime.take_redraw_request() {
                     WindowAction::RequestRedraw
                 } else {
-                    WindowAction::None
+                    action
                 }
             }
             // Lifecycle changes only affect whether a frame is worth drawing;
@@ -677,7 +779,6 @@ impl WindowApplication for StyleShowcase {
             WindowEvent::Visible(_) | WindowEvent::Minimized(_) | WindowEvent::Occluded(_) => {
                 WindowAction::None
             }
-            WindowEvent::Maximized(_) | WindowEvent::Fullscreen(_) => WindowAction::RequestRedraw,
             WindowEvent::RedrawRequested => WindowAction::None,
         }
     }
@@ -1106,6 +1207,70 @@ impl Widget for Label {
 
     fn participates_in_hit_test(&self) -> bool {
         false
+    }
+}
+
+/// Live, clipped agent output. It owns only snapshot text, never the UI tree.
+#[cfg(feature = "agent")]
+struct AgentReport {
+    report: Rc<RefCell<String>>,
+    layout: Option<TextLayout>,
+}
+
+#[cfg(feature = "agent")]
+impl AgentReport {
+    fn new(report: Rc<RefCell<String>>) -> Self {
+        Self {
+            report,
+            layout: None,
+        }
+    }
+}
+
+#[cfg(feature = "agent")]
+impl Widget for AgentReport {
+    fn layout(
+        &mut self,
+        context: &mut LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> LayoutResult {
+        let size = available_size(constraints);
+        self.layout = Some(layout_text(
+            context.environment(),
+            &self.report.borrow(),
+            0.82,
+            context.environment().theme().foreground(),
+            Some(size.width()),
+        ));
+        LayoutResult::new(size)
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, environment: &UiEnvironment, bounds: Rect) {
+        context.fill_rounded_rect(
+            bounds,
+            environment.theme().corner_radius(),
+            environment.theme().surface(),
+        );
+        context.stroke_rounded_rect(
+            bounds,
+            environment.theme().corner_radius(),
+            1.0,
+            environment.theme().border(),
+        );
+        if let Some(layout) = &self.layout {
+            context.draw_text(
+                layout.clone(),
+                Point::new(bounds.origin.x + 12.0, bounds.origin.y + 12.0),
+            );
+        }
+    }
+
+    fn participates_in_hit_test(&self) -> bool {
+        false
+    }
+
+    fn clips_children(&self) -> bool {
+        true
     }
 }
 
@@ -1621,7 +1786,7 @@ fn append_overview_page(
     for (value, caption) in [
         ("3", "palettes"),
         ("40+", "components"),
-        ("5", "showcase pages"),
+        ("9", "showcase pages"),
     ] {
         runtime
             .append_child(stats, StatCard::new(value, caption))
@@ -2300,6 +2465,340 @@ fn append_dss_button(
         .expect("DSS button exists");
 }
 
+// ---------------------------------------------------------------------------
+// Page content: Servo browser interop
+// ---------------------------------------------------------------------------
+
+fn append_overlay_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    dirty: &Rc<Cell<bool>>,
+    toast_requested: &Rc<Cell<bool>>,
+    tabs: drawen::WidgetId,
+) -> ToastHandle {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Floating surfaces",
+        "Tooltips, menus, dialogs, palettes, and toast notifications use the runtime overlay layer: they float above siblings without changing the parent layout.",
+    );
+
+    let controls = runtime
+        .append_child(card, HStack::new(10.0))
+        .expect("overlay card exists");
+    let tooltip = runtime
+        .append_child(controls, Tooltip::new("A delayed floating hint"))
+        .expect("overlay controls exist");
+    let tooltip_button = runtime
+        .append_child(tooltip, Button::new())
+        .expect("tooltip exists");
+    append_label(
+        runtime,
+        tooltip_button,
+        "Hover for tooltip",
+        0.94,
+        TextTone::Primary,
+    );
+
+    let popover = runtime
+        .append_child(
+            controls,
+            Popover::new().with_trigger(PopoverTrigger::Primary),
+        )
+        .expect("overlay controls exist");
+    let menu_button = runtime
+        .append_child(popover, Button::new())
+        .expect("popover exists");
+    append_label(runtime, menu_button, "Open menu", 0.94, TextTone::Primary);
+    let menu = Menu::new([
+        MenuEntry::item("Duplicate").with_shortcut("Ctrl+D"),
+        MenuEntry::item("Rename").with_shortcut("F2"),
+        MenuEntry::separator(),
+        MenuEntry::item("Archive").with_shortcut("Del"),
+    ]);
+    subscriptions.push(
+        menu.selected()
+            .subscribe(|index| println!("Popover menu selected row {index}.")),
+    );
+    runtime.append_child(popover, menu).expect("popover exists");
+
+    let toast_button = Button::new();
+    subscriptions.push(toast_button.activated().subscribe({
+        let toast_requested = Rc::clone(toast_requested);
+        move |()| toast_requested.set(true)
+    }));
+    let toast_button = runtime
+        .append_child(controls, toast_button)
+        .expect("overlay controls exist");
+    append_label(runtime, toast_button, "Show toast", 0.94, TextTone::Primary);
+
+    let modal_card = append_card(
+        runtime,
+        stack,
+        "Modal dialog and command palette",
+        "Both surfaces trap sequential focus and close through the overlay layer on Escape or a scrim click.",
+    );
+
+    let dialog_modal = Modal::new();
+    let dialog_handle = dialog_modal.handle();
+    let dialog_modal = runtime
+        .append_child(modal_card, dialog_modal)
+        .expect("modal card exists");
+    let dialog = runtime
+        .append_child(dialog_modal, drawen::Dialog::new())
+        .expect("modal exists");
+    let dialog_content = runtime
+        .append_child(dialog, VStack::new(10.0))
+        .expect("dialog exists");
+    append_label(
+        runtime,
+        dialog_content,
+        "Discard draft?",
+        1.18,
+        TextTone::Primary,
+    );
+    append_label(
+        runtime,
+        dialog_content,
+        "This dialog is centered by the runtime and receives keyboard focus before the underlying page.",
+        0.9,
+        TextTone::Muted,
+    );
+    let close_dialog = Button::new();
+    subscriptions.push(close_dialog.activated().subscribe({
+        let dialog_handle = dialog_handle.clone();
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            dialog_handle.close();
+            dirty.set(true);
+        }
+    }));
+    let close_dialog = runtime
+        .append_child(dialog_content, close_dialog)
+        .expect("dialog exists");
+    append_label(
+        runtime,
+        close_dialog,
+        "Keep editing",
+        0.92,
+        TextTone::Primary,
+    );
+
+    let open_dialog = Button::new();
+    subscriptions.push(open_dialog.activated().subscribe({
+        let dialog_handle = dialog_handle.clone();
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            dialog_handle.open();
+            dirty.set(true);
+        }
+    }));
+    let open_dialog = runtime
+        .append_child(modal_card, open_dialog)
+        .expect("modal card exists");
+    append_label(runtime, open_dialog, "Open dialog", 0.94, TextTone::Primary);
+
+    let palette_modal = Modal::new();
+    let palette_handle = palette_modal.handle();
+    let palette_modal = runtime
+        .append_child(modal_card, palette_modal)
+        .expect("modal card exists");
+    let palette = CommandPalette::new([
+        PaletteCommand::new("Open component gallery").with_hint("Ctrl+O"),
+        PaletteCommand::new("Save appearance preset").with_hint("Ctrl+S"),
+        PaletteCommand::new("Toggle reduced motion"),
+    ]);
+    subscriptions.push(
+        palette
+            .executed()
+            .subscribe(|index| println!("Command palette executed command {index}.")),
+    );
+    runtime
+        .append_child(palette_modal, palette)
+        .expect("palette modal exists");
+    let open_palette = Button::new();
+    subscriptions.push(open_palette.activated().subscribe({
+        let palette_handle = palette_handle.clone();
+        let dirty = Rc::clone(dirty);
+        move |()| {
+            palette_handle.open();
+            dirty.set(true);
+        }
+    }));
+    let open_palette = runtime
+        .append_child(modal_card, open_palette)
+        .expect("modal card exists");
+    append_label(
+        runtime,
+        open_palette,
+        "Open command palette",
+        0.94,
+        TextTone::Primary,
+    );
+
+    let split_card = append_card(
+        runtime,
+        stack,
+        "Split button",
+        "The main segment runs the default action; the arrow opens a floating Menu child.",
+    );
+    let split = SplitButton::new("Save");
+    subscriptions.push(split.activated().subscribe(|()| println!("Saved draft.")));
+    let split = runtime
+        .append_child(split_card, split)
+        .expect("split card exists");
+    let split_menu = Menu::new([
+        MenuEntry::item("Save as…").with_shortcut("Ctrl+Shift+S"),
+        MenuEntry::item("Save all"),
+    ]);
+    subscriptions.push(
+        split_menu
+            .selected()
+            .subscribe(|index| println!("Split button selected action {index}.")),
+    );
+    runtime
+        .append_child(split, split_menu)
+        .expect("split button exists");
+
+    let toast_host = ToastHost::new();
+    let toast_handle = toast_host.handle();
+    runtime
+        .append_child(stack, toast_host)
+        .expect("overlay stack exists");
+    toast_handle
+}
+
+fn append_servo_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Servo browser surface",
+        "Drawen composites a browser frame through a platform shared texture instead of copying pixels through the CPU.",
+    );
+    runtime
+        .append_child(
+            card,
+            Chips::new(&[
+                "Servo producer",
+                "SharedTexture",
+                "wgpu consumer",
+                "BrowserView",
+            ]),
+        )
+        .expect("Servo card exists");
+    append_label(
+        runtime,
+        card,
+        "1. The Servo adapter starts a producer frame on BrowserSurface.  2. Servo renders into the native shared texture and signals it ready.  3. Drawen waits, composites BrowserView in the display list, then releases the texture back to Servo.",
+        0.92,
+        TextTone::Muted,
+    );
+
+    #[cfg(feature = "browser")]
+    append_label(
+        runtime,
+        card,
+        &format!(
+            "This build exposes the platform-selected interop surface as {}. A real browser embedding must supply Servo's native producer context; the showcase intentionally does not fabricate one.",
+            std::any::type_name::<drawen::browser::BrowserSurface>(),
+        ),
+        0.88,
+        TextTone::Muted,
+    );
+    #[cfg(not(feature = "browser"))]
+    append_label(
+        runtime,
+        card,
+        "Browser interop is disabled in this build. Enable Drawen's `browser` feature to expose BrowserSurface, SharedTexture, and BrowserView.",
+        0.88,
+        TextTone::Muted,
+    );
+
+    let contract = append_card(
+        runtime,
+        stack,
+        "Frame ownership contract",
+        "The hand-off is explicit so producer and consumer never write or sample the texture at the same time.",
+    );
+    for text in [
+        "begin_producer_frame() → Servo owns the native producer texture.",
+        "signal_producer_ready() → makes the completed frame available to Drawen.",
+        "begin_consumer_frame() → Drawen waits before submitting BrowserView.",
+        "finish_consumer_frame() → returns ownership after the final GPU submission.",
+    ] {
+        append_label(runtime, contract, text, 0.9, TextTone::Primary);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page content: agent bridge
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "agent")]
+fn append_agent_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    observation_requested: &Rc<Cell<bool>>,
+    report: &Rc<RefCell<String>>,
+    tabs: drawen::WidgetId,
+) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Semantic UI inspector",
+        "drawen-agent reads the same accessibility tree used by assistive technology. It returns owned data, so an LLM can inspect and drive a UI without screenshots or GPU access.",
+    );
+    let button = Button::new();
+    subscriptions.push(button.activated().subscribe({
+        let observation_requested = Rc::clone(observation_requested);
+        move |()| observation_requested.set(true)
+    }));
+    let button = runtime
+        .append_child(card, button)
+        .expect("agent card exists");
+    append_label(
+        runtime,
+        button,
+        "Capture semantic tree",
+        0.96,
+        TextTone::Primary,
+    );
+    let frame = runtime
+        .append_child(card, FixedHeight::new(260.0))
+        .expect("agent card exists");
+    runtime
+        .append_child(frame, AgentReport::new(Rc::clone(report)))
+        .expect("agent report frame exists");
+    append_label(
+        runtime,
+        card,
+        "The report is intentionally compact. Agent::execute can then target a current widget by id, name, or role and receives a fresh snapshot after every action.",
+        0.88,
+        TextTone::Muted,
+    );
+}
+
+#[cfg(not(feature = "agent"))]
+fn append_agent_page(runtime: &mut UiRuntime, _: &mut Vec<Subscription>, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Semantic UI inspector",
+        "The agent bridge is opt-in, keeping ordinary applications free of serde and transport dependencies.",
+    );
+    append_label(
+        runtime,
+        card,
+        "Run `cargo run -p drawen --example style_showcase --features agent` to activate the live semantic-tree inspector. Use `agent-serve` when an external process should use the loopback JSON-lines bridge.",
+        0.92,
+        TextTone::Muted,
+    );
+}
+
 fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
     let stack = append_scroll_page(runtime, tabs);
 
@@ -2817,6 +3316,22 @@ fn color_component(value: f32) -> u8 {
     {
         (value.clamp(0.0, 1.0) * 255.0).round() as u8
     }
+}
+
+#[cfg(feature = "agent")]
+fn compact_agent_report(snapshot: &str) -> String {
+    const MAX_LINES: usize = 14;
+
+    let mut lines = snapshot.lines();
+    let mut report = lines
+        .by_ref()
+        .take(MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.next().is_some() {
+        report.push_str("\n… capture a subtree by id for the remaining nodes");
+    }
+    report
 }
 
 fn available_size(constraints: Constraints) -> Size {
