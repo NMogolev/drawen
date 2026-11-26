@@ -149,7 +149,13 @@ the requested position.
 
 - `PlayerTheme` sets every color, radius, padding, spacing, button size, track
   height, and font size the players paint. It falls back to the active theme for
-  anything the application does not override.
+  anything the application does not override. The video overlay is the one
+  exception: its scrim is dark, so overlay text and icons default to white under
+  both light and dark application themes; an explicit `foreground` (theme field
+  or DSS) still wins. The center play badge defaults to a translucent dark disc,
+  the seek bar rests thin and grows a thumb under the pointer, and the volume
+  slider collapses on narrow surfaces instead of overlapping the transport
+  buttons.
 - `PlayerBehavior` sets looping, initial volume and mute state, playback-rate
   choices, seek and volume steps, keyboard and wheel handling, and the control
   auto-hide delay. A `None` delay keeps controls visible; video defaults to

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use drawen_core::{Color, Point, Rect, Size};
+use drawen_core::{Affine, Color, Point, Rect, Size};
 use drawen_render::PaintContext;
 use drawen_ui::{DssStyle, Theme};
 
@@ -55,6 +55,11 @@ impl PlayerTimeDisplay {
 /// value resolved for its node, and then the runtime theme. That keeps players
 /// consistent with an application stylesheet while still allowing a fully
 /// custom palette.
+///
+/// The video overlay is the one exception: it paints on a dark scrim, so its
+/// text and icons default to white regardless of the application theme. An
+/// explicit [`Self::foreground`] (or a DSS `foreground` on the `video` node)
+/// still overrides that default.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerTheme {
     /// Surface behind the picture or artwork. Resolves from the theme.
@@ -62,6 +67,7 @@ pub struct PlayerTheme {
     /// Panel or artwork background. Resolves from the theme surface.
     pub surface: Option<Color>,
     /// Primary text and icon color. Resolves from the DSS or theme foreground.
+    /// The video overlay defaults to white instead, because its scrim is dark.
     pub foreground: Option<Color>,
     /// Secondary text color. Resolves from the theme muted foreground.
     pub muted_foreground: Option<Color>,
@@ -71,7 +77,9 @@ pub struct PlayerTheme {
     pub track: Option<Color>,
     /// Background of the translucent control scrim.
     pub overlay: Option<Color>,
-    /// Color of the center play badge and hover thumb.
+    /// Explicit color of the center play badge and the seek thumb. The center
+    /// badge defaults to a translucent dark disc; the thumb defaults to the
+    /// accent.
     pub badge: Option<Color>,
     /// Color used for fatal playback errors. Resolves from the theme danger.
     pub error: Option<Color>,
@@ -110,15 +118,15 @@ impl Default for PlayerTheme {
             badge: None,
             error: None,
             corner_radius: 8.0,
-            control_height: 44.0,
-            padding: 10.0,
-            spacing: 8.0,
-            button_size: 30.0,
-            track_height: 4.0,
+            control_height: 50.0,
+            padding: 12.0,
+            spacing: 4.0,
+            button_size: 34.0,
+            track_height: 3.0,
             font_size: 13.0,
-            title_size: 15.0,
+            title_size: 16.0,
             subtitle_size: 12.0,
-            time_size: 12.0,
+            time_size: 13.0,
         }
     }
 }
@@ -277,6 +285,20 @@ impl PlayerTheme {
         self.foreground
             .or(style.foreground)
             .unwrap_or_else(|| theme.foreground())
+    }
+
+    /// Foreground for controls painted on the dark video scrim.
+    ///
+    /// Defaults to white so the overlay stays legible under both light and
+    /// dark application themes. Explicit overrides still win.
+    pub(crate) fn overlay_foreground(&self, style: &DssStyle) -> Color {
+        self.foreground.or(style.foreground).unwrap_or(Color::WHITE)
+    }
+
+    /// Background of the center play badge: a translucent dark disc unless an
+    /// explicit badge color is configured.
+    pub(crate) fn center_badge(&self) -> Color {
+        self.badge.unwrap_or_else(|| Color::rgba8(8, 8, 10, 150))
     }
 
     pub(crate) fn muted_foreground(&self, theme: &dyn Theme) -> Color {
@@ -968,6 +990,10 @@ pub(crate) fn cycle_rate(current: f64, rates: &[f64]) -> f64 {
 }
 
 /// Paints a vertical color gradient with a bounded number of strips.
+///
+/// The fade follows a smoothstep curve so the transparent end dissolves
+/// gently. Strips stay exactly adjacent: overlapping translucent strips would
+/// double-blend and leave dark seams at every boundary.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn paint_vertical_gradient(
     context: &mut PaintContext<'_>,
@@ -975,16 +1001,23 @@ pub(crate) fn paint_vertical_gradient(
     top: Color,
     bottom: Color,
 ) {
-    const STRIPS: u32 = 16;
+    const STRIPS: u32 = 48;
     if rect.size.height() <= 0.0 || rect.size.width() <= 0.0 {
         return;
     }
     let strip_height = rect.size.height() / STRIPS as f32;
     for index in 0..STRIPS {
-        let amount = index as f32 / (STRIPS - 1) as f32;
+        let fraction = index as f32 / (STRIPS - 1) as f32;
+        let amount = fraction * fraction * (3.0 - 2.0 * fraction);
+        let y = rect.origin.y + index as f32 * strip_height;
+        let height = if index + 1 == STRIPS {
+            rect.bottom() - y
+        } else {
+            strip_height
+        };
         let strip = Rect::new(
-            Point::new(rect.origin.x, rect.origin.y + index as f32 * strip_height),
-            Size::new(rect.size.width(), strip_height).expect("gradient strip size is finite"),
+            Point::new(rect.origin.x, y),
+            Size::new(rect.size.width(), height).expect("gradient strip size is finite"),
         );
         context.fill_rect(strip, top.mix(bottom, amount));
     }
@@ -1001,7 +1034,7 @@ pub(crate) fn paint_play_pause(
         button.origin.x + button.size.width() / 2.0,
         button.origin.y + button.size.height() / 2.0,
     );
-    let height = button.size.height() * 0.52;
+    let height = button.size.height() * 0.55;
     let width = height * 0.82;
     if playing {
         let bar = (width * 0.28).max(2.0);
@@ -1019,10 +1052,15 @@ pub(crate) fn paint_play_pause(
             );
         }
     } else {
+        // Nudge the triangle right so its visual mass, not its bounding box,
+        // sits on the button center.
         paint_triangle(
             context,
             Rect::new(
-                Point::new(center.x - width / 2.0, center.y - height / 2.0),
+                Point::new(
+                    center.x - width / 2.0 + width * 0.08,
+                    center.y - height / 2.0,
+                ),
                 Size::new(width, height).expect("play triangle is finite"),
             ),
             1.0,
@@ -1032,15 +1070,23 @@ pub(crate) fn paint_play_pause(
 }
 
 /// Paints a horizontal triangle in `bounds` using shaded strips.
-#[allow(clippy::cast_precision_loss)]
+///
+/// The strip count follows the glyph height (about one strip per pixel), so
+/// edges stay smooth at every button size, and strips overlap slightly to
+/// hide antialiasing seams.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn paint_triangle(context: &mut PaintContext<'_>, bounds: Rect, direction: f32, color: Color) {
-    const ROWS: usize = 12;
     if bounds.is_empty() {
         return;
     }
-    let row_height = bounds.size.height() / ROWS as f32;
-    for row in 0..ROWS {
-        let fraction = (row as f32 + 0.5) / ROWS as f32;
+    let rows = (bounds.size.height().ceil() as usize).clamp(12, 48);
+    let row_height = bounds.size.height() / rows as f32;
+    for row in 0..rows {
+        let fraction = (row as f32 + 0.5) / rows as f32;
         let row_width = bounds.size.width() * (1.0 - (2.0 * fraction - 1.0).abs());
         if row_width <= 0.0 {
             continue;
@@ -1050,10 +1096,12 @@ fn paint_triangle(context: &mut PaintContext<'_>, bounds: Rect, direction: f32, 
         } else {
             bounds.right() - row_width
         };
+        let y = bounds.origin.y + row as f32 * row_height;
+        let height = (row_height + 0.4).min(bounds.bottom() - y);
         context.fill_rect(
             Rect::new(
-                Point::new(x, bounds.origin.y + row as f32 * row_height),
-                Size::new(row_width, row_height).expect("triangle row is finite"),
+                Point::new(x, y),
+                Size::new(row_width, height).expect("triangle row is finite"),
             ),
             color,
         );
@@ -1079,7 +1127,7 @@ pub(crate) fn paint_skip(
         Size::new(width, height).expect("skip triangle is finite"),
     );
     paint_triangle(context, triangle, direction, color);
-    let bar = (height * 0.12).max(1.5);
+    let bar = (height * 0.14).max(1.8);
     let x = center.x + direction * (width / 2.0 + bar);
     context.fill_rounded_rect(
         Rect::new(
@@ -1102,7 +1150,9 @@ pub(crate) fn paint_track_skip(
 }
 
 /// Paints a speaker icon, with an X when muted.
-#[allow(clippy::cast_precision_loss)]
+///
+/// The cone flares away from the driver body, loud levels add one or two
+/// arc-shaped waves, and mute draws a small cross beside the speaker.
 pub(crate) fn paint_volume(
     context: &mut PaintContext<'_>,
     button: Rect,
@@ -1114,55 +1164,76 @@ pub(crate) fn paint_volume(
         button.origin.x + button.size.width() / 2.0,
         button.origin.y + button.size.height() / 2.0,
     );
-    let height = button.size.height() * 0.42;
+    let height = button.size.height() * 0.46;
     let half = height / 2.0;
-    let left = center.x - button.size.width() * 0.24;
+    let body_width = height * 0.30;
+    let cone_width = height * 0.46;
+    let left = center.x - button.size.width() * 0.30;
     context.fill_rounded_rect(
         Rect::new(
             Point::new(left, center.y - half * 0.45),
-            Size::new(half * 0.58, half * 0.9).expect("speaker body is finite"),
+            Size::new(body_width, half * 0.9).expect("speaker body is finite"),
         ),
         1.0,
         color,
     );
+    let cone_left = left + body_width - 0.75;
     paint_triangle(
         context,
         Rect::new(
-            Point::new(left + half * 0.48, center.y - half),
-            Size::new(half * 0.8, height).expect("speaker cone is finite"),
+            Point::new(cone_left, center.y - half),
+            Size::new(cone_width, height).expect("speaker cone is finite"),
         ),
-        1.0,
+        -1.0,
         color,
     );
+    let base_x = cone_left + cone_width;
     if muted {
-        let arm = height * 0.30;
-        let x = center.x + button.size.width() * 0.16;
-        let thickness = 1.6;
-        for step in 0..6 {
-            let t = step as f32 / 5.0;
-            let dx = -arm + t * arm * 2.0;
-            let dy = -arm + t * arm * 2.0;
-            for (px, py) in [(dx, dy), (dx, -dy)] {
+        let arm = height * 0.26;
+        let thickness = (height * 0.09).max(1.6);
+        let cross = Point::new(base_x + height * 0.30, center.y);
+        for angle in [
+            std::f32::consts::FRAC_PI_4,
+            -std::f32::consts::FRAC_PI_4,
+        ] {
+            let transform = Affine::translate(cross.x, cross.y).then(Affine::rotate(angle));
+            context.with_transform(transform, |context| {
                 context.fill_rounded_rect(
                     Rect::new(
-                        Point::new(x + px - thickness / 2.0, center.y + py - thickness / 2.0),
-                        Size::new(thickness, thickness).expect("mute cross is finite"),
+                        Point::new(-arm, -thickness / 2.0),
+                        Size::new(arm * 2.0, thickness).expect("mute cross is finite"),
                     ),
                     thickness / 2.0,
                     color,
                 );
-            }
+            });
         }
         return;
     }
-    if level > 0.0 {
-        let radius = height * (0.35 + 0.35 * level);
-        let rect = Rect::new(
-            Point::new(center.x + button.size.width() * 0.05, center.y - radius),
-            Size::new(radius * 2.0, radius * 2.0).expect("volume wave is finite"),
-        );
-        context.stroke_rounded_rect(rect, radius, 1.5, color);
+    let wave_center = Point::new(base_x - cone_width * 0.15, center.y);
+    if level > 0.02 {
+        paint_volume_wave(context, wave_center, height * 0.42, color);
     }
+    if level > 0.5 {
+        paint_volume_wave(context, wave_center, height * 0.68, color);
+    }
+}
+
+/// Paints one `)`-shaped volume wave: a ring clipped to its right side.
+fn paint_volume_wave(context: &mut PaintContext<'_>, center: Point, radius: f32, color: Color) {
+    let thickness = 1.6;
+    let ring = Rect::new(
+        Point::new(center.x - radius, center.y - radius),
+        Size::new(radius * 2.0, radius * 2.0).expect("volume wave is finite"),
+    );
+    let clip = Rect::new(
+        Point::new(center.x + radius * 0.30, center.y - radius - thickness),
+        Size::new(radius + thickness, radius * 2.0 + thickness * 2.0)
+            .expect("volume wave clip is finite"),
+    );
+    context.with_clip(clip, |context| {
+        context.stroke_rounded_rect(ring, radius, thickness, color);
+    });
 }
 
 /// Paints four fullscreen corner brackets in `button`.
@@ -1171,9 +1242,9 @@ pub(crate) fn paint_fullscreen(context: &mut PaintContext<'_>, button: Rect, col
         button.origin.x + button.size.width() / 2.0,
         button.origin.y + button.size.height() / 2.0,
     );
-    let half = button.size.height() * 0.22;
-    let arm = half * 0.8;
-    let thickness = 1.6;
+    let half = button.size.height() * 0.23;
+    let arm = half * 0.85;
+    let thickness = 2.0;
     for (sx, sy) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
         let corner = Point::new(center.x + sx * half, center.y + sy * half);
         context.fill_rounded_rect(
@@ -1212,27 +1283,38 @@ pub(crate) fn paint_repeat(
         button.origin.x + button.size.width() / 2.0,
         button.origin.y + button.size.height() / 2.0,
     );
-    let radius = button.size.height() * 0.19;
+    let radius = button.size.height() * 0.21;
     let alpha = if active { 1.0 } else { 0.7 };
+    let color = color.with_alpha(alpha);
     context.stroke_rounded_rect(
         Rect::new(
             Point::new(center.x - radius, center.y - radius),
             Size::new(radius * 2.0, radius * 2.0).expect("repeat ring is finite"),
         ),
         radius,
-        if active { 2.0 } else { 1.4 },
-        color.with_alpha(alpha),
-    );
-    let arrow = radius * 0.5;
-    paint_triangle(
-        context,
-        Rect::new(
-            Point::new(center.x + radius * 0.1, center.y - radius - arrow),
-            Size::new(arrow * 1.4, arrow * 2.0).expect("repeat arrow is finite"),
-        ),
-        1.0,
+        if active { 2.0 } else { 1.6 },
         color,
     );
+    // Arrowhead riding the top-right of the ring, pointing clockwise.
+    let angle = -std::f32::consts::FRAC_PI_4;
+    let tip = Point::new(
+        center.x + angle.cos() * radius,
+        center.y + angle.sin() * radius,
+    );
+    let arrow = radius * 0.55;
+    let transform =
+        Affine::translate(tip.x, tip.y).then(Affine::rotate(std::f32::consts::FRAC_PI_4));
+    context.with_transform(transform, |context| {
+        paint_triangle(
+            context,
+            Rect::new(
+                Point::new(-arrow * 0.65, -arrow * 0.8),
+                Size::new(arrow * 1.3, arrow * 1.6).expect("repeat arrow is finite"),
+            ),
+            1.0,
+            color,
+        );
+    });
 }
 
 /// Paints a shuffle icon: two crossing arrows.

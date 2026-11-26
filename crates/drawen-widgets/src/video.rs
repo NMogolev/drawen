@@ -24,10 +24,12 @@ use crate::video_ffmpeg::{FfmpegConfig, FfmpegSession, VideoError};
 
 const DEFAULT_WIDTH: f32 = 480.0;
 const DEFAULT_HEIGHT: f32 = 270.0;
-const CENTER_BADGE: f32 = 58.0;
+const CENTER_BADGE: f32 = 64.0;
 const VOLUME_SLIDER_WIDTH: f32 = 76.0;
-const TOP_SCRIM: f32 = 58.0;
+const TOP_SCRIM: f32 = 64.0;
 const BUFFERING_RADIUS: f32 = 18.0;
+/// Vertical reach of the seek and volume hit areas beyond the visible track.
+const TRACK_HIT_PAD: f32 = 8.0;
 
 /// The kind of pointer gesture currently owned by the player.
 #[derive(Clone, Copy, Debug)]
@@ -664,7 +666,7 @@ impl Video {
             rect,
             self.hover == Some(target),
             foreground,
-            self.theme.corner_radius,
+            rect.size.height() / 2.0,
         );
     }
 
@@ -851,8 +853,14 @@ impl Widget for Video {
             return;
         }
 
-        let foreground = self.theme.foreground(theme, style);
-        let muted = self.theme.muted_foreground(theme);
+        // Overlay content sits on a dark scrim, so it defaults to white even
+        // under a light application theme. The placeholder stays on the plain
+        // surface and keeps the theme colors.
+        let foreground = self.theme.overlay_foreground(style);
+        let muted = self
+            .theme
+            .muted_foreground
+            .unwrap_or(foreground.with_alpha(0.72));
         let accent = self.theme.accent(theme, style);
         let overlay = self.theme.overlay();
         let show_controls = self.controls && self.controls_shown && bounds.size.height() >= 72.0;
@@ -871,12 +879,18 @@ impl Widget for Video {
                 });
             }
         } else {
-            self.paint_placeholder(context, environment, bounds, style, muted);
+            self.paint_placeholder(
+                context,
+                environment,
+                bounds,
+                style,
+                self.theme.muted_foreground(theme),
+            );
         }
 
         if show_controls {
             let geometry = video_geometry(bounds, &self.theme, self);
-            let scrim_top = (geometry.bar.origin.y - 36.0).max(bounds.origin.y);
+            let scrim_top = (geometry.bar.origin.y - 48.0).max(bounds.origin.y);
             paint_vertical_gradient(
                 context,
                 Rect::new(
@@ -911,17 +925,15 @@ impl Widget for Video {
                 && !self.is_playing()
                 && !geometry.center_play.is_empty()
             {
-                context.fill_rounded_rect(
-                    geometry.center_play,
-                    geometry.center_play.size.height() / 2.0,
-                    self.theme.badge(accent).with_alpha(0.92),
-                );
-                paint_play_pause(
-                    context,
-                    geometry.center_play,
-                    false,
-                    self.theme.foreground(theme, style),
-                );
+                let badge_rect = geometry.center_play;
+                let radius = badge_rect.size.height() / 2.0;
+                let mut badge = self.theme.center_badge();
+                if self.hover == Some(HoverTarget::CenterPlay) {
+                    badge = badge.with_alpha((badge.alpha + 0.12).min(1.0));
+                }
+                context.draw_shadow(badge_rect, radius, 10.0, Color::rgba8(0, 0, 0, 90));
+                context.fill_rounded_rect(badge_rect, radius, badge);
+                paint_play_pause(context, badge_rect, false, foreground);
             }
         }
 
@@ -930,19 +942,16 @@ impl Widget for Video {
                 bounds.origin.x + bounds.size.width() / 2.0,
                 bounds.origin.y + bounds.size.height() / 2.0,
             );
+            let radius = BUFFERING_RADIUS * 1.5;
             context.fill_rounded_rect(
                 Rect::new(
-                    Point::new(
-                        center.x - BUFFERING_RADIUS * 2.4,
-                        center.y - BUFFERING_RADIUS,
-                    ),
-                    Size::new(BUFFERING_RADIUS * 4.8, BUFFERING_RADIUS * 2.0)
-                        .expect("buffering badge is finite"),
+                    Point::new(center.x - radius, center.y - radius),
+                    Size::new(radius * 2.0, radius * 2.0).expect("buffering badge is finite"),
                 ),
-                self.theme.corner_radius,
+                radius,
                 overlay,
             );
-            paint_buffering(context, center, BUFFERING_RADIUS, foreground);
+            paint_buffering(context, center, BUFFERING_RADIUS * 0.72, foreground);
         }
 
         if let Some(error) = self.core.error() {
@@ -1040,35 +1049,27 @@ impl Widget for Video {
                 if self.controls && self.controls_shown {
                     let geometry =
                         video_geometry(Rect::new(Point::ZERO, self.viewport), &self.theme, self);
-                    if geometry.track.contains(pointer.position) {
+                    // Buttons win over the expanded track hit bands, which
+                    // reach into the top of the button row.
+                    if let Some(target) = self.hit_target(pointer.position) {
+                        self.activate_target(target, context);
+                        return EventStatus::Handled;
+                    }
+                    if geometry.track_hit.contains(pointer.position) {
                         self.drag = Some(Drag::Seek(pointer.pointer_id));
                         context.capture_pointer(pointer.pointer_id);
                         self.seek_from_pointer(pointer.position.x, context);
                         return EventStatus::Handled;
                     }
-                    if geometry.volume_slider.contains(pointer.position) {
+                    if geometry.volume_hit.contains(pointer.position) {
                         self.drag = Some(Drag::Volume(pointer.pointer_id));
                         context.capture_pointer(pointer.pointer_id);
                         self.volume_from_pointer(pointer.position.x, context);
                         return EventStatus::Handled;
                     }
-                    if geometry.bar.contains(pointer.position)
-                        && !geometry.play.contains(pointer.position)
-                        && !geometry.back.contains(pointer.position)
-                        && !geometry.forward.contains(pointer.position)
-                        && !geometry.mute.contains(pointer.position)
-                        && !geometry.rate.contains(pointer.position)
-                        && !geometry.loop_button.contains(pointer.position)
-                        && !geometry.fullscreen.contains(pointer.position)
-                    {
+                    if geometry.bar.contains(pointer.position) {
                         return EventStatus::Handled;
                     }
-                }
-                if let Some(target) = self.hit_target(pointer.position)
-                    && self.controls_shown
-                {
-                    self.activate_target(target, context);
-                    return EventStatus::Handled;
                 }
                 if self.controls_shown {
                     self.controls_shown = false;
@@ -1256,9 +1257,20 @@ impl Video {
             return;
         }
         let track = geometry.track;
+        let active = matches!(self.drag, Some(Drag::Seek(_))) || self.hover_over_track(track);
+        // The bar rests thin and grows under the pointer, YouTube-style.
+        let height = if active {
+            (track.size.height() + 2.0).min(6.0)
+        } else {
+            track.size.height()
+        };
+        let paint_track = Rect::new(
+            Point::new(track.origin.x, track.origin.y + (track.size.height() - height) / 2.0),
+            Size::new(track.size.width(), height).expect("painted seek track is finite"),
+        );
         context.fill_rounded_rect(
-            track,
-            track.size.height() / 2.0,
+            paint_track,
+            height / 2.0,
             self.theme.track(foreground),
         );
         let ratio = if self.duration() > Duration::ZERO {
@@ -1270,34 +1282,30 @@ impl Video {
         if filled_width > 0.0 {
             context.fill_rounded_rect(
                 Rect::new(
-                    track.origin,
-                    Size::new(filled_width, track.size.height())
-                        .expect("filled progress width is finite"),
+                    paint_track.origin,
+                    Size::new(filled_width, height).expect("filled progress width is finite"),
                 ),
-                track.size.height() / 2.0,
+                height / 2.0,
                 accent,
             );
         }
-        let thumb_size = track.size.height() * 2.4;
-        context.fill_rounded_rect(
-            Rect::new(
-                Point::new(
-                    track.origin.x + filled_width - thumb_size / 2.0,
-                    track.origin.y + (track.size.height() - thumb_size) / 2.0,
+        if active {
+            let thumb_size = height * 2.6;
+            context.fill_rounded_rect(
+                Rect::new(
+                    Point::new(
+                        track.origin.x + filled_width - thumb_size / 2.0,
+                        paint_track.origin.y + (height - thumb_size) / 2.0,
+                    ),
+                    Size::new(thumb_size, thumb_size).expect("progress thumb is finite"),
                 ),
-                Size::new(thumb_size, thumb_size).expect("progress thumb is finite"),
-            ),
-            thumb_size / 2.0,
-            self.theme.badge(accent),
-        );
+                thumb_size / 2.0,
+                self.theme.badge(accent),
+            );
+        }
 
         if self.controls_config.hover_preview
-            && self.hover_position.is_some_and(|point| {
-                point.x >= track.origin.x - 8.0
-                    && point.x <= track.right() + 8.0
-                    && point.y >= track.origin.y - 12.0
-                    && point.y <= track.bottom() + 12.0
-            })
+            && self.hover_over_track(track)
             && let Some(position) = self.hover_position
             && !self.duration().is_zero()
         {
@@ -1310,8 +1318,8 @@ impl Video {
                 &TextStyle::new_with_font(font, foreground),
                 None,
             );
-            let width = layout.size().width() + 12.0;
-            let height = layout.size().height() + 6.0;
+            let width = layout.size().width() + 16.0;
+            let height = layout.size().height() + 8.0;
             let x = (position.x - width / 2.0)
                 .clamp(track.origin.x, (track.right() - width).max(track.origin.x));
             let top = (track.origin.y - height - 10.0).max(0.0);
@@ -1320,11 +1328,21 @@ impl Video {
                     Point::new(x, top),
                     Size::new(width, height).expect("preview label is finite"),
                 ),
-                self.theme.corner_radius,
+                height / 2.0,
                 self.theme.overlay(),
             );
-            context.draw_text(layout, Point::new(x + 6.0, top + 3.0));
+            context.draw_text(layout, Point::new(x + 8.0, top + 4.0));
         }
+    }
+
+    /// Returns whether the pointer rests in the seek bar's hover band.
+    fn hover_over_track(&self, track: Rect) -> bool {
+        self.hover_position.is_some_and(|point| {
+            point.x >= track.origin.x - 8.0
+                && point.x <= track.right() + 8.0
+                && point.y >= track.origin.y - 12.0
+                && point.y <= track.bottom() + 12.0
+        })
     }
 
     fn paint_controls(
@@ -1367,24 +1385,8 @@ impl Video {
             self.paint_icon_button(context, geometry.mute, HoverTarget::Mute, foreground);
             let level = if self.is_muted() { 0.0 } else { self.volume() };
             paint_volume(context, geometry.mute, self.is_muted(), level, foreground);
-            if self.controls_config.volume {
-                context.fill_rounded_rect(
-                    geometry.volume_slider,
-                    geometry.volume_slider.size.height() / 2.0,
-                    self.theme.track(foreground),
-                );
-                let width = geometry.volume_slider.size.width() * self.volume();
-                if width > 0.0 {
-                    context.fill_rounded_rect(
-                        Rect::new(
-                            geometry.volume_slider.origin,
-                            Size::new(width, geometry.volume_slider.size.height())
-                                .expect("volume fill is finite"),
-                        ),
-                        geometry.volume_slider.size.height() / 2.0,
-                        accent,
-                    );
-                }
+            if self.controls_config.volume && !geometry.volume_slider.is_empty() {
+                self.paint_volume_slider(context, geometry, foreground);
             }
         }
         if self.controls_config.rate {
@@ -1426,6 +1428,52 @@ impl Video {
                 foreground,
             );
             paint_fullscreen(context, geometry.fullscreen, foreground);
+        }
+    }
+
+    fn paint_volume_slider(
+        &self,
+        context: &mut PaintContext<'_>,
+        geometry: &VideoGeometry,
+        foreground: Color,
+    ) {
+        let slider = geometry.volume_slider;
+        context.fill_rounded_rect(
+            slider,
+            slider.size.height() / 2.0,
+            self.theme.track(foreground),
+        );
+        let width = slider.size.width() * self.volume();
+        if width > 0.0 {
+            context.fill_rounded_rect(
+                Rect::new(
+                    slider.origin,
+                    Size::new(width, slider.size.height()).expect("volume fill is finite"),
+                ),
+                slider.size.height() / 2.0,
+                foreground,
+            );
+        }
+        let active = matches!(self.drag, Some(Drag::Volume(_)))
+            || self.hover_position.is_some_and(|point| {
+                point.x >= slider.origin.x - 6.0
+                    && point.x <= slider.right() + 6.0
+                    && point.y >= slider.origin.y - 10.0
+                    && point.y <= slider.bottom() + 10.0
+            });
+        if active {
+            let thumb_size = slider.size.height() * 3.2;
+            context.fill_rounded_rect(
+                Rect::new(
+                    Point::new(
+                        slider.origin.x + width - thumb_size / 2.0,
+                        slider.origin.y + (slider.size.height() - thumb_size) / 2.0,
+                    ),
+                    Size::new(thumb_size, thumb_size).expect("volume thumb is finite"),
+                ),
+                thumb_size / 2.0,
+                foreground,
+            );
         }
     }
 
@@ -1474,12 +1522,16 @@ struct VideoGeometry {
     row_top: f32,
     row_height: f32,
     track: Rect,
+    /// Seek track expanded vertically so the thin bar is easy to grab.
+    track_hit: Rect,
     play: Rect,
     back: Rect,
     forward: Rect,
     time_origin: f32,
     mute: Rect,
     volume_slider: Rect,
+    /// Volume slider expanded vertically, matching the seek hit area.
+    volume_hit: Rect,
     rate: Rect,
     loop_button: Rect,
     fullscreen: Rect,
@@ -1501,15 +1553,20 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
         Size::new(bounds.size.width(), control_height).expect("video control bar is finite"),
     );
     let track = Rect::new(
-        Point::new(bar.origin.x + padding, bar.origin.y + padding * 0.45),
+        Point::new(bar.origin.x + padding, bar.origin.y + padding * 0.5),
         Size::new(
             (bar.size.width() - padding * 2.0).max(0.0),
             theme.track_height,
         )
         .expect("video seek track is finite"),
     );
-    let row_top = bar.origin.y + padding * 0.45 + theme.track_height + 4.0;
-    let row_height = (bar.bottom() - row_top - padding * 0.2).max(button);
+    let track_hit = Rect::new(
+        Point::new(track.origin.x, track.origin.y - TRACK_HIT_PAD),
+        Size::new(track.size.width(), track.size.height() + TRACK_HIT_PAD * 2.0)
+            .expect("video seek hit area is finite"),
+    );
+    let row_top = track.bottom() + 2.0;
+    let row_height = (bar.bottom() - row_top - 4.0).max(button);
     let button_y = row_top + (row_height - button) / 2.0;
 
     let empty = Rect::new(Point::ZERO, Size::ZERO);
@@ -1580,19 +1637,6 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
     } else {
         empty
     };
-    let volume_slider = if controls.volume {
-        let width = VOLUME_SLIDER_WIDTH.min((right - padding).max(0.0));
-        right -= width + spacing;
-        Rect::new(
-            Point::new(
-                right,
-                bar.origin.y + (bar.size.height() - theme.track_height) / 2.0,
-            ),
-            Size::new(width, theme.track_height).expect("volume slider is finite"),
-        )
-    } else {
-        empty
-    };
     let mute = if controls.mute || controls.volume {
         right -= button;
         let rect = Rect::new(
@@ -1604,6 +1648,41 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
     } else {
         empty
     };
+    // The slider fills whatever gap remains between the time label and the
+    // right cluster. On narrow surfaces it collapses instead of overlapping
+    // the transport buttons; the mute icon keeps reporting the volume state.
+    let time_reserve = if controls.time {
+        let label = video
+            .time_display
+            .format(video.position(), video.duration());
+        #[allow(clippy::cast_precision_loss)]
+        let width = label.chars().count() as f32 * theme.time_size * 0.55;
+        width + spacing
+    } else {
+        0.0
+    };
+    let volume_slider = if controls.volume && !mute.is_empty() {
+        let width = VOLUME_SLIDER_WIDTH.min((right - spacing - (x + time_reserve)).max(0.0));
+        if width >= 24.0 {
+            right -= width + spacing;
+            Rect::new(
+                Point::new(right, button_y + (button - theme.track_height) / 2.0),
+                Size::new(width, theme.track_height).expect("volume slider is finite"),
+            )
+        } else {
+            empty
+        }
+    } else {
+        empty
+    };
+    let volume_hit = Rect::new(
+        Point::new(volume_slider.origin.x, volume_slider.origin.y - TRACK_HIT_PAD),
+        Size::new(
+            volume_slider.size.width(),
+            volume_slider.size.height() + TRACK_HIT_PAD * 2.0,
+        )
+        .expect("video volume hit area is finite"),
+    );
     let _ = right;
 
     let badge = CENTER_BADGE
@@ -1622,12 +1701,14 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
         row_top,
         row_height,
         track,
+        track_hit,
         play,
         back,
         forward,
         time_origin,
         mute,
         volume_slider,
+        volume_hit,
         rate,
         loop_button,
         fullscreen,
@@ -1798,6 +1879,79 @@ mod tests {
         assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
         let seconds = observed.borrow().as_secs_f32();
         assert!((seconds - 50.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn seek_hit_area_reaches_beyond_the_thin_track() {
+        let video = Video::new().with_duration(Duration::from_secs(100));
+        let observed = Rc::new(RefCell::new(Duration::ZERO));
+        let _subscription = video.seek_requested().subscribe({
+            let observed = Rc::clone(&observed);
+            move |position| *observed.borrow_mut() = *position
+        });
+        let mut runtime = UiRuntime::new(video);
+        runtime.layout(viewport()).expect("video layout succeeds");
+
+        let bounds = Rect::new(Point::ZERO, Size::new(320.0, 180.0).expect("valid size"));
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
+        let down = InputEvent::PointerDown(pointer(
+            Point::new(
+                geometry.track.origin.x + geometry.track.size.width() / 2.0,
+                geometry.track.origin.y - 6.0,
+            ),
+            Some(PointerButton::Primary),
+        ));
+        assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
+        let seconds = observed.borrow().as_secs_f32();
+        assert!((seconds - 50.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn buttons_win_over_the_expanded_seek_hit_area() {
+        let video = Video::new().with_duration(Duration::from_secs(100));
+        let played = Rc::new(Cell::new(false));
+        let _play_subscription = video.play_toggled().subscribe({
+            let played = Rc::clone(&played);
+            move |playing| played.set(*playing)
+        });
+        let seeked = Rc::new(Cell::new(false));
+        let _seek_subscription = video.seek_requested().subscribe({
+            let seeked = Rc::clone(&seeked);
+            move |_| seeked.set(true)
+        });
+        let mut runtime = UiRuntime::new(video);
+        runtime.layout(viewport()).expect("video layout succeeds");
+
+        let bounds = Rect::new(Point::ZERO, Size::new(320.0, 180.0).expect("valid size"));
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
+        // The top of the play button overlaps the expanded seek hit band.
+        let point = Point::new(geometry.play.origin.x + 5.0, geometry.play.origin.y + 1.0);
+        assert!(geometry.track_hit.contains(point));
+        assert!(geometry.play.contains(point));
+        let down = InputEvent::PointerDown(pointer(point, Some(PointerButton::Primary)));
+        assert_eq!(runtime.dispatch_event(&down), EventStatus::Handled);
+        assert!(played.get());
+        assert!(!seeked.get());
+    }
+
+    #[test]
+    fn volume_slider_aligns_with_the_button_row() {
+        let bounds = Rect::new(Point::ZERO, Size::new(480.0, 270.0).expect("valid size"));
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
+        assert!(!geometry.volume_slider.is_empty());
+        let slider_center =
+            geometry.volume_slider.origin.y + geometry.volume_slider.size.height() / 2.0;
+        let mute_center = geometry.mute.origin.y + geometry.mute.size.height() / 2.0;
+        assert!((slider_center - mute_center).abs() < 0.5);
+    }
+
+    #[test]
+    fn narrow_surfaces_collapse_the_volume_slider_instead_of_overlapping() {
+        let bounds = Rect::new(Point::ZERO, Size::new(320.0, 180.0).expect("valid size"));
+        let geometry = video_geometry(bounds, &PlayerTheme::default(), &Video::new());
+        assert!(geometry.volume_slider.is_empty());
+        assert!(geometry.forward.right() <= geometry.mute.origin.x);
+        assert!(geometry.mute.right() <= geometry.rate.origin.x);
     }
 
     #[test]
