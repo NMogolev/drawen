@@ -571,11 +571,12 @@ impl Adapter {
         let window = Arc::clone(self.window.as_ref().expect("window exists while rendering"));
         let scale_factor = to_scale_factor(window.scale_factor())?;
         let display_list = self.application.redraw();
+        let damage = self.application.frame_damage();
         self.sync_ime_cursor_area(&window, scale_factor);
         self.renderer
             .as_mut()
             .expect("surface exists while rendering")
-            .render(&display_list, scale_factor)
+            .render_with_damage(&display_list, scale_factor, damage)
             .map_err(|_| RunError::InvalidSize)
     }
 
