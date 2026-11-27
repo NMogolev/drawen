@@ -34,6 +34,16 @@ in the headings because the version itself must stay valid semver; see
   damaged region rasterizes ~160x faster than a full software repaint, and the
   end-to-end `invalidate_rect` path ~75x faster. Methodology and diagnostics
   are documented in the new `docs/PERFORMANCE.md`.
+- The GPU renderer caches CPU-composed text bitmaps in a 16 MiB LRU keyed by
+  `TextLayout::identity`, color, and scale. Unchanged labels no longer
+  re-rasterize and source-over every glyph on each rasterized frame; a cache
+  hit shares the pixels with the prepared frame allocation-free.
+- `TextLayout` carries a process-unique identity that survives cloning and
+  recoloring, so renderers can cache derived resources for unchanged text.
+- The floating paint pass visits only widgets that opt in through the new
+  `Widget::paints_floating` hook (kept in a registry) instead of walking every
+  node and calling a no-op hook each painted frame. `Tooltip` and `ToastHost`
+  opt in.
 
 ### Widgets
 

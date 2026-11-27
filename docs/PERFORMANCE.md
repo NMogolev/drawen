@@ -61,7 +61,9 @@ can pass it to the backend.
   conservative bounds intersect it, with every scissor restricted to the
   region; a fullscreen blit presents the result. `Unchanged` skips
   rasterization and blits the retained frame. Resize drops the retained
-  texture, forcing one full frame.
+  texture, forcing one full frame. Composed text bitmaps are cached in a
+  16 MiB LRU keyed by `TextLayout::identity`, color, and scale, so unchanged
+  labels skip CPU glyph compositing on every rasterized frame.
 - **Software (`drawen-software`)**: `render_with_damage` resets the reported
   pixels and repaints them under a clip aligned to the cleared pixel span.
   Commands outside the region are skipped entirely. This is the backend the
@@ -70,6 +72,11 @@ can pass it to the backend.
 Command culling is conservative: bounds include stroke width, shadow falloff,
 antialiasing slack, glyph overhang proportional to line height, and the active
 transform. A command is skipped only when its bounds cannot touch the region.
+
+Per-frame UI work is kept proportional to what actually changes: the floating
+paint pass iterates a registry of widgets that opt in through
+`Widget::paints_floating` rather than every node, and unchanged frames reuse
+the retained display list without repainting.
 
 ## Reproducible benchmark
 
