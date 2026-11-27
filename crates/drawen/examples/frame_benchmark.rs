@@ -30,6 +30,7 @@ fn main() {
     software_damage_benchmark(1_920, 1_080);
     runtime_local_damage_benchmark();
     virtual_list_scroll_benchmark();
+    animation_advance_benchmark();
 }
 
 fn retained_frame_benchmark() {
@@ -207,6 +208,31 @@ fn virtual_list_scroll_benchmark() {
     );
 }
 
+fn animation_advance_benchmark() {
+    const LEAVES: usize = 2_000;
+    let mut runtime = UiRuntime::new(AnimationWall);
+    let root = runtime.root();
+    for _ in 0..LEAVES {
+        runtime.append_child(root, StaticLeaf).expect("static leaf");
+    }
+    runtime
+        .append_child(root, BenchmarkLoop { ticks: 0 })
+        .expect("live loop");
+    layout(&mut runtime, fixed_size(WINDOW_WIDTH, WINDOW_HEIGHT));
+    paint_frame(&mut runtime);
+
+    // Isolate the animation advance pass (no paint, no raster): a large mostly
+    // static tree with a single live loop. Visibility must be resolved only for
+    // the animating node, not for every widget in the arena.
+    let samples = measure(|| {
+        runtime.advance_animations(Duration::from_millis(16));
+        black_box(runtime.next_frame_in());
+    });
+    println!("animation advance ({LEAVES} static widgets + 1 live loop)");
+    print_timing(&samples);
+    println!("  note: advance + next_frame_in visit only animating nodes for visibility\n");
+}
+
 fn layout(runtime: &mut UiRuntime, size: Size) {
     runtime
         .layout(Constraints::tight(size).expect("benchmark constraints are valid"))
@@ -311,6 +337,92 @@ impl Widget for GridScene {
             }
             y += cell;
         }
+    }
+}
+
+struct AnimationWall;
+
+impl Widget for AnimationWall {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn layout(
+        &mut self,
+        context: &mut drawen::LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> drawen::LayoutResult {
+        let own = constraints.constrain(fixed_size(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let cell = 20.0;
+        let columns = (WINDOW_WIDTH / cell) as usize;
+        let mut children = Vec::new();
+        for index in 0..context.child_count() {
+            let (child, _) = context
+                .layout_child(
+                    index,
+                    Constraints::tight(fixed_size(cell, cell)).expect("leaf constraints"),
+                )
+                .expect("leaf lays out");
+            let origin = Point::new(
+                (index % columns) as f32 * cell,
+                (index / columns) as f32 * cell,
+            );
+            children.push(drawen::ChildLayout::new(child, origin));
+        }
+        drawen::LayoutResult::with_children(own, children)
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, _: &drawen::UiEnvironment, bounds: Rect) {
+        context.fill_rect(bounds, Color::rgba8(16, 20, 26, 255));
+    }
+}
+
+struct StaticLeaf;
+
+impl Widget for StaticLeaf {
+    fn layout(
+        &mut self,
+        _: &mut drawen::LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> drawen::LayoutResult {
+        drawen::LayoutResult::new(constraints.constrain(fixed_size(20.0, 20.0)))
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, _: &drawen::UiEnvironment, bounds: Rect) {
+        context.fill_rect(bounds, Color::rgba8(32, 96, 160, 255));
+    }
+}
+
+struct BenchmarkLoop {
+    ticks: u64,
+}
+
+impl Widget for BenchmarkLoop {
+    fn layout(
+        &mut self,
+        _: &mut drawen::LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> drawen::LayoutResult {
+        drawen::LayoutResult::new(constraints.constrain(fixed_size(20.0, 20.0)))
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, _: &drawen::UiEnvironment, bounds: Rect) {
+        context.fill_rect(bounds, Color::rgba8(200, 120, 40, 255));
+    }
+
+    fn advance_animation(&mut self, _: Duration, _: bool) -> bool {
+        self.ticks = self.ticks.wrapping_add(1);
+        black_box(self.ticks);
+        true
+    }
+
+    fn is_animating(&self) -> bool {
+        true
+    }
+
+    fn local_animation_damage(&self) -> bool {
+        true
     }
 }
 
