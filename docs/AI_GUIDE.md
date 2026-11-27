@@ -73,6 +73,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A primary action plus a dropdown | `SplitButton::new("Save")` with one `Menu` child; `activated()` runs the action, the arrow floats the menu |
 | Copyable read-only text | `Text::styled("...", style).selectable()`; drag or double-click to select, Ctrl+C copies, the text is never edited |
 | A numeric field with steppers | `NumberInput::new().with_range(min, max).with_step(s)`; `value()` is a `Property<f64>`, arrows and steppers step, Enter commits |
+| An interval with two thumbs | `RangeSlider::with_value(min, max, lo, hi)`; `value()` is a `Property<(f32, f32)>`, thumbs stop at each other, arrows select and step |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
@@ -326,6 +327,23 @@ Escape reverts, and losing focus commits; unparseable text reverts to the last
 committed number. `value()` is a `Property<f64>` (every write is clamped), while
 `changed()` fires only on user interaction. See
 [RECIPES.md](RECIPES.md#15-a-number-input).
+
+### "Let the user pick a range with two thumbs."
+
+`RangeSlider` keeps the interval in one ordered property:
+
+```rust
+let slider = RangeSlider::with_value(0.0, 100.0, 20.0, 80.0);
+let value = slider.value(); // Property<(f32, f32)>, lower <= upper always
+let slider = runtime.append_child(parent, slider)?;
+let _binding = runtime.bind(&value, &state.span);
+```
+
+The pointer grabs the nearest thumb and stops it at the other thumb;
+`ArrowDown`/`ArrowUp` select a thumb and `ArrowLeft`/`ArrowRight` step it.
+Binding copies clamp both ends and swap a reversed pair, so state can never
+push an inverted interval into the widget. See
+[RECIPES.md](RECIPES.md#16-a-range-slider).
 
 ### "Copy from my native window never reaches the OS clipboard."
 

@@ -2,8 +2,9 @@
 //!
 //! Application state lives in `Property` cells. Widget signals write into
 //! those cells, property subscriptions derive validity, and
-//! `UiRuntime::bind` copies validity into `Button::enabled` and a quantity into
-//! `NumberInput::value`. Watched and bound properties wake the runtime
+//! `UiRuntime::bind` copies validity into `Button::enabled`, a quantity into
+//! `NumberInput::value`, and an interval pair into `RangeSlider::value`.
+//! Watched and bound properties wake the runtime
 //! themselves, so the event loop needs no dirty flag: `take_redraw_request`
 //! already reports every property change.
 //!
@@ -13,8 +14,8 @@ use std::rc::Rc;
 
 use drawen::{
     Binding, Button, Checkbox, ChildLayout, Clipboard, Color, Constraints, LayoutContext,
-    LayoutResult, NumberInput, Point, Property, Rect, Size, Subscription, Text, TextField,
-    UiEnvironment, UiRuntime, Widget,
+    LayoutResult, NumberInput, Point, Property, RangeSlider, Rect, Size, Subscription, Text,
+    TextField, UiEnvironment, UiRuntime, Widget,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -28,6 +29,7 @@ struct FormState {
     name: Property<String>,
     agreed: Property<bool>,
     quantity: Property<f64>,
+    span: Property<(f32, f32)>,
     is_valid: Property<bool>,
     submissions: Property<u32>,
 }
@@ -38,6 +40,7 @@ impl FormState {
             name: Property::new(String::new()),
             agreed: Property::new(false),
             quantity: Property::new(1.0),
+            span: Property::new((20.0, 80.0)),
             is_valid: Property::new(false),
             submissions: Property::new(0),
         }
@@ -65,7 +68,9 @@ impl Widget for FormView {
         let mut children = Vec::new();
         let mut y = 96.0;
         for index in 0..context.child_count() {
-            let width = if index == 0 {
+            // The text field and the range slider stretch to the form width;
+            // the remaining children keep their natural size.
+            let width = if index == 0 || index == 3 {
                 field_width
             } else {
                 size.width()
@@ -107,6 +112,14 @@ impl Widget for FormView {
             Point::new(bounds.origin.x + 24.0, bounds.origin.y + 76.0),
         );
 
+        let (lower, upper) = self.state.span.get();
+        let span = format!("Span: {lower} - {upper}");
+        let span = shaper.layout(&span, &TextStyle::new(12.0, muted), None);
+        context.draw_text(
+            span,
+            Point::new(bounds.origin.x + 200.0, bounds.origin.y + 76.0),
+        );
+
         let hint = if self.state.is_valid.get() {
             "Ready to submit."
         } else {
@@ -115,7 +128,7 @@ impl Widget for FormView {
         let hint = shaper.layout(hint, &TextStyle::new(12.0, muted), None);
         context.draw_text(
             hint,
-            Point::new(bounds.origin.x + 24.0, bounds.origin.y + 284.0),
+            Point::new(bounds.origin.x + 24.0, bounds.origin.y + 324.0),
         );
     }
 
@@ -181,6 +194,20 @@ impl BoundApp {
             .append_child(runtime.root(), number)
             .expect("root exists");
 
+        // An interval bound to state as one pair property: the binding copies
+        // state into both thumbs, and `changed` writes the pair back.
+        let range = RangeSlider::with_value(0.0, 100.0, 20.0, 80.0);
+        let span_subscription = range.changed().subscribe({
+            let state = Rc::clone(&state);
+            move |pair| {
+                state.span.set(*pair);
+            }
+        });
+        let range_value = range.value();
+        runtime
+            .append_child(runtime.root(), range)
+            .expect("root exists");
+
         let button = Button::new();
         let enabled = button.enabled();
         let submit_subscription = button.activated().subscribe({
@@ -205,6 +232,7 @@ impl BoundApp {
             name_subscription,
             agreed_subscription,
             quantity_subscription,
+            span_subscription,
             submit_subscription,
         ];
         subscriptions.push(state.name.subscribe({
@@ -217,10 +245,12 @@ impl BoundApp {
         }));
         let binding = runtime.bind(&enabled, &state.is_valid);
         let quantity_binding = runtime.bind(&number_value, &state.quantity);
+        let span_binding = runtime.bind(&range_value, &state.span);
         runtime.watch(&state.submissions);
         runtime.watch(&state.quantity);
+        runtime.watch(&state.span);
 
-        let size = Size::new(480.0, 360.0).expect("window size is valid");
+        let size = Size::new(480.0, 400.0).expect("window size is valid");
         runtime
             .layout(Constraints::tight(size).expect("window constraints are valid"))
             .expect("layout succeeds");
@@ -228,7 +258,7 @@ impl BoundApp {
         Self {
             runtime,
             size,
-            _bindings: vec![binding, quantity_binding],
+            _bindings: vec![binding, quantity_binding, span_binding],
             _subscriptions: subscriptions,
         }
     }

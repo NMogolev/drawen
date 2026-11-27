@@ -27,6 +27,13 @@ in the headings because the version itself must stay valid semver; see
   `NumberInput`, and selectable `Text` now reach the OS clipboard in the demos
   instead of staying in the runtime's in-memory clipboard. `Box<dyn Clipboard>`
   implements `Clipboard` so the hook value can be passed straight through.
+- Added `RangeSlider`, a two-thumb interval selector on a single track. The
+  interval is one `Property<(f32, f32)>` whose normalizer clamps both ends to
+  the range and keeps `lower <= upper` (reversed pairs are swapped), so binding
+  copies cannot invert it. The pointer grabs the nearest thumb and stops it at
+  the other; ArrowDown/ArrowUp select a thumb, ArrowLeft/ArrowRight step it, and
+  Home/End send it to the range ends. `changed()` fires on user interaction
+  only.
 
 ## 0.3.0 - 2026-11-25
 

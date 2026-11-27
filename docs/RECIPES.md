@@ -1186,3 +1186,50 @@ Rules for number inputs:
 - Style it through the `number-input` style target; padding, background, border,
   corner radius, and foreground resolve from DSS or the theme. The stepper
   column shares the surface and is separated by a one-pixel divider.
+
+## 16. A range slider
+
+`RangeSlider` selects a continuous interval with two thumbs on one track:
+
+```rust
+use drawen::RangeSlider;
+
+let slider = RangeSlider::with_value(0.0, 100.0, 20.0, 80.0);
+let value = slider.value();     // Property<(f32, f32)>, clamped and ordered
+let changed = slider.changed(); // user drags and key steps only
+let slider = runtime.append_child(parent, slider)?;
+let _binding = runtime.bind(&value, &state.span);
+```
+
+The pair is one property, so the `lower <= upper` invariant survives every
+write, including binding copies: each end is clamped to `[minimum, maximum]`
+and a reversed pair is swapped. Read the ends with `slider.lower()` and
+`slider.upper()`, or `slider.value().get()` for the pair.
+
+Interaction:
+
+- The pointer grabs the nearest thumb and drags it up to the other thumb, so
+  the interval can collapse to a point but never invert. When both thumbs
+  coincide, a press to their right grabs the upper one.
+- `ArrowDown` / `ArrowUp` select the lower / upper thumb; `ArrowLeft` /
+  `ArrowRight` step the selected thumb by one percent of the range; `Home` /
+  `End` send it to the range ends, stopping at the other thumb.
+- Accessibility reports a slider whose value text is the interval and whose
+  numeric value is the selected thumb; `SetValue` accepts `lower,upper` or a
+  single number for the selected thumb.
+
+```rust
+let _subscription = changed.subscribe(move |pair| {
+    state.span.set(*pair); // widget -> state, both ends at once
+});
+```
+
+Rules for range sliders:
+
+- Bind the pair, not two scalars: one property keeps the interval ordered under
+  concurrent writes, exactly like `Slider` keeps a single value in range.
+- Use `changed()` for user intent and `value().changed()` for every write;
+  programmatic `set_value(lower, upper)` emits only the property signal.
+- Style it through the `range-slider` style target; the track, filled segment,
+  and both thumbs resolve accent, background, border, and corner radius from
+  DSS or the theme, like `Slider`.
