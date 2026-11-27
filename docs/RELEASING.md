@@ -170,6 +170,18 @@ local machine.
    compiles the whole published 0.4 graph from the registry, which is the
    final end-to-end check.
 
+10. Create the GitHub release from the tag, or the repository sidebar keeps
+    showing the previous version as Latest. Name it `Drawen X.Y.Z
+    (YYYY-MM-DD)` and use the release's `CHANGELOG.md` section without its
+    heading as the body, as 0.3.0 and 0.4.0 do. With the CLI:
+
+    ```text
+    gh release create v0.4.0 --title "Drawen 0.4.0 (2026-11-28)" --notes-file release_body.md
+    ```
+
+    Without `gh`, POST `/repos/<owner>/<repo>/releases` with `tag_name`,
+    `name`, and `body`, reusing the stored git credential for authorization.
+
 Do not publish a crate whose semver check reports an error. If the error is
 unexpected, fix the API or bump the minor version; do not silence the check.
 
