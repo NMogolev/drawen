@@ -465,6 +465,12 @@ pub struct UiRuntime {
     /// Widgets that record floating paint, kept in arena-index order so the
     /// floating pass visits only them instead of every node each frame.
     floating_painters: Vec<WidgetId>,
+    /// Nodes whose hover/press/focus transition has not reached its target.
+    /// A node is added when an interaction changes its target (the old and new
+    /// hover/press/focus owners) and pruned once it settles, so the transition
+    /// pass visits O(active) nodes instead of the whole arena. Hidden nodes stay
+    /// in the set, frozen, until they are revealed and can finish.
+    transition_active: Vec<WidgetId>,
     /// Focus target to restore when each open overlay root closes, captured
     /// when the root first registers. Keys are overlay roots, not owners.
     overlay_restore_focus: HashMap<WidgetId, WidgetId>,
@@ -685,6 +691,7 @@ impl UiRuntime {
             environment,
             overlay_roots: Vec::new(),
             floating_painters: Vec::new(),
+            transition_active: Vec::new(),
             overlay_restore_focus: HashMap::new(),
             overlay_owner: HashMap::new(),
             viewport: None,
@@ -1001,15 +1008,11 @@ impl UiRuntime {
             });
             return background_animating.then_some(BACKGROUND_FRAME_INTERVAL);
         }
-        let transition_animating = self.nodes.iter().enumerate().any(|(index, slot)| {
-            let Some(node) = &slot.node else {
-                return false;
-            };
-            let Ok(index) = u32::try_from(index) else {
-                return false;
-            };
-            let id = WidgetId::new(index, slot.generation);
-            node.transition.is_animating(self.transition_targets(id)) && self.animation_visible(id)
+        let transition_animating = self.transition_active.iter().any(|id| {
+            self.node(*id).is_some_and(|node| {
+                node.transition.is_animating(self.transition_targets(*id))
+                    && self.animation_visible(*id)
+            })
         });
         if !widget_animating && !transition_animating {
             return None;
@@ -1035,6 +1038,16 @@ impl UiRuntime {
         }
     }
 
+    /// Marks a node's interaction transition as in flight and wakes the
+    /// animation clock. Called with both the old and new owner whenever hover,
+    /// press, or focus changes so the node approaches its new target.
+    fn wake_transition(&mut self, id: WidgetId) {
+        if !self.transition_active.contains(&id) {
+            self.transition_active.push(id);
+        }
+        self.begin_animation();
+    }
+
     fn transition_targets(&self, id: WidgetId) -> (f32, f32, f32) {
         let hover = self.hovered.values().any(|hovered| *hovered == id);
         let press = self.pressed == Some(id);
@@ -1054,23 +1067,13 @@ impl UiRuntime {
         } else {
             (delta.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
         };
-        // Snapshot per-node visibility before the mutable passes so an offscreen
-        // or collapsed widget freezes its pixels instead of spinning into the
-        // void. `settle` still completes everything for tests and screenshots.
-        let visibility: Vec<bool> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                let Ok(index) = u32::try_from(index) else {
-                    return false;
-                };
-                self.animation_visible(WidgetId::new(index, slot.generation))
-            })
-            .collect();
-        let transitions = self.advance_transitions(step, settle, &visibility);
-        let (widgets, widgets_animating) =
-            self.advance_widget_animations(delta, settle, &visibility);
+        // Visibility is resolved lazily, only for nodes that actually animate,
+        // so a large mostly-static tree does not pay an ancestor walk per node.
+        // The widget pass still scans is_animating across the arena: a shared
+        // handle (toast queue, media session) can start an animation without
+        // invalidating, so discovery must not be skipped on an idle flag.
+        let transitions = self.advance_transitions(step, settle);
+        let (widgets, widgets_animating) = self.advance_widget_animations(delta, settle);
         if transitions.changed || widgets.changed {
             if transitions.full || widgets.full {
                 self.mark_full_damage();
@@ -1088,49 +1091,51 @@ impl UiRuntime {
         self.animating = widgets_animating || (step < 1.0 && transitions.changed);
     }
 
-    fn advance_transitions(
-        &mut self,
-        step: f32,
-        settle: bool,
-        visibility: &[bool],
-    ) -> AnimationDamage {
+    #[allow(clippy::float_cmp)]
+    fn advance_transitions(&mut self, step: f32, settle: bool) -> AnimationDamage {
+        let mut damage = AnimationDamage::default();
+        if step <= 0.0 || (!self.presented && !settle) {
+            return damage;
+        }
         let hovered: Vec<WidgetId> = self.hovered.values().copied().collect();
         let focused = self.focused;
         let pressed = self.pressed;
-        let mut changed_transitions: Vec<WidgetId> = Vec::new();
-        if step > 0.0 && (self.presented || settle) {
-            for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
-                let Some(node) = &mut slot.node else {
-                    continue;
-                };
-                let Ok(index) = u32::try_from(slot_index) else {
-                    continue;
-                };
-                if !settle && !visibility[slot_index] {
-                    continue;
-                }
-                let id = WidgetId::new(index, slot.generation);
-                let hover = if hovered.contains(&id) { 1.0 } else { 0.0 };
-                let press = if pressed == Some(id) { 1.0 } else { 0.0 };
-                let focus = if focused == Some(id) { 1.0 } else { 0.0 };
+        let active = std::mem::take(&mut self.transition_active);
+        for id in active {
+            if self.node(id).is_none() {
+                continue;
+            }
+            let hover = if hovered.contains(&id) { 1.0 } else { 0.0 };
+            let press = if pressed == Some(id) { 1.0 } else { 0.0 };
+            let focus = if focused == Some(id) { 1.0 } else { 0.0 };
+            if !settle && !self.animation_visible(id) {
+                // Frozen offscreen: keep it pending until it is revealed.
+                self.transition_active.push(id);
+                continue;
+            }
+            let (changed, settled) = {
+                let node = self.node_mut(id).expect("node is live");
                 let mut changed = approach(&mut node.transition.hover, hover, step);
                 changed |= approach(&mut node.transition.press, press, step);
                 changed |= approach(&mut node.transition.focus, focus, step);
-                if changed {
-                    changed_transitions.push(id);
-                }
+                let settled = node.transition.hover == hover
+                    && node.transition.press == press
+                    && node.transition.focus == focus;
+                (changed, settled)
+            };
+            if !settled {
+                self.transition_active.push(id);
             }
-        }
-        let mut damage = AnimationDamage::default();
-        for id in changed_transitions {
-            // A transition restyles the node and everything its state cascades
-            // to, so damage the whole subtree plus the effect margin. A node
-            // without bounds cannot be localized safely.
-            match self.subtree_bounds(id) {
-                Some(bounds) if !bounds.is_empty() => {
-                    damage.add_region(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
+            if changed {
+                // A transition restyles the node and everything its state
+                // cascades to, so damage the whole subtree plus the effect
+                // margin. A node without bounds cannot be localized safely.
+                match self.subtree_bounds(id) {
+                    Some(bounds) if !bounds.is_empty() => {
+                        damage.add_region(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
+                    }
+                    _ => damage.add_full(),
                 }
-                _ => damage.add_full(),
             }
         }
         damage
@@ -1140,27 +1145,41 @@ impl UiRuntime {
         &mut self,
         delta: Duration,
         settle: bool,
-        visibility: &[bool],
     ) -> (AnimationDamage, bool) {
         let mut damage = AnimationDamage::default();
         let mut widgets_animating = false;
         let presented = self.presented;
-        for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
-            let Some(node) = &mut slot.node else {
+        for slot_index in 0..self.nodes.len() {
+            let Ok(index) = u32::try_from(slot_index) else {
                 continue;
             };
-            let Some(widget) = &mut node.widget else {
+            let id = WidgetId::new(index, self.nodes[slot_index].generation);
+            let Some(node) = self.node(id) else {
                 continue;
             };
+            let Some(widget) = node.widget.as_deref() else {
+                continue;
+            };
+            // Only animating widgets need the visibility walk and a tick; a
+            // static widget costs a cheap is_animating call, nothing more.
+            if !settle && !widget.is_animating() {
+                continue;
+            }
+            let advances_hidden = widget.advances_while_hidden();
+            let local = widget.local_animation_damage();
+            let bounds = node.bounds;
             // Freeze purely visual animation when the window cannot present or
             // the widget contributes no pixels. Media and state clocks opt back
             // in through `advances_while_hidden`; `settle` completes everything.
-            if !settle && !widget.advances_while_hidden() && (!presented || !visibility[slot_index])
-            {
+            if !settle && !advances_hidden && (!presented || !self.animation_visible(id)) {
                 continue;
             }
-            let bounds = node.bounds;
-            let local = widget.local_animation_damage();
+            let Some(node) = self.node_mut(id) else {
+                continue;
+            };
+            let Some(widget) = node.widget.as_deref_mut() else {
+                continue;
+            };
             if widget.advance_animation(delta, settle) {
                 if local && !bounds.is_empty() {
                     damage.add_region(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
@@ -1814,10 +1833,15 @@ impl UiRuntime {
             let _ = self.dispatch_synthetic_pointer(target, &event);
         }
         self.pointer_capture.clear();
+        let previous_pressed = self.pressed;
         self.pressed = None;
-        self.begin_animation();
-
         let hovered: Vec<_> = self.hovered.drain().collect();
+        for target in previous_pressed
+            .into_iter()
+            .chain(hovered.iter().map(|(_, target)| *target))
+        {
+            self.wake_transition(target);
+        }
         for (pointer_id, target) in hovered {
             let event = InputEvent::PointerLeave(drawen_core::PointerEvent {
                 pointer_id,
@@ -2012,7 +2036,7 @@ impl UiRuntime {
         let Some(target) = self.hovered.remove(&pointer.pointer_id) else {
             return EventStatus::Ignored;
         };
-        self.begin_animation();
+        self.wake_transition(target);
         self.invalidate_paint();
         self.dispatch_synthetic_pointer(target, &InputEvent::PointerLeave(pointer.clone()))
     }
@@ -2370,7 +2394,12 @@ impl UiRuntime {
         if previous == next {
             return;
         }
-        self.begin_animation();
+        if let Some(previous) = previous {
+            self.wake_transition(previous);
+        }
+        if let Some(next) = next {
+            self.wake_transition(next);
+        }
         // Hover is a style state even for widgets that do not request a redraw
         // themselves, so the runtime always invalidates paint and schedules the
         // next frame.
@@ -2889,7 +2918,9 @@ impl UiRuntime {
             _ => {}
         }
         if self.pressed != previous_pressed {
-            self.begin_animation();
+            for target in previous_pressed.into_iter().chain(self.pressed) {
+                self.wake_transition(target);
+            }
         }
         if effects.redraw_requested {
             self.invalidate_paint();
@@ -2923,7 +2954,9 @@ impl UiRuntime {
         if previous == requested {
             self.redraw_requested = true;
         } else {
-            self.begin_animation();
+            for target in previous.into_iter().chain(requested) {
+                self.wake_transition(target);
+            }
             self.invalidate_paint();
         }
         for target in previous.into_iter().chain(requested) {
@@ -3007,6 +3040,8 @@ impl UiRuntime {
         self.hovered.retain(|_, hovered| *hovered != id);
         self.overlay_roots.retain(|overlay| *overlay != id);
         self.floating_painters.retain(|painter| *painter != id);
+        self.transition_active
+            .retain(|transition| *transition != id);
         self.overlay_restore_focus.remove(&id);
         self.overlay_owner.remove(&id);
         self.overlay_owner.retain(|_, owner| *owner != id);
@@ -3049,6 +3084,12 @@ impl UiRuntime {
         self.layout = None;
         self.cached_display_list = None;
         self.pointer_capture.clear();
+        // The interaction state is about to be dropped; let the affected nodes
+        // transition back to their rest state instead of freezing mid-flight.
+        let hovered: Vec<WidgetId> = self.hovered.values().copied().collect();
+        for target in hovered.into_iter().chain(self.focused) {
+            self.wake_transition(target);
+        }
         self.hovered.clear();
         self.overlay_roots.clear();
         self.overlay_restore_focus.clear();
@@ -4957,6 +4998,57 @@ mod tests {
             .expect("paint succeeds");
         let (hover, _, _) = observed.borrow().last().copied().expect("painted once");
         assert!((hover - 0.5).abs() < 0.05, "hover progress was {hover}");
+    }
+
+    struct WakeLoop {
+        active: Rc<Cell<bool>>,
+        ticks: Rc<Cell<u32>>,
+    }
+
+    impl Widget for WakeLoop {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(size(40.0, 40.0)))
+        }
+
+        fn advance_animation(&mut self, _: Duration, _: bool) -> bool {
+            if self.active.get() {
+                self.ticks.set(self.ticks.get() + 1);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn is_animating(&self) -> bool {
+            self.active.get()
+        }
+    }
+
+    #[test]
+    fn an_animation_started_without_invalidation_still_advances() {
+        let active = Rc::new(Cell::new(false));
+        let ticks = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(WakeLoop {
+            active: Rc::clone(&active),
+            ticks: Rc::clone(&ticks),
+        });
+        runtime
+            .layout(Constraints::loose(size(100.0, 100.0)))
+            .expect("layout succeeds");
+        runtime.settle_animations();
+        assert!(
+            runtime.next_frame_in().is_none(),
+            "idle tree schedules nothing"
+        );
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert_eq!(ticks.get(), 0, "a static widget does not tick");
+
+        // A shared handle can start an animation without invalidating paint —
+        // the toast queue does exactly this — so the advance pass must still
+        // discover it by scanning is_animating rather than trusting an idle flag.
+        active.set(true);
+        runtime.advance_animations(std::time::Duration::from_millis(16));
+        assert!(ticks.get() > 0, "an externally started animation advances");
     }
 
     struct VisibilityLoop {
