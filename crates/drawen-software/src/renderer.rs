@@ -308,6 +308,23 @@ impl SoftwareRenderer {
             return Ok(());
         }
 
+        // A hard-edged stroke is a convex ring (outer minus inner rounded rect),
+        // so each scanline meets it in at most two spans. Resolve those spans
+        // instead of testing every pixel of the bounding box, hollow core
+        // included, with a freshly rebuilt stroke geometry.
+        if shape.blur == 0.0 && shape.stroke_width.is_some() {
+            stroke_convex_shape(
+                target,
+                state,
+                scale_factor,
+                color,
+                shape,
+                inverse,
+                (start_x, start_y, end_x, end_y),
+            );
+            return Ok(());
+        }
+
         // General paths step through logical and local coordinates incrementally;
         // the affine transform is linear, so each pixel only needs two adds.
         let inv_scale = scale_factor.recip();
@@ -725,31 +742,16 @@ fn fill_convex_shape(
         } else {
             (start_x, end_x)
         };
-        let inside = |x: u32| {
-            let point = logical_pixel_center(x, y, scale_factor);
-            contains_rounded_rect(shape.rect, shape.radius, inverse.transform_point(point))
-        };
-        let (first, last) = if row_start < row_end && inside(row_start) && inside(row_end - 1) {
-            // A convex shape contains every pixel between two inside pixels, so
-            // the row is covered from the clip edge to the clip edge.
-            (row_start, row_end)
-        } else {
-            let Some(seed) = rounded_rect_seed(
-                shape.rect,
-                shape.radius,
-                inverse,
-                y,
-                row_start,
-                row_end,
-                scale_factor,
-            ) else {
-                continue;
-            };
-            let first = first_true(row_start, seed + 1, inside);
-            // Convex containment makes the true region a single interval, so the
-            // first false pixel after a known inside pixel ends the span.
-            let last = first_true(seed, row_end, |x| !inside(x));
-            (first, last)
+        let Some((first, last)) = convex_row_span(
+            shape.rect,
+            shape.radius,
+            inverse,
+            y,
+            row_start,
+            row_end,
+            scale_factor,
+        ) else {
+            continue;
         };
         if !clipped {
             fill_row(target, y, first, last, color);
@@ -765,6 +767,144 @@ fn fill_convex_shape(
             last -= 1;
         }
         fill_row(target, y, first, last, color);
+    }
+}
+
+/// Returns the exact inside span of a convex rounded rect on row `y`, searched
+/// within `row_start..row_end`, or `None` when the row misses the shape.
+///
+/// Containment is convex, so the inside pixels form one interval; a seed pixel
+/// plus two binary searches locate its edges without testing every pixel.
+#[allow(clippy::too_many_arguments)]
+fn convex_row_span(
+    rect: Rect,
+    radius: f32,
+    inverse: Affine,
+    y: u32,
+    row_start: u32,
+    row_end: u32,
+    scale_factor: f32,
+) -> Option<(u32, u32)> {
+    if row_start >= row_end {
+        return None;
+    }
+    let inside = |x: u32| {
+        let point = logical_pixel_center(x, y, scale_factor);
+        contains_rounded_rect(rect, radius, inverse.transform_point(point))
+    };
+    if inside(row_start) && inside(row_end - 1) {
+        // A convex shape contains every pixel between two inside pixels.
+        return Some((row_start, row_end));
+    }
+    let seed = rounded_rect_seed(rect, radius, inverse, y, row_start, row_end, scale_factor)?;
+    let first = first_true(row_start, seed + 1, inside);
+    let last = first_true(seed, row_end, |x| !inside(x));
+    (first < last).then_some((first, last))
+}
+
+/// Renders a hard-edged rounded-rect stroke as two scanline spans per row.
+///
+/// The stroke is the outer rounded rect minus the inner one, both convex, so a
+/// row meets it in `[outer_first, inner_first)` and `[inner_last, outer_last)`.
+/// Geometry is built once per command, and the hollow core and exterior are
+/// never visited pixel by pixel.
+#[allow(clippy::too_many_arguments)]
+fn stroke_convex_shape(
+    target: &mut PixelBuffer,
+    state: &RenderState,
+    scale_factor: f32,
+    color: Color,
+    shape: Shape,
+    inverse: Affine,
+    (start_x, start_y, end_x, end_y): (u32, u32, u32, u32),
+) {
+    let Some(width) = shape.stroke_width else {
+        return;
+    };
+    if width <= 0.0 {
+        return;
+    }
+    let outer = expand(shape.rect, width * 0.5);
+    let inner = Rect::new(
+        Point::new(
+            shape.rect.origin.x + width * 0.5,
+            shape.rect.origin.y + width * 0.5,
+        ),
+        Size::new(
+            (shape.rect.size.width() - width).max(0.0),
+            (shape.rect.size.height() - width).max(0.0),
+        )
+        .expect("clamped stroke interior is valid"),
+    );
+    let outer_radius =
+        (shape.radius + width * 0.5).min(outer.size.width().min(outer.size.height()) * 0.5);
+    let inner_radius = (shape.radius - width * 0.5)
+        .max(0.0)
+        .min(inner.size.width().min(inner.size.height()) * 0.5);
+    let clipped = !state.clips.is_empty();
+    for y in start_y..end_y {
+        let (row_start, row_end) = if clipped {
+            let Some(span) = clip_row_span(state, y, start_x, end_x, scale_factor) else {
+                continue;
+            };
+            span
+        } else {
+            (start_x, end_x)
+        };
+        let Some((mut outer_first, mut outer_last)) = convex_row_span(
+            outer,
+            outer_radius,
+            inverse,
+            y,
+            row_start,
+            row_end,
+            scale_factor,
+        ) else {
+            continue;
+        };
+        if clipped {
+            while outer_first < outer_last
+                && !is_visible(logical_pixel_center(outer_first, y, scale_factor), state)
+            {
+                outer_first += 1;
+            }
+            while outer_last > outer_first
+                && !is_visible(logical_pixel_center(outer_last - 1, y, scale_factor), state)
+            {
+                outer_last -= 1;
+            }
+        }
+        if outer_first >= outer_last {
+            continue;
+        }
+        // After trimming, the whole outer span is clip-visible, and the hole
+        // lies inside it, so both edge spans need no further clip tests.
+        let inner_inside = |x: u32| {
+            let point = logical_pixel_center(x, y, scale_factor);
+            contains_rounded_rect(inner, inner_radius, inverse.transform_point(point))
+        };
+        // The ring is centered, so the middle of the outer span is inside the
+        // hole on every row the hole exists. Use it as a seed and binary-search
+        // both edges instead of running the general seed search per row.
+        let middle = outer_first + (outer_last - outer_first) / 2;
+        let (inner_first, inner_last) = if inner_inside(middle) {
+            let first = first_true(outer_first, middle + 1, inner_inside);
+            let last = first_true(middle, outer_last, |x| !inner_inside(x));
+            (first, last)
+        } else {
+            convex_row_span(
+                inner,
+                inner_radius,
+                inverse,
+                y,
+                outer_first,
+                outer_last,
+                scale_factor,
+            )
+            .unwrap_or((outer_first, outer_first))
+        };
+        fill_row(target, y, outer_first, inner_first, color);
+        fill_row(target, y, inner_last, outer_last, color);
     }
 }
 
@@ -1294,7 +1434,18 @@ mod tests {
                 } => {
                     reference_fill(target, &state, scale_factor, *rect, *radius, *color);
                 }
-                _ => panic!("reference renderer only supports the fill commands used by this test"),
+                DisplayCommand::StrokeRect { rect, width, color } => {
+                    reference_stroke(target, &state, scale_factor, *rect, 0.0, *width, *color);
+                }
+                DisplayCommand::StrokeRoundedRect {
+                    rect,
+                    radius,
+                    width,
+                    color,
+                } => {
+                    reference_stroke(target, &state, scale_factor, *rect, *radius, *width, *color);
+                }
+                _ => panic!("reference renderer only supports the commands used by this test"),
             }
         }
         if saved_states.is_empty() {
@@ -1325,6 +1476,36 @@ mod tests {
                     continue;
                 }
                 if super::contains_rounded_rect(rect, radius, inverse.transform_point(point)) {
+                    super::blend_pixel(target, x, y, color);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reference_stroke(
+        target: &mut PixelBuffer,
+        state: &super::RenderState,
+        scale_factor: f32,
+        rect: Rect,
+        radius: f32,
+        width: f32,
+        color: Color,
+    ) {
+        let inverse = state
+            .transform
+            .inverse()
+            .expect("test transforms are invertible");
+        let bounds = super::expand(rect, width * 0.5);
+        let (start_x, start_y, end_x, end_y) =
+            super::physical_bounds(bounds, state.transform, target, scale_factor);
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                let point = super::logical_pixel_center(x, y, scale_factor);
+                if !state.clips.is_empty() && !super::is_visible(point, state) {
+                    continue;
+                }
+                if super::contains_stroke(rect, radius, width, inverse.transform_point(point)) {
                     super::blend_pixel(target, x, y, color);
                 }
             }
@@ -1723,9 +1904,21 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn scanline_fast_path_matches_per_pixel_reference() {
-        let mut rng = XorShift::new(0x9E37_79B9_7F4A_7C15);
+        scanline_matches_reference(0x9E37_79B9_7F4A_7C15, record_fill);
+    }
+
+    #[test]
+    fn stroke_scanline_matches_per_pixel_reference() {
+        scanline_matches_reference(0x243F_6A88_85A3_08D3, record_stroke);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn scanline_matches_reference(
+        seed: u64,
+        record: fn(&mut PaintContext<'_>, Rect, f32, bool, Color),
+    ) {
+        let mut rng = XorShift::new(seed);
         let scale_factors = [0.5_f32, 1.0, 1.25, 2.0];
         let alphas = [0_u8, 64, 128, 200, 255];
 
@@ -1808,7 +2001,7 @@ mod tests {
                     for clip in &clips {
                         context.push_clip(*clip);
                     }
-                    record_fill(context, shape, radius, rounded, color);
+                    record(context, shape, radius, rounded, color);
                     for _ in &clips {
                         context.pop_clip();
                     }
@@ -1818,7 +2011,7 @@ mod tests {
                     paint.push_clip(*clip);
                 }
                 paint.with_transform(transform, |context| {
-                    record_fill(context, shape, radius, rounded, color);
+                    record(context, shape, radius, rounded, color);
                 });
                 for _ in &clips {
                     paint.pop_clip();
@@ -1865,6 +2058,23 @@ mod tests {
             paint.fill_rounded_rect(shape, radius, color);
         } else {
             paint.fill_rect(shape, color);
+        }
+    }
+
+    fn record_stroke(
+        paint: &mut PaintContext<'_>,
+        shape: Rect,
+        radius: f32,
+        rounded: bool,
+        color: Color,
+    ) {
+        // Sweep thin to thick strokes, including ones wider than the shape so
+        // the hollow core collapses and the ring becomes a solid blob.
+        let width = 0.5 + radius.max(1.0) * 0.75;
+        if rounded {
+            paint.stroke_rounded_rect(shape, radius, width, color);
+        } else {
+            paint.stroke_rect(shape, width, color);
         }
     }
 
