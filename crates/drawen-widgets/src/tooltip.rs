@@ -246,6 +246,10 @@ impl Widget for Tooltip {
 
     fn paint(&self, _: &mut PaintContext<'_>, _: &UiEnvironment, _: Rect) {}
 
+    fn paints_floating(&self) -> bool {
+        true
+    }
+
     fn paint_floating(
         &self,
         context: &mut PaintContext<'_>,

@@ -308,6 +308,10 @@ impl Widget for ToastHost {
         LayoutResult::new(Size::ZERO)
     }
 
+    fn paints_floating(&self) -> bool {
+        true
+    }
+
     fn paint_floating(
         &self,
         context: &mut PaintContext<'_>,

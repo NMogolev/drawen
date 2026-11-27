@@ -462,6 +462,9 @@ pub struct UiRuntime {
     property_damage: Rc<PropertyDamage>,
     environment: UiEnvironment,
     overlay_roots: Vec<WidgetId>,
+    /// Widgets that record floating paint, kept in arena-index order so the
+    /// floating pass visits only them instead of every node each frame.
+    floating_painters: Vec<WidgetId>,
     /// Focus target to restore when each open overlay root closes, captured
     /// when the root first registers. Keys are overlay roots, not owners.
     overlay_restore_focus: HashMap<WidgetId, WidgetId>,
@@ -681,6 +684,7 @@ impl UiRuntime {
             property_damage: Rc::new(PropertyDamage::new()),
             environment,
             overlay_roots: Vec::new(),
+            floating_painters: Vec::new(),
             overlay_restore_focus: HashMap::new(),
             overlay_owner: HashMap::new(),
             viewport: None,
@@ -2251,14 +2255,10 @@ impl UiRuntime {
     /// bubble is non-interactive and positioned relative to the node's final
     /// bounds, but must not be clipped or covered by later siblings.
     fn paint_floating(&self, context: &mut PaintContext<'_>) {
-        for (index, slot) in self.nodes.iter().enumerate() {
-            let Some(node) = &slot.node else {
+        for &id in &self.floating_painters {
+            let Some(node) = self.node(id) else {
                 continue;
             };
-            let Ok(index) = u32::try_from(index) else {
-                continue;
-            };
-            let id = WidgetId::new(index, slot.generation);
             if !node.visible || !self.is_visible(id) {
                 continue;
             }
@@ -2928,6 +2928,7 @@ impl UiRuntime {
     }
 
     fn insert_node(&mut self, widget: Box<dyn Widget>, parent: Option<WidgetId>) -> WidgetId {
+        let paints_floating = widget.paints_floating();
         let node = Node {
             widget: Some(widget),
             parent,
@@ -2942,18 +2943,28 @@ impl UiRuntime {
             transition: NodeTransition::default(),
             overlay: None,
         };
-        if let Some(index) = self.free_slots.pop() {
+        let id = if let Some(index) = self.free_slots.pop() {
             let slot = &mut self.nodes[usize::try_from(index).expect("u32 fits usize")];
             slot.node = Some(node);
-            return WidgetId::new(index, slot.generation);
+            WidgetId::new(index, slot.generation)
+        } else {
+            let index =
+                u32::try_from(self.nodes.len()).expect("widget arena exceeds WidgetId capacity");
+            self.nodes.push(ArenaSlot {
+                generation: 0,
+                node: Some(node),
+            });
+            WidgetId::new(index, 0)
+        };
+        if paints_floating {
+            // Keep arena-index order so overlapping floating content paints in
+            // the same sequence as a full-tree walk would.
+            let position = self
+                .floating_painters
+                .partition_point(|painter| painter.index() < id.index());
+            self.floating_painters.insert(position, id);
         }
-        let index =
-            u32::try_from(self.nodes.len()).expect("widget arena exceeds WidgetId capacity");
-        self.nodes.push(ArenaSlot {
-            generation: 0,
-            node: Some(node),
-        });
-        WidgetId::new(index, 0)
+        id
     }
 
     fn deallocate_subtree(&mut self, id: WidgetId) {
@@ -2971,6 +2982,7 @@ impl UiRuntime {
         self.pointer_capture.retain(|_, captured| *captured != id);
         self.hovered.retain(|_, hovered| *hovered != id);
         self.overlay_roots.retain(|overlay| *overlay != id);
+        self.floating_painters.retain(|painter| *painter != id);
         self.overlay_restore_focus.remove(&id);
         self.overlay_owner.remove(&id);
         self.overlay_owner.retain(|_, owner| *owner != id);
@@ -5392,6 +5404,89 @@ mod tests {
             }
         });
         assert_eq!(last_fill, Some(Color::rgba8(0, 0, 255, 255)));
+    }
+
+    struct FloatingStack;
+
+    impl Widget for FloatingStack {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let mut children = Vec::new();
+            let mut y = 0.0;
+            for index in 0..context.child_count() {
+                let (child, child_size) = context
+                    .layout_child(index, Constraints::UNBOUNDED)
+                    .expect("stack child");
+                children.push(ChildLayout::new(child, Point::new(0.0, y)));
+                y += child_size.size().height();
+            }
+            LayoutResult::with_children(constraints.constrain(size(100.0, y)), children)
+        }
+    }
+
+    struct FloatingBadge;
+
+    impl Widget for FloatingBadge {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, _: Constraints) -> LayoutResult {
+            LayoutResult::new(size(20.0, 20.0))
+        }
+
+        fn paints_floating(&self) -> bool {
+            true
+        }
+
+        fn paint_floating(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::rgba8(0, 255, 0, 255));
+        }
+    }
+
+    #[test]
+    fn floating_registry_paints_non_overlay_widgets_and_forgets_removed_ones() {
+        let mut runtime = UiRuntime::new(FloatingStack);
+        let root = runtime.root();
+        runtime
+            .append_child(
+                root,
+                Solid {
+                    size: size(30.0, 30.0),
+                    color: Color::rgba8(255, 0, 0, 255),
+                    name: "plain",
+                    hits: Rc::new(RefCell::new(Vec::new())),
+                },
+            )
+            .expect("plain child");
+        let badge = runtime
+            .append_child(root, FloatingBadge)
+            .expect("badge child");
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+
+        let last_fill = |runtime: &mut UiRuntime| {
+            let mut display_list = DisplayList::new();
+            runtime
+                .paint(&mut PaintContext::new(&mut display_list))
+                .expect("paint succeeds");
+            display_list.commands().iter().rev().find_map(|command| {
+                if let DisplayCommand::FillRect { color, .. } = command {
+                    Some(*color)
+                } else {
+                    None
+                }
+            })
+        };
+        // The badge is not an overlay root, yet its floating paint lands above
+        // the earlier sibling because the registry still visits it.
+        assert_eq!(last_fill(&mut runtime), Some(Color::rgba8(0, 255, 0, 255)));
+
+        runtime.remove(badge).expect("badge removes");
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("relayout succeeds");
+        assert_eq!(last_fill(&mut runtime), Some(Color::rgba8(255, 0, 0, 255)));
     }
 
     struct ModalProbe {

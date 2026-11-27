@@ -50,6 +50,16 @@ pub trait Widget {
     ) {
     }
 
+    /// Returns whether this widget records anything in [`Widget::paint_floating`].
+    ///
+    /// The runtime keeps a registry of widgets that answer `true` so it can call
+    /// the floating hook without visiting every node in the tree each frame.
+    /// Override this alongside `paint_floating`; the default `false` matches the
+    /// no-op hook.
+    fn paints_floating(&self) -> bool {
+        false
+    }
+
     /// Records paint operations using the style resolved for this node.
     ///
     /// The default forwards to [`Widget::paint`] for widgets that only use the
@@ -231,6 +241,10 @@ where
         bounds: Rect,
     ) {
         (**self).paint_floating(context, environment, bounds);
+    }
+
+    fn paints_floating(&self) -> bool {
+        (**self).paints_floating()
     }
 
     fn advance_animation(&mut self, delta: Duration, settle: bool) -> bool {
