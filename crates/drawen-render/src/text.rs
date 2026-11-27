@@ -1,7 +1,10 @@
 use std::{
     collections::VecDeque,
     ops::Range,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use drawen_core::{Color, Point, Rect, Size};
@@ -17,6 +20,14 @@ use crate::font::{
 
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 256;
 const SHAPING_FRACTION_BITS: f32 = 64.0;
+
+/// Assigns each shaped layout a process-unique identity that survives cloning
+/// and recoloring, so renderers can cache derived bitmaps by identity.
+static NEXT_LAYOUT_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+fn next_layout_identity() -> u64 {
+    NEXT_LAYOUT_IDENTITY.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Styling information used by a text shaper.
 ///
@@ -231,8 +242,9 @@ impl TextCluster {
 }
 
 /// Precomputed text content, metrics, glyph placement, and caret geometry.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextLayout {
+    identity: u64,
     text: String,
     size: Size,
     color: Color,
@@ -242,7 +254,30 @@ pub struct TextLayout {
     line_ranges: Vec<Range<usize>>,
 }
 
+impl PartialEq for TextLayout {
+    fn eq(&self, other: &Self) -> bool {
+        // Identity is a renderer cache hint, not content; two independently
+        // shaped copies of the same text compare equal.
+        self.text == other.text
+            && self.size == other.size
+            && self.color == other.color
+            && self.glyph_runs == other.glyph_runs
+            && self.lines == other.lines
+            && self.clusters == other.clusters
+            && self.line_ranges == other.line_ranges
+    }
+}
+
 impl TextLayout {
+    /// Returns a process-unique identity stable across clones and recoloring.
+    ///
+    /// Renderers use this to cache derived resources (such as composed glyph
+    /// bitmaps) without re-deriving them for unchanged text.
+    #[must_use]
+    pub const fn identity(&self) -> u64 {
+        self.identity
+    }
+
     /// Creates an empty layout that remembers `text` and `color`.
     ///
     /// This is useful for widgets that defer shaping until they can query the
@@ -250,6 +285,7 @@ impl TextLayout {
     #[must_use]
     pub fn empty(text: &str, color: Color) -> Self {
         Self {
+            identity: next_layout_identity(),
             text: text.to_owned(),
             size: Size::ZERO,
             color,
@@ -840,6 +876,7 @@ impl FontdueTextShaper {
         let size = Size::new(width, y).unwrap_or(Size::ZERO);
 
         TextLayout {
+            identity: next_layout_identity(),
             text: text.to_owned(),
             size,
             color: style.color,
