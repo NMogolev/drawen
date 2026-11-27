@@ -1,7 +1,7 @@
 use core::fmt;
 
 use drawen_core::{Affine, Color, Diagnostic, DiagnosticReporter, Point, Rect, Size};
-use drawen_render::{DisplayCommand, DisplayList, RasterImage, TextLayout};
+use drawen_render::{DisplayCommand, DisplayList, FrameDamage, RasterImage, TextLayout};
 
 use crate::{Pixel, PixelBuffer};
 
@@ -35,27 +35,121 @@ impl SoftwareRenderer {
     ///
     /// Returns [`RenderError::InvalidScaleFactor`] for a non-finite or
     /// non-positive scale factor, and other errors for invalid commands.
-    #[allow(clippy::too_many_lines)]
     pub fn render_with_scale_factor(
         &self,
         display_list: &DisplayList,
         target: &mut PixelBuffer,
         scale_factor: f32,
     ) -> Result<(), RenderError> {
+        Self::render_commands(display_list, target, scale_factor, None)
+    }
+
+    /// Renders `display_list`, touching only the pixels reported by `damage`.
+    ///
+    /// The target must already hold the previous frame. [`FrameDamage::Region`]
+    /// resets the region to transparency and repaints it;
+    /// [`FrameDamage::Unchanged`] leaves the target untouched;
+    /// [`FrameDamage::Full`] repaints everything without clearing, matching
+    /// [`Self::render_with_scale_factor`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::render_with_scale_factor`].
+    pub fn render_with_damage(
+        &self,
+        display_list: &DisplayList,
+        target: &mut PixelBuffer,
+        scale_factor: f32,
+        damage: FrameDamage,
+    ) -> Result<(), RenderError> {
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            return Err(RenderError::InvalidScaleFactor);
+        }
+        let region = match damage {
+            FrameDamage::Full => {
+                return Self::render_commands(display_list, target, scale_factor, None);
+            }
+            FrameDamage::Unchanged => return Ok(()),
+            FrameDamage::Region(rect) => rect,
+        };
+        if region.is_empty() {
+            return Ok(());
+        }
+        let (start_x, start_y, end_x, end_y) =
+            physical_bounds(region, Affine::IDENTITY, target, scale_factor);
+        if start_x == end_x || start_y == end_y {
+            return Ok(());
+        }
+        for y in start_y..end_y {
+            if let Some(row) = target.row_mut(y) {
+                for pixel in &mut row[start_x as usize..end_x as usize] {
+                    *pixel = Pixel::TRANSPARENT;
+                }
+            }
+        }
+        // Align the repaint clip to the cleared pixels: a fractional region
+        // edge must not leave pixels that were cleared but fall outside the
+        // logical clip and would stay transparent.
+        let origin = Point::new(
+            as_logical_coordinate(start_x) / scale_factor,
+            as_logical_coordinate(start_y) / scale_factor,
+        );
+        let size = Size::new(
+            as_logical_coordinate(end_x - start_x) / scale_factor,
+            as_logical_coordinate(end_y - start_y) / scale_factor,
+        )
+        .map_err(|_| RenderError::NonFiniteGeometry)?;
+        Self::render_commands(
+            display_list,
+            target,
+            scale_factor,
+            Some(Rect::new(origin, size)),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_commands(
+        display_list: &DisplayList,
+        target: &mut PixelBuffer,
+        scale_factor: f32,
+        damage: Option<Rect>,
+    ) -> Result<(), RenderError> {
         if !scale_factor.is_finite() || scale_factor <= 0.0 {
             return Err(RenderError::InvalidScaleFactor);
         }
         let mut state = RenderState::default();
         let mut saved_states = Vec::new();
+        if let Some(damage) = damage {
+            // Renderer-owned base clip: no repainted pixel may fall outside
+            // the damage region, or translucent content would composite over
+            // the retained pixels a second time.
+            state.clips.push(Clip {
+                rect: damage,
+                inverse: Affine::IDENTITY,
+            });
+        }
 
         for command in display_list.commands() {
+            // Commands whose conservative bounds miss the damage region cannot
+            // change any repainted pixel. State commands always run.
+            if let Some(damage) = damage
+                && let Some(bounds) = command.conservative_bounds(state.transform)
+                && bounds.intersection(damage).is_empty()
+            {
+                continue;
+            }
             match command {
                 DisplayCommand::Save => saved_states.push(state.clone()),
                 DisplayCommand::Restore => {
                     state = saved_states.pop().ok_or(RenderError::UnmatchedRestore)?;
                 }
                 DisplayCommand::PopClip => {
-                    state.clips.pop().ok_or(RenderError::UnmatchedClipPop)?;
+                    // The damage clip is renderer-owned; an unbalanced display
+                    // list must still fail instead of popping it.
+                    if state.clips.len() <= usize::from(damage.is_some()) {
+                        return Err(RenderError::UnmatchedClipPop);
+                    }
+                    state.clips.pop();
                 }
                 DisplayCommand::Transform { transform } => {
                     if !transform.is_finite() {
@@ -1155,8 +1249,8 @@ fn image_coordinate(position: f32, length: u32) -> usize {
 mod tests {
     use drawen_core::{Affine, Color, DiagnosticSeverity, Point, Rect, Size};
     use drawen_render::{
-        DisplayCommand, DisplayList, FontdueTextShaper, PaintContext, RasterImage, TextStyle,
-        TextureId,
+        DisplayCommand, DisplayList, FontdueTextShaper, FrameDamage, PaintContext, RasterImage,
+        TextStyle, TextureId,
     };
 
     use super::{Pixel, PixelBuffer, RenderError, SoftwareRenderer};
@@ -1379,6 +1473,113 @@ mod tests {
             .expect("valid display list");
 
         assert_eq!(pixels.get(0, 0), Some(Pixel::rgba(143, 175, 207, 255)));
+    }
+
+    #[test]
+    fn damaged_region_repaints_only_its_own_pixels() {
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(rect(0.0, 0.0, 4.0, 4.0), Color::rgba8(255, 0, 0, 255));
+        paint.fill_rect(rect(2.0, 2.0, 2.0, 2.0), Color::rgba8(0, 0, 255, 255));
+        let mut pixels = PixelBuffer::new(4, 4).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut pixels)
+            .expect("valid display list");
+
+        // The blue square disappears; only its old placement is damaged.
+        let mut moved = DisplayList::new();
+        PaintContext::new(&mut moved)
+            .fill_rect(rect(0.0, 0.0, 4.0, 4.0), Color::rgba8(255, 0, 0, 255));
+        SoftwareRenderer
+            .render_with_damage(
+                &moved,
+                &mut pixels,
+                1.0,
+                FrameDamage::Region(rect(2.0, 2.0, 2.0, 2.0)),
+            )
+            .expect("valid display list");
+
+        assert_eq!(pixels.get(0, 0), Some(Pixel::rgba(255, 0, 0, 255)));
+        assert_eq!(pixels.get(2, 2), Some(Pixel::rgba(255, 0, 0, 255)));
+        assert_eq!(pixels.get(3, 3), Some(Pixel::rgba(255, 0, 0, 255)));
+    }
+
+    #[test]
+    fn unchanged_damage_leaves_the_target_alone() {
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list)
+            .fill_rect(rect(0.0, 0.0, 4.0, 4.0), Color::rgba8(0, 255, 0, 255));
+        let mut pixels = PixelBuffer::new(4, 4).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut pixels)
+            .expect("valid display list");
+        let before = pixels.clone();
+        let mut changed = DisplayList::new();
+        PaintContext::new(&mut changed)
+            .fill_rect(rect(0.0, 0.0, 4.0, 4.0), Color::rgba8(255, 255, 255, 255));
+        SoftwareRenderer
+            .render_with_damage(&changed, &mut pixels, 1.0, FrameDamage::Unchanged)
+            .expect("valid display list");
+        assert_eq!(pixels, before);
+    }
+
+    #[test]
+    fn damaged_region_matches_a_full_render_inside_the_region() {
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(rect(0.0, 0.0, 8.0, 8.0), Color::rgba8(30, 60, 90, 255));
+        paint.fill_rounded_rect(
+            rect(2.0, 2.0, 4.0, 4.0),
+            1.5,
+            Color::rgba8(200, 100, 50, 255),
+        );
+        let region = rect(1.0, 1.0, 6.0, 6.0);
+        let mut damaged = PixelBuffer::new(8, 8).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut damaged)
+            .expect("valid display list");
+        SoftwareRenderer
+            .render_with_damage(&list, &mut damaged, 1.0, FrameDamage::Region(region))
+            .expect("valid display list");
+        let mut full = PixelBuffer::new(8, 8).expect("small test buffer");
+        SoftwareRenderer
+            .render(&list, &mut full)
+            .expect("valid display list");
+        for y in 1..7 {
+            for x in 1..7 {
+                assert_eq!(damaged.get(x, y), full.get(x, y), "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_damage_edges_leave_no_cleared_pixels_behind() {
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list)
+            .fill_rect(rect(0.0, 0.0, 4.0, 4.0), Color::rgba8(255, 0, 0, 255));
+        let mut pixels = PixelBuffer::new(8, 8).expect("small test buffer");
+        SoftwareRenderer
+            .render_with_scale_factor(&list, &mut pixels, 2.0)
+            .expect("valid display list");
+        // The cleared physical span rounds outward past the logical region;
+        // the repaint clip must cover every cleared pixel center.
+        SoftwareRenderer
+            .render_with_damage(
+                &list,
+                &mut pixels,
+                2.0,
+                FrameDamage::Region(rect(0.3, 0.3, 3.0, 3.0)),
+            )
+            .expect("valid display list");
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(
+                    pixels.get(x, y),
+                    Some(Pixel::rgba(255, 0, 0, 255)),
+                    "pixel ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]
