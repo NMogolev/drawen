@@ -17,12 +17,14 @@ workspace = true
 # The default set keeps every renderer and widget available. Applications that
 # only need the headless core can use `--no-default-features` to drop `wgpu`,
 # Servo interop, and the Paleo media stack from the dependency graph.
-default = ["gpu", "browser", "media"]
+default = ["gpu", "browser", "media", "cubex"]
 # Enables the `wgpu` display-list renderer and `drawen::gpu`.
 gpu = ["dep:drawen-wgpu"]
 # Enables Servo browser surfaces and `drawen::browser`. Requires the GPU
 # renderer because browser frames are composited through `wgpu`.
 browser = ["dep:drawen-browser", "gpu"]
+# Enables CubeXView and the `drawen::cubex` module.
+cubex = ["dep:cubex", "drawen-widgets/cubex"]
 # Enables Video, AnimatedImage, PaleoSession, and the shared media contracts.
 media = ["drawen-widgets/media"]
 # Enables audio-mastered Paleo playback through the cpal output backend.
@@ -35,6 +37,7 @@ agent = ["dep:drawen-agent"]
 agent-serve = ["agent", "drawen-agent/serve"]
 
 [dependencies]
+cubex = { version = "0.3", path = "../cubex", optional = true }
 drawen-agent = { version = "0.3", path = "../drawen-agent", optional = true }
 drawen-browser = { version = "0.3", path = "../drawen-browser", optional = true }
 drawen-core = { version = "0.3", path = "../drawen-core" }

@@ -15,6 +15,8 @@ workspace = true
 # A direct dependency stays lean by default. The `drawen` facade enables
 # `media` from its own default feature set so applications keep Video available.
 default = []
+# Enables CubeXView, the software 3D scene surface.
+cubex = ["dep:cubex"]
 # Enables Video, AnimatedImage, PaleoSession, and the shared media contracts,
 # linking the Paleo player with its pure-Rust H.264, HEVC, VP9, and AV1
 # backends, plus the GIF decoder.
@@ -23,6 +25,7 @@ media = ["dep:image", "dep:paleo-player"]
 audio = ["media", "paleo-player/device"]
 
 [dependencies]
+cubex = { version = "0.3", path = "../cubex", optional = true }
 image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
 paleo-player = { version = "0.3", path = "../paleo-player", default-features = false, optional = true }
 drawen-core = { version = "0.3", path = "../drawen-core" }

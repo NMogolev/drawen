@@ -14,7 +14,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Crates that must not appear in the headless facade.
-const GATED_EXACT: &[&str] = &["accesskit_winit", "cpal", "drawen-browser", "image"];
+const GATED_EXACT: &[&str] = &[
+    "accesskit_winit",
+    "cpal",
+    "cubex",
+    "drawen-browser",
+    "image",
+];
 
 /// Prefixes of crates that must not appear in the headless facade.
 const GATED_PREFIXES: &[&str] = &[
@@ -76,7 +82,14 @@ fn no_default_features_stay_headless() {
 #[test]
 fn default_features_enable_the_renderers_and_media() {
     let tree = cargo_tree(&["-e", "normal", "-p", "drawen"]);
-    for crate_name in ["drawen-browser", "drawen-wgpu", "image", "paleo", "wgpu"] {
+    for crate_name in [
+        "cubex",
+        "drawen-browser",
+        "drawen-wgpu",
+        "image",
+        "paleo",
+        "wgpu",
+    ] {
         assert!(
             tree.contains(crate_name),
             "the default feature set no longer enables {crate_name}"
@@ -123,6 +136,26 @@ fn the_gpu_and_media_stacks_stay_independent() {
         assert!(
             !media.contains(crate_name),
             "the media feature pulls {crate_name}"
+        );
+    }
+}
+
+#[test]
+fn the_cubex_feature_stays_independent() {
+    let tree = cargo_tree(&[
+        "-e",
+        "normal",
+        "-p",
+        "drawen",
+        "--no-default-features",
+        "--features",
+        "cubex",
+    ]);
+    assert!(tree.contains("cubex"));
+    for crate_name in ["drawen-browser", "drawen-wgpu", "image", "paleo", "wgpu"] {
+        assert!(
+            !tree.contains(crate_name),
+            "the cubex feature pulls {crate_name}"
         );
     }
 }

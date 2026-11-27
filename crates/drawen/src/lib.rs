@@ -50,6 +50,7 @@
 //! - `gpu` enables the `wgpu` display-list renderer and [`gpu`].
 //! - `browser` enables Servo shared-texture surfaces and [`browser`]. It implies
 //!   `gpu`.
+//! - `cubex` enables the software 3D engine and [`cubex`].
 //! - `media` enables `Video`, `AnimatedImage`, `PaleoSession`, and the media
 //!   contracts.
 //! - `audio` enables audio-mastered Paleo playback through the platform output
@@ -88,6 +89,8 @@ pub use drawen_ui::{
 };
 #[cfg(feature = "audio")]
 pub use drawen_widgets::AudioPaleoSession;
+#[cfg(feature = "cubex")]
+pub use drawen_widgets::CubeXView;
 pub use drawen_widgets::{
     Alert, AlertTone, Align, Alignment, Autocomplete, AutocompletePopup, Avatar, AvatarStatus,
     Badge, BadgeTone, Box, Button, ButtonStyle, Card, CardStyle, Checkbox, ComboBox,
@@ -208,6 +211,18 @@ pub mod gpu {
     /// dependency, which keeps texture and device types compatible.
     pub use drawen_wgpu::wgpu;
     pub use drawen_wgpu::{GpuError, GpuRenderer, GpuRendererError, RenderStatus};
+}
+
+/// The `CubeX` software 3D engine and its Drawen view.
+///
+/// The module re-exports the `cubex` crate: math, meshes, a perspective
+/// camera, a scene of lit instances, and a deterministic software rasterizer.
+/// [`CubeXView`](crate::cubex::CubeXView) presents a scene as an ordinary
+/// retained widget.
+#[cfg(feature = "cubex")]
+pub mod cubex {
+    pub use ::cubex::*;
+    pub use drawen_widgets::CubeXView;
 }
 
 /// Servo browser surfaces and their Drawen widget.

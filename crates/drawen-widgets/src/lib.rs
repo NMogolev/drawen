@@ -13,6 +13,7 @@
 //! The `media` feature enables `Video`, `AudioPlayer`, `AnimatedImage`,
 //! `PaleoSession`, and the shared media contracts. The `audio` feature
 //! additionally enables `AudioPaleoSession` and links the `cpal` output backend.
+//! The `cubex` feature enables [`CubeXView`], a software 3D scene surface.
 
 mod alert;
 mod align;
@@ -30,6 +31,8 @@ mod button;
 mod card;
 mod checkbox;
 mod command_palette;
+#[cfg(feature = "cubex")]
+mod cubex_view;
 mod dialog;
 mod divider;
 mod dock_area;
@@ -93,6 +96,8 @@ pub use button::{Button, ButtonStyle};
 pub use card::{Card, CardStyle};
 pub use checkbox::Checkbox;
 pub use command_palette::{CommandPalette, PaletteCommand};
+#[cfg(feature = "cubex")]
+pub use cubex_view::CubeXView;
 pub use dialog::Dialog;
 pub use divider::{Divider, DividerAxis};
 pub use dock_area::{DockArea, DockAreaError, DockItem};
