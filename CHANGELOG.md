@@ -284,6 +284,25 @@ in the headings because the version itself must stay valid semver; see
   invalidation, so semantic bounds are current without recording a paint pass.
   The facade now re-exports `SemanticTree` and `SemanticNode`.
 
+### CubeX
+
+- Added the `cubex` crate, a dependency-free pure-Rust 3D layer: column-major
+  `Vec2`/`Vec3`/`Vec4`/`Mat3`/`Mat4`/`Quat`/`Transform` math, validated indexed
+  meshes with cube, plane, and sphere primitives, a perspective camera, and a
+  flat scene of lit instances.
+- The deterministic software rasterizer clips against the near and far planes,
+  culls back faces, interpolates normals with perspective correction,
+  depth-tests against a reusable buffer, and shades with ambient light plus any
+  number of directional lights. `Renderer::render` clears both buffers, so a
+  frame never depends on earlier frames.
+- Added `CubeXView` to `drawen-widgets`: it renders a scene at a fixed offscreen
+  resolution, caches the result as a `RasterImage`, orbits on pointer drag,
+  zooms on the wheel, and auto-rotates through the runtime animation path. The
+  facade exposes it as `drawen::cubex` behind the default `cubex` feature.
+- `docs/CUBEX.md` documents the conventions, scene model, renderer, widget, and
+  limits; `cubex_showcase` opens a native window and `spinning_cube` writes a
+  headless PPM sequence.
+
 ### Documentation
 
 - `RECIPES.md` grows to twelve patterns: tooltips, popovers, and floating

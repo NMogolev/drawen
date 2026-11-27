@@ -26,6 +26,10 @@ Non-negotiables:
   VP9, AV1; no audio), `Video::open_paleo_audio` (feature `audio`),
   `Video::open` (external FFmpeg, no audio). Background playback after the
   last window closes requires `MediaDirector::with_background_playback(true)`.
+- 3D content goes through `drawen::cubex`: build a `Scene` from indexed meshes
+  and a `Camera`, then present it with `CubeXView`. The rasterizer is
+  deterministic and headless; the view caches a `RasterImage` and stays on the
+  UI thread. Do not add a game loop or a second scene model inside a widget.
 - Forward `WindowPresentation` to `UiRuntime::set_presented` from
   `presentation_changed` and implement `tick` with `UiRuntime::tick`, so a
   hidden window advances media clocks without painting. Purely visual
@@ -42,6 +46,8 @@ Canonical files:
 - `crates/drawen/examples/minimal_window.rs`
 - `crates/drawen/examples/stateful_app.rs`
 - `crates/drawen/examples/bound_app.rs`
+- `crates/drawen/examples/cubex_showcase.rs`
 - `docs/RECIPES.md`
 - `docs/MEDIA.md`
+- `docs/CUBEX.md`
 - `docs/THREADING.md`

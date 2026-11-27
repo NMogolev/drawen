@@ -6,8 +6,8 @@
 
 **Drawen** is a Rust UI toolkit for native desktop applications. It combines a
 retained widget tree, backend-neutral display lists, CSS-inspired stylesheets,
-docking and workspaces, accessibility, and optional media and browser surfaces in
-one workspace.
+docking and workspaces, accessibility, and optional media, browser, and 3D
+surfaces in one workspace.
 
 The toolkit is designed around composition: widgets implement traits, describe
 layout and paint work, and remain independent of the renderer and windowing
@@ -167,9 +167,9 @@ timing; `stateful_app` adds application state.
 - **Docking and workspaces.** A serializable layout model with split panels,
   tabs, floating windows, MDI documents, and versioned JSON persistence.
 - **Accessibility.** Semantic roles, states, actions, and an AccessKit bridge.
-- **Media and browser surfaces.** In-process Paleo playback for H.264, HEVC, VP9,
-  AV1, and audio, an optional FFmpeg command-line backend, and Servo
-  shared-texture embedding.
+- **Media, browser, and 3D surfaces.** In-process Paleo playback for H.264, HEVC,
+  VP9, AV1, and audio, an optional FFmpeg command-line backend, Servo
+  shared-texture embedding, and the pure-Rust CubeX software 3D layer.
 
 ## Common recipes
 
@@ -190,6 +190,9 @@ Start there instead of inventing a second architecture:
   `AudioPlayer` with cover art, transport, shuffle, and repeat. Both share
   `PlayerTheme`, `PlayerBehavior`, and plain control sets; `Video::open_paleo`,
   `open_paleo_audio`, and the FFmpeg command-line path select the backend.
+- **3D scene** — `CubeXView` presents a `cubex::Scene` from a `cubex::Camera`.
+  Build the scene from `primitives::cube`, `plane`, or `sphere`, or from an
+  indexed `Mesh`; pointer drags orbit and the wheel zooms.
 
 ### Why `Button::new()` takes no text
 
@@ -221,6 +224,7 @@ remain available for headless tests, custom backends, and smaller binaries.
 | [`drawen-tasks`](https://crates.io/crates/drawen-tasks) | Worker pool, cancellation, progress, and the UI-thread dispatcher |
 | [`drawen-agent`](https://crates.io/crates/drawen-agent) | Graphics-free observation and control of the UI for LLM agents |
 | [`drawen-wgpu`](https://crates.io/crates/drawen-wgpu) | GPU display-list renderer |
+| [`cubex`](https://crates.io/crates/cubex) | Pure-Rust 3D math, meshes, cameras, and deterministic software rasterizer |
 | [`drawen-platform`](https://crates.io/crates/drawen-platform) | Platform-independent window and event contracts |
 | [`drawen-platform-winit`](https://crates.io/crates/drawen-platform-winit) | Native `winit` window adapter |
 | [`drawen-workspace`](https://crates.io/crates/drawen-workspace) | Persistent docking and document layouts |
@@ -241,19 +245,22 @@ remain available for headless tests, custom backends, and smaller binaries.
 
 ## Optional features
 
-The facade separates the headless core from the GPU, browser, and media stacks:
+The facade separates the headless core from the GPU, browser, media, and 3D
+stacks:
 
 | Feature | Default | Enables |
 | --- | --- | --- |
 | `gpu` | yes | `drawen::gpu` and the `wgpu` renderer |
 | `browser` | yes | `drawen::browser` and Servo shared-texture surfaces; implies `gpu` |
+| `cubex` | yes | `drawen::cubex` and `CubeXView`, the software 3D scene surface |
 | `media` | yes | `Video`, `AudioPlayer`, `AnimatedImage`, `PaleoSession`, and the media contracts |
 | `audio` | no | `AudioPaleoSession` and the `cpal` output device; implies `media` |
 | `director` | no | `MediaDirector` playback policy; implies `media` |
 | `agent` | no | `drawen::agent`, the LLM agent bridge over the semantic tree |
 | `agent-serve` | no | The bridge's loopback JSON-lines TCP endpoint; implies `agent` |
 
-A headless application can drop the GPU, Servo, and Paleo dependency graphs:
+A headless application can drop the GPU, Servo, Paleo, and CubeX dependency
+graphs:
 
 ```text
 cargo add drawen --no-default-features
@@ -367,6 +374,16 @@ player. The limits that surprise new applications most often:
 - Multiple tracks, subtitles, chapters, adaptive bitrate, and encoding are not
   implemented.
 
+**3D**
+
+- CubeX renders opaque triangles on the CPU with a depth buffer, near/far
+  clipping, back-face culling, and Lambert directional lighting. Textures,
+  transparency, shadows, skeletal animation, and a hierarchical scene graph are
+  not implemented.
+- The software rasterizer targets correctness and small interactive scenes, not
+  large scenes or high frame rates. `CubeXView` renders at a fixed offscreen
+  resolution and scales the cached image into its bounds.
+
 **Platforms**
 
 - Windows and Linux are the primary tested targets. macOS compiles through the
@@ -391,12 +408,14 @@ cargo run -p drawen --example style_showcase --features audio
 cargo run -p drawen --example workspace
 cargo run -p drawen --example calculator
 cargo run -p drawen --example custom_titlebar
+cargo run -p drawen --example cubex_showcase
 ```
 
 `headless_tutorial` and `style_showcase` render without opening a window.
-`minimal_window`, `stateful_app`, `hello_drawen`, `calculator`, and
-`custom_titlebar` use the native `winit` adapter. `workspace` demonstrates
-docking, tabs, floating panels, and persisted layout data.
+`minimal_window`, `stateful_app`, `hello_drawen`, `calculator`,
+`custom_titlebar`, and `cubex_showcase` use the native `winit` adapter.
+`workspace` demonstrates docking, tabs, floating panels, and persisted layout
+data.
 
 The `audio` invocation enables the Style Lab's local video-with-audio and audio
 file import controls.
@@ -413,6 +432,7 @@ file import controls.
 - [Custom window chrome](https://github.com/NMogolev/drawen/blob/main/docs/WINDOW_CHROME.md)
 - [Media pipeline and backends](https://github.com/NMogolev/drawen/blob/main/docs/MEDIA.md)
 - [Paleo media layer](https://github.com/NMogolev/drawen/blob/main/docs/PALEO.md)
+- [CubeX 3D layer](https://github.com/NMogolev/drawen/blob/main/docs/CUBEX.md)
 - [Background work and threading](https://github.com/NMogolev/drawen/blob/main/docs/THREADING.md)
 - [Versioning and release policy](https://github.com/NMogolev/drawen/blob/main/docs/RELEASING.md)
 - [Using an AI assistant with Drawen](https://github.com/NMogolev/drawen/blob/main/docs/AI_GUIDE.md)
