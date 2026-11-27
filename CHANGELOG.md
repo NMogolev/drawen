@@ -20,6 +20,13 @@ in the headings because the version itself must stay valid semver; see
   `changed()` fires on user edits, steps, and commits. ArrowUp/ArrowDown and the
   stepper buttons step by `step`; Enter commits, Escape reverts, and losing
   focus commits. Invalid text reverts to the last committed number.
+- Native windows now receive the operating system clipboard through the new
+  `WindowApplication::attach_clipboard` hook: the winit adapter delivers an
+  `ArboardClipboard` once before the first event, and applications forward it to
+  `UiRuntime::set_clipboard`. Cut, copy, and paste in `TextField`, `TextEdit`,
+  `NumberInput`, and selectable `Text` now reach the OS clipboard in the demos
+  instead of staying in the runtime's in-memory clipboard. `Box<dyn Clipboard>`
+  implements `Clipboard` so the hook value can be passed straight through.
 
 ## 0.3.0 - 2026-11-25
 

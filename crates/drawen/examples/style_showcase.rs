@@ -15,7 +15,7 @@ use std::{
 
 use drawen::{
     Alert, AlertTone, Avatar, AvatarStatus, Badge, BadgeTone, Box as DrawenBox, Button, Checkbox,
-    ChildLayout, Color, CommandPalette, Constraints, Divider, DockArea, DockAxis, Dropdown,
+    ChildLayout, Clipboard, Color, CommandPalette, Constraints, Divider, DockArea, DockAxis, Dropdown,
     Expander, Image, Insets, LayoutContext, LayoutNode, LayoutResult, ListView, Menu, MenuBar,
     MenuEntry, Modal, PaletteCommand, PanelId, Point, Popover, PopoverTrigger, ProgressBar,
     RadioButton, RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton, Slider, Spinner,
@@ -723,6 +723,10 @@ impl WindowApplication for StyleShowcase {
             .with_decorations(false)
             .with_resizable(true)
             .with_min_size(valid_size(720.0, 520.0))
+    }
+
+    fn attach_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.runtime.set_clipboard(clipboard);
     }
 
     fn window_event(&mut self, event: WindowEvent) -> WindowAction {

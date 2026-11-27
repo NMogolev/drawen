@@ -1128,6 +1128,11 @@ Rules for copyable text:
   byte range maps through the same shaped layout the widget paints.
 - Copying uses the runtime clipboard, so a headless runtime keeps an in-memory
   clipboard and tests can assert the copied string directly.
+- In a native window, forward the platform clipboard so copies reach the
+  operating system: implement `WindowApplication::attach_clipboard` and call
+  `runtime.set_clipboard(clipboard)`. The winit adapter supplies an OS-backed
+  clipboard through that hook automatically; without the forwarding step the
+  runtime keeps its in-memory clipboard and copies stay inside the app.
 
 ## 15. A number input
 

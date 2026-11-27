@@ -327,6 +327,23 @@ committed number. `value()` is a `Property<f64>` (every write is clamped), while
 `changed()` fires only on user interaction. See
 [RECIPES.md](RECIPES.md#15-a-number-input).
 
+### "Copy from my native window never reaches the OS clipboard."
+
+The runtime starts with an in-memory clipboard. The winit adapter delivers an
+OS-backed clipboard once through `WindowApplication::attach_clipboard`; forward
+it to the runtime:
+
+```rust
+fn attach_clipboard(&mut self, clipboard: Box<dyn drawen::Clipboard>) {
+    self.runtime.set_clipboard(clipboard);
+}
+```
+
+Without that override, cut/copy/paste only touch the in-memory clipboard, so
+pasting into another application sees nothing. Headless runtimes and tests keep
+the in-memory clipboard on purpose. See
+[RECIPES.md](RECIPES.md#14-copyable-text).
+
 ### "Play this MP4 and turn on the sound."
 
 Choose the backend explicitly:

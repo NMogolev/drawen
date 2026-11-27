@@ -12,9 +12,9 @@
 use std::rc::Rc;
 
 use drawen::{
-    Binding, Button, Checkbox, ChildLayout, Color, Constraints, LayoutContext, LayoutResult,
-    NumberInput, Point, Property, Rect, Size, Subscription, Text, TextField, UiEnvironment,
-    UiRuntime, Widget,
+    Binding, Button, Checkbox, ChildLayout, Clipboard, Color, Constraints, LayoutContext,
+    LayoutResult, NumberInput, Point, Property, Rect, Size, Subscription, Text, TextField,
+    UiEnvironment, UiRuntime, Widget,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -244,6 +244,10 @@ impl BoundApp {
 impl WindowApplication for BoundApp {
     fn window_options(&self) -> WindowOptions {
         WindowOptions::new("Drawen bindings", self.size)
+    }
+
+    fn attach_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
+        self.runtime.set_clipboard(clipboard);
     }
 
     fn window_event(&mut self, event: WindowEvent) -> WindowAction {
