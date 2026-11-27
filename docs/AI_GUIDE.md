@@ -111,7 +111,10 @@ and one redraw path. The canonical runnable example is
 [`stateful_app.rs`](../crates/drawen/examples/stateful_app.rs). A state signal
 handler should set a dirty flag; the event loop calls `invalidate_paint()` and
 returns `WindowAction::RequestRedraw`. Call `invalidate_layout()` only when
-geometry changes.
+geometry changes. When only one widget or region changed, prefer
+`invalidate_paint_for(id)` / `invalidate_rect(rect)` so the backend repaints
+just that area, and forward `runtime.frame_damage()` from
+`WindowApplication::frame_damage` (see [PERFORMANCE.md](PERFORMANCE.md)).
 
 Do not invent a reactive dependency graph, hooks, or a global store. A
 `Signal<T>` is a synchronous notification channel, not an observable framework.

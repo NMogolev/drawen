@@ -6,6 +6,35 @@ in the headings because the version itself must stay valid semver; see
 
 ## Unreleased
 
+### Performance
+
+- Frames are now event-driven end to end. Input events invalidate paint only
+  when they change something (handled events, redraw requests, hover/press/
+  focus/overlay state), equal property writes record no damage, and state
+  changes within one event turn coalesce into a single repaint.
+- `UiRuntime::invalidate_paint_for(widget_id)` and `invalidate_rect(rect)`
+  record local damage: the union of old and new bounds plus a 24px effect
+  margin for shadows, focus rings, and strokes. Bounded animations opt in via
+  `Widget::local_animation_damage` (`AnimatedImage`, `AudioPlayer`,
+  `CubeXView`, `Video`); floating surfaces keep full-frame damage.
+- New `FrameDamage` (`Full` / `Region` / `Unchanged`) in `drawen-render`,
+  reported by `UiRuntime::frame_damage()` and the new
+  `WindowApplication::frame_damage` hook (default `Full`). The winit adapter
+  forwards it to the backend, and the canonical examples override the hook.
+- The GPU renderer rasterizes into a retained offscreen texture: damaged
+  regions load the previous pixels, reset to transparency, and repaint only
+  commands whose conservative bounds intersect the region; unchanged frames
+  skip rasterization and blit the retained frame. Resize forces one full
+  frame. `DisplayCommand::conservative_bounds` provides transform-aware,
+  effect-inclusive bounds for culling.
+- `SoftwareRenderer::render_with_damage` repaints only the reported region
+  under a pixel-aligned damage clip, giving headless tests and benchmarks the
+  same partial-repaint semantics.
+- `frame_benchmark` gained damage sections: on the reference machine a single
+  damaged region rasterizes ~160x faster than a full software repaint, and the
+  end-to-end `invalidate_rect` path ~75x faster. Methodology and diagnostics
+  are documented in the new `docs/PERFORMANCE.md`.
+
 ### Widgets
 
 - `Text::selectable()` opts a label into read-only selection: drag to select a

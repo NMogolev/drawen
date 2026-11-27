@@ -16,6 +16,9 @@ Non-negotiables:
 - `Button::new()` takes no label. Append a `Text` child.
 - State is plain Rust. On a state change, invalidate paint and return
   `WindowAction::RequestRedraw`; invalidate layout only when geometry changes.
+  Prefer `invalidate_paint_for(id)` / `invalidate_rect(rect)` for local changes
+  and forward `UiRuntime::frame_damage` from `WindowApplication::frame_damage`
+  so backends repaint only the damaged region.
 - `Property<T>` stores state with a change signal; `UiRuntime::bind(&target,
   &source)` is a thin one-way copy that wakes redraws. Keep the `Binding`
   alive. No dependency graph, no two-way magic.
@@ -51,3 +54,4 @@ Canonical files:
 - `docs/MEDIA.md`
 - `docs/CUBEX.md`
 - `docs/THREADING.md`
+- `docs/PERFORMANCE.md`
