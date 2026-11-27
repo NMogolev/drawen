@@ -67,6 +67,20 @@ impl Camera {
         self
     }
 
+    /// Returns this camera at a different position.
+    #[must_use]
+    pub const fn with_position(mut self, position: Vec3) -> Self {
+        self.position = position;
+        self
+    }
+
+    /// Returns this camera looking at a different target.
+    #[must_use]
+    pub const fn with_target(mut self, target: Vec3) -> Self {
+        self.target = target;
+        self
+    }
+
     /// Returns this camera with a vertical field of view in radians.
     ///
     /// # Panics
