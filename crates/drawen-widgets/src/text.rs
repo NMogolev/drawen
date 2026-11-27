@@ -1,18 +1,37 @@
-use drawen_core::{Constraints, Rect};
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
+
+use drawen_core::{
+    Constraints, InputEvent, Key, Modifiers, NamedKey, Point, PointerButton, PointerId, Rect,
+};
 use drawen_render::{Font, FontdueTextShaper, PaintContext, TextLayout, TextShaper, TextStyle};
 use drawen_ui::{
-    Accessibility, AccessibilityRole, DssStyle, LayoutContext, LayoutResult, StyleTarget,
-    UiEnvironment, Widget,
+    Accessibility, AccessibilityRole, AccessibilityState, DssStyle, EventContext, EventPhase,
+    EventStatus, LayoutContext, LayoutResult, StyleTarget, UiEnvironment, Widget,
 };
+
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 /// A widget that paints text.
 ///
 /// [`Self::new`] accepts a pre-shaped layout for fixed-size text. Use
 /// [`Self::wrapping`] for text that must reflow to its available width with a
 /// specific shaper, or [`Self::styled`] to use the runtime's font database.
+///
+/// By default the text is decorative: it ignores pointer input and focus. Call
+/// [`Self::selectable`] to let the reader drag a selection, double-click a word,
+/// and copy it with Ctrl+C (Ctrl+A selects everything). A selectable label still
+/// never edits its text.
 pub struct Text {
     layout: TextLayout,
     source: Option<TextSource>,
+    selectable: bool,
+    selection: Range<usize>,
+    anchor: usize,
+    dragging: Option<PointerId>,
+    last_click: Option<(Instant, Point)>,
 }
 
 struct TextSource {
@@ -36,6 +55,11 @@ impl Text {
         Self {
             layout,
             source: None,
+            selectable: false,
+            selection: 0..0,
+            anchor: 0,
+            dragging: None,
+            last_click: None,
         }
     }
 
@@ -55,6 +79,11 @@ impl Text {
                 style,
                 last_layout: None,
             }),
+            selectable: false,
+            selection: 0..0,
+            anchor: 0,
+            dragging: None,
+            last_click: None,
         }
     }
 
@@ -75,6 +104,11 @@ impl Text {
                 style,
                 last_layout: None,
             }),
+            selectable: false,
+            selection: 0..0,
+            anchor: 0,
+            dragging: None,
+            last_click: None,
         }
     }
 
@@ -83,6 +117,82 @@ impl Text {
     pub const fn text_layout(&self) -> &TextLayout {
         &self.layout
     }
+
+    /// Makes the text selectable so the reader can copy it.
+    ///
+    /// A selectable label accepts focus and pointer input: drag to select a
+    /// range, double-click to select a word, Shift-click to extend, Ctrl+C to
+    /// copy, Ctrl+A to select everything, and Escape to clear. The text itself
+    /// is never edited.
+    #[must_use]
+    pub const fn selectable(mut self) -> Self {
+        self.selectable = true;
+        self
+    }
+
+    /// Returns the currently selected byte range, empty when nothing is selected.
+    #[must_use]
+    pub fn selection(&self) -> Range<usize> {
+        self.selection.clone()
+    }
+
+    fn byte_at(&self, position: Point) -> usize {
+        self.layout.byte_at_point(position)
+    }
+
+    fn set_selection(&mut self, anchor: usize, focus: usize) {
+        self.anchor = anchor;
+        self.selection = if anchor <= focus {
+            anchor..focus
+        } else {
+            focus..anchor
+        };
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        (!self.selection.is_empty()).then(|| &self.layout.text()[self.selection.clone()])
+    }
+
+    fn select_word_at(&mut self, byte: usize) {
+        let text = self.layout.text();
+        let mut start = byte;
+        let mut end = byte;
+        while start > 0 {
+            let previous = previous_boundary(text, start);
+            if !text[previous..start].chars().all(is_word_character) {
+                break;
+            }
+            start = previous;
+        }
+        while end < text.len() {
+            let next = next_boundary(text, end);
+            if !text[end..next].chars().all(is_word_character) {
+                break;
+            }
+            end = next;
+        }
+        self.set_selection(start, end);
+    }
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn previous_boundary(text: &str, byte: usize) -> usize {
+    let mut boundary = byte.saturating_sub(1);
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn next_boundary(text: &str, byte: usize) -> usize {
+    let mut boundary = (byte + 1).min(text.len());
+    while boundary < text.len() && !text.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    boundary
 }
 
 impl Widget for Text {
@@ -135,7 +245,7 @@ impl Widget for Text {
     fn paint_styled(
         &self,
         context: &mut PaintContext<'_>,
-        _: &UiEnvironment,
+        environment: &UiEnvironment,
         bounds: Rect,
         style: &DssStyle,
     ) {
@@ -143,15 +253,108 @@ impl Widget for Text {
             Some(color) if color != self.layout.color() => self.layout.clone().with_color(color),
             _ => self.layout.clone(),
         };
+        if self.selectable && !self.selection.is_empty() {
+            let selection_color = environment.theme().selection();
+            for rect in layout.selection_rects(self.selection.clone()) {
+                context.fill_rect(
+                    Rect::new(
+                        Point::new(rect.origin.x + bounds.origin.x, rect.origin.y + bounds.origin.y),
+                        rect.size,
+                    ),
+                    selection_color,
+                );
+            }
+        }
         context.draw_text(layout, bounds.origin);
     }
 
+    fn handle_event(&mut self, context: &mut EventContext<'_>, event: &InputEvent) -> EventStatus {
+        if !self.selectable || context.phase() != EventPhase::Target {
+            return EventStatus::Ignored;
+        }
+        match event {
+            InputEvent::PointerDown(pointer) if pointer.button == Some(PointerButton::Primary) => {
+                context.request_focus();
+                context.capture_pointer(pointer.pointer_id);
+                let now = Instant::now();
+                let double_click = self.last_click.is_some_and(|(time, last)| {
+                    now.duration_since(time) <= DOUBLE_CLICK_INTERVAL
+                        && (last.x - pointer.position.x).abs() <= 4.0
+                        && (last.y - pointer.position.y).abs() <= 4.0
+                });
+                self.last_click = Some((now, pointer.position));
+                let byte = self.byte_at(pointer.position);
+                if double_click {
+                    self.select_word_at(byte);
+                } else if pointer.modifiers.contains(Modifiers::SHIFT) {
+                    self.set_selection(self.anchor, byte);
+                } else {
+                    self.set_selection(byte, byte);
+                }
+                self.dragging = Some(pointer.pointer_id);
+                context.request_redraw();
+                EventStatus::Handled
+            }
+            InputEvent::PointerMove(pointer) if self.dragging == Some(pointer.pointer_id) => {
+                let byte = self.byte_at(pointer.position);
+                self.set_selection(self.anchor, byte);
+                context.request_redraw();
+                EventStatus::Handled
+            }
+            InputEvent::PointerUp(pointer) if self.dragging == Some(pointer.pointer_id) => {
+                self.dragging = None;
+                context.release_pointer(pointer.pointer_id);
+                EventStatus::Handled
+            }
+            InputEvent::PointerCancel(pointer) if self.dragging == Some(pointer.pointer_id) => {
+                self.dragging = None;
+                context.release_pointer(pointer.pointer_id);
+                context.request_redraw();
+                EventStatus::Handled
+            }
+            InputEvent::KeyDown(key) if !key.repeat => {
+                let command = key.modifiers.contains(Modifiers::CONTROL)
+                    || key.modifiers.contains(Modifiers::META);
+                match &key.key {
+                    Key::Character(character) if command && character.eq_ignore_ascii_case("c") => {
+                        if let Some(selection) = self.selected_text() {
+                            context.write_clipboard(selection);
+                        }
+                        EventStatus::Handled
+                    }
+                    Key::Character(character) if command && character.eq_ignore_ascii_case("a") => {
+                        self.set_selection(0, self.layout.text().len());
+                        context.request_redraw();
+                        EventStatus::Handled
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        self.set_selection(0, 0);
+                        context.request_redraw();
+                        EventStatus::Handled
+                    }
+                    _ => EventStatus::Ignored,
+                }
+            }
+            _ => EventStatus::Ignored,
+        }
+    }
+
     fn participates_in_hit_test(&self) -> bool {
-        false
+        self.selectable
+    }
+
+    fn accepts_focus(&self) -> bool {
+        self.selectable
     }
 
     fn accessibility(&self) -> Accessibility {
-        Accessibility::new(AccessibilityRole::Label).with_value(self.layout.text())
+        let accessibility =
+            Accessibility::new(AccessibilityRole::Label).with_value(self.layout.text());
+        if self.selectable {
+            accessibility.with_states(AccessibilityState::FOCUSABLE | AccessibilityState::READ_ONLY)
+        } else {
+            accessibility
+        }
     }
 }
 
@@ -255,5 +458,165 @@ mod tests {
             ))
             .expect("resized layout succeeds");
         assert_eq!(calls.get(), 2);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use drawen_core::{
+        Clipboard, Color, Constraints, InputEvent, Key, KeyCode, Modifiers, NamedKey, Point,
+        PointerButton, PointerButtons, PointerEvent, PointerId, Size,
+    };
+    use drawen_render::{FontdueTextShaper, TextLayout, TextStyle};
+    use drawen_ui::UiRuntime;
+
+    use super::Text;
+
+    #[derive(Clone, Default)]
+    struct SharedClipboard(Rc<RefCell<String>>);
+
+    impl Clipboard for SharedClipboard {
+        fn read_text(&mut self) -> Option<String> {
+            let text = self.0.borrow();
+            (!text.is_empty()).then(|| text.clone())
+        }
+
+        fn write_text(&mut self, text: &str) {
+            text.clone_into(&mut self.0.borrow_mut());
+        }
+    }
+
+    fn pointer(position: Point, up: bool) -> InputEvent {
+        let event = PointerEvent {
+            pointer_id: PointerId(1),
+            position,
+            button: Some(PointerButton::Primary),
+            buttons: if up {
+                PointerButtons::NONE
+            } else {
+                PointerButtons::PRIMARY
+            },
+            modifiers: Modifiers::NONE,
+        };
+        if up {
+            InputEvent::PointerUp(event)
+        } else {
+            InputEvent::PointerDown(event)
+        }
+    }
+
+    fn drag(position: Point) -> InputEvent {
+        InputEvent::PointerMove(PointerEvent {
+            pointer_id: PointerId(1),
+            position,
+            button: None,
+            buttons: PointerButtons::PRIMARY,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    fn command(character: &str) -> InputEvent {
+        InputEvent::KeyDown(drawen_core::KeyEvent {
+            key: Key::Character(character.to_string()),
+            code: KeyCode::Unidentified,
+            repeat: false,
+            modifiers: Modifiers::CONTROL,
+        })
+    }
+
+    fn named(key: NamedKey) -> InputEvent {
+        InputEvent::KeyDown(drawen_core::KeyEvent {
+            key: Key::Named(key),
+            code: KeyCode::Unidentified,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    fn sample() -> (TextLayout, UiRuntime, SharedClipboard) {
+        let layout = FontdueTextShaper::ubuntu_light().layout(
+            "hello world",
+            &TextStyle::new(16.0, Color::BLACK),
+            None,
+        );
+        let mut runtime = UiRuntime::new(Text::new(layout.clone()).selectable());
+        let clipboard = SharedClipboard::default();
+        runtime.set_clipboard(clipboard.clone());
+        runtime
+            .layout(Constraints::loose(
+                Size::new(400.0, 100.0).expect("valid constraints"),
+            ))
+            .expect("layout succeeds");
+        (layout, runtime, clipboard)
+    }
+
+    fn middle_y(layout: &TextLayout) -> f32 {
+        layout.size().height() / 2.0
+    }
+
+    #[test]
+    fn dragging_across_the_text_selects_and_copies_everything() {
+        let (layout, mut runtime, clipboard) = sample();
+        let y = middle_y(&layout);
+        let _ = runtime.dispatch_event(&pointer(Point::new(0.0, y), false));
+        let _ = runtime.dispatch_event(&drag(Point::new(layout.size().width() + 50.0, y)));
+        let _ = runtime.dispatch_event(&pointer(
+            Point::new(layout.size().width() + 50.0, y),
+            true,
+        ));
+        let _ = runtime.dispatch_event(&command("c"));
+        assert_eq!(*clipboard.0.borrow(), "hello world");
+    }
+
+    #[test]
+    fn double_click_selects_a_word_and_copies_it() {
+        let (layout, mut runtime, clipboard) = sample();
+        let point = Point::new(layout.caret_x(8) + 1.0, middle_y(&layout));
+        let _ = runtime.dispatch_event(&pointer(point, false));
+        let _ = runtime.dispatch_event(&pointer(point, true));
+        let _ = runtime.dispatch_event(&pointer(point, false));
+        let _ = runtime.dispatch_event(&pointer(point, true));
+        let _ = runtime.dispatch_event(&command("c"));
+        assert_eq!(*clipboard.0.borrow(), "world");
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_escape_clears() {
+        let (_layout, mut runtime, clipboard) = sample();
+        runtime
+            .focus_widget(runtime.root())
+            .expect("selectable text accepts focus");
+        let _ = runtime.dispatch_event(&command("a"));
+        let _ = runtime.dispatch_event(&command("c"));
+        assert_eq!(*clipboard.0.borrow(), "hello world");
+
+        clipboard.0.borrow_mut().clear();
+        let _ = runtime.dispatch_event(&named(NamedKey::Escape));
+        let _ = runtime.dispatch_event(&command("c"));
+        assert!(clipboard.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn plain_text_is_not_selectable() {
+        let layout = FontdueTextShaper::ubuntu_light().layout(
+            "hello world",
+            &TextStyle::new(16.0, Color::BLACK),
+            None,
+        );
+        let mut runtime = UiRuntime::new(Text::new(layout));
+        let clipboard = SharedClipboard::default();
+        runtime.set_clipboard(clipboard.clone());
+        runtime
+            .layout(Constraints::loose(
+                Size::new(400.0, 100.0).expect("valid constraints"),
+            ))
+            .expect("layout succeeds");
+        assert!(runtime.focus_widget(runtime.root()).is_ok());
+        assert!(runtime.focused_widget().is_none());
+        let _ = runtime.dispatch_event(&command("a"));
+        let _ = runtime.dispatch_event(&command("c"));
+        assert!(clipboard.0.borrow().is_empty());
     }
 }
