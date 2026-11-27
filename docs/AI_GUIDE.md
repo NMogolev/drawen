@@ -75,6 +75,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A numeric field with steppers | `NumberInput::new().with_range(min, max).with_step(s)`; `value()` is a `Property<f64>`, arrows and steppers step, Enter commits |
 | An interval with two thumbs | `RangeSlider::with_value(min, max, lo, hi)`; `value()` is a `Property<(f32, f32)>`, thumbs stop at each other, arrows select and step |
 | A hierarchical tree with selection | `TreeView::new().with_roots(vec![TreeNode::new(id, label).child(...)])`; `selected()` is a `Property<Option<String>>` of node ids, twisties expand, Enter/double-click activates |
+| A calendar date picker | `DatePicker::with_month(y, m).with_value(Date::new(y, m, d)?)`; `selected()` is a `Property<Option<Date>>`, header arrows and PageUp/PageDown page months, no platform clock |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
@@ -365,6 +366,25 @@ Click a twisty to expand or collapse (`toggled()`), click a row to select
 navigate, expand, and collapse; ids survive structure changes, so bind the id
 property rather than row indices. See
 [RECIPES.md](RECIPES.md#17-a-tree-view).
+
+### "Let the user pick a date from a calendar."
+
+`DatePicker` shows one month at a time and never reads the platform clock, so
+give it the initial date yourself:
+
+```rust
+let picker = DatePicker::with_month(2026, 11)
+    .with_value(Date::new(2026, 11, 27).expect("valid date"));
+let selected = picker.selected(); // Property<Option<Date>>
+let picker = runtime.append_child(parent, picker)?;
+let _binding = runtime.bind(&selected, &state.deadline);
+```
+
+Click a day or press Enter on the cursor to select (`changed()`); header arrows
+and PageUp/PageDown page months; arrow keys walk days and weeks across month
+boundaries. `Date::new` validates leap years and formats as `YYYY-MM-DD`. For a
+dropdown field, host the picker in a `Popover`. See
+[RECIPES.md](RECIPES.md#18-a-date-picker).
 
 ### "Copy from my native window never reaches the OS clipboard."
 

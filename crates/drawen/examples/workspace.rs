@@ -7,9 +7,9 @@
 use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 use drawen::{
-    Button, ChildLayout, Color, Constraints, DockArea, DocumentId, LayoutContext, LayoutNode,
-    LayoutResult, PanelId, Point, Rect, Size, Subscription, TreeNode, TreeView, UiEnvironment,
-    UiRuntime, Widget, WorkspaceLayout,
+    Button, ChildLayout, Color, Constraints, Date, DatePicker, DockArea, DocumentId, LayoutContext,
+    LayoutNode, LayoutResult, PanelId, Point, Rect, Size, Subscription, TreeNode, TreeView,
+    UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -81,13 +81,23 @@ impl WorkspaceDemo {
         }
         let dock = runtime.append_child(root, dock_area).expect("root exists");
         append_project_panel(&mut runtime, dock, &mut subscriptions);
-        append_panel(
+        let inspector = append_panel(
             &mut runtime,
             dock,
             "Inspector",
-            "Transform\nPosition  12, 48\nScale       1.0",
+            "",
             Color::rgba8(73, 55, 88, 255),
         );
+        // A calendar in the Inspector panel: the widget never reads the
+        // platform clock, so the demo supplies the initial date.
+        let picker = DatePicker::with_month(2026, 11)
+            .with_value(Date::new(2026, 11, 27).expect("demo date is valid"));
+        subscriptions.push(picker.changed().subscribe(move |date| {
+            println!("Deadline: {}", date.map_or_else(|| "<none>".to_owned(), |d| d.to_string()));
+        }));
+        runtime
+            .append_child(inspector, picker)
+            .expect("inspector panel exists");
         append_panel(
             &mut runtime,
             dock,

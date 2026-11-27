@@ -94,7 +94,7 @@ pub use drawen_widgets::CubeXView;
 pub use drawen_widgets::{
     Alert, AlertTone, Align, Alignment, Autocomplete, AutocompletePopup, Avatar, AvatarStatus,
     Badge, BadgeTone, Box, Button, ButtonStyle, Card, CardStyle, Checkbox, ComboBox,
-    CommandPalette, Container, Dialog, Divider, DividerAxis, DockArea, DockAreaError, DockItem,
+    CommandPalette, Container, Date, DatePicker, Dialog, Divider, DividerAxis, DockArea, DockAreaError, DockItem,
     Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, Menu, MenuBar, MenuEntry, Modal,
     ModalHandle, NumberInput, Padding, PaletteCommand, Popover, PopoverTrigger, ProgressBar, RadioButton,
     RadioGroup, RangeSlider, ScrollAxis, ScrollView, SegmentedControl, SelectionMode, SelectionModel, SizedBox,

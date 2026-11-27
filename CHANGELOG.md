@@ -41,6 +41,13 @@ in the headings because the version itself must stay valid semver; see
   intent. Arrow keys navigate, expand, and collapse; the wheel scrolls content
   taller than the control. The workspace demo's Project panel now hosts a live
   tree.
+- Added `DatePicker` and `Date`, a Monday-first month calendar for picking a
+  single civil date. `Date` validates leap years, computes weekdays, and adds
+  days across month boundaries without a clock dependency; the widget never
+  reads platform time. `selected()` is a `Property<Option<Date>>` and the
+  displayed page a `Property<(i32, u8)>`; header arrows and PageUp/PageDown page
+  months, arrow keys walk the cursor, Enter/Space select. The workspace demo's
+  Inspector panel now hosts a calendar.
 
 ## 0.3.0 - 2026-11-25
 

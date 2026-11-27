@@ -1284,3 +1284,46 @@ Rules for tree views:
   `collapse` emit only the property signal or nothing.
 - Style it through the `tree-view` style target; rows paint the theme selection
   color, and the focused cursor row gets a soft accent outline.
+
+## 18. A date picker
+
+`DatePicker` is a month calendar for picking a single civil date. It carries no
+clock: widgets never read platform time, so the application supplies the
+initial date:
+
+```rust
+use drawen::{Date, DatePicker};
+
+let picker = DatePicker::with_month(2026, 11)
+    .with_value(Date::new(2026, 11, 27).expect("valid date"));
+let selected = picker.selected(); // Property<Option<Date>>
+let picker = runtime.append_child(parent, picker)?;
+let _binding = runtime.bind(&selected, &state.deadline);
+```
+
+`Date` is a small proleptic-Gregorian value type: `Date::new` validates month
+and day (including leap years), `weekday()` returns Monday-zero weekdays, and
+`add_days` crosses month and year boundaries correctly. It formats as
+`YYYY-MM-DD`.
+
+Interaction:
+
+- Clicking a day selects it and emits `changed()`; the header arrows page
+  months, as do `PageUp`/`PageDown`.
+- Arrow keys move the cursor by a day or a week, crossing into the neighboring
+  month when needed; `Home`/`End` jump to the month ends; Enter or Space
+  selects the cursor day.
+- The displayed month is its own `Property<(i32, u8)>` (`month()`), so state
+  can drive the visible page; the cursor day clamps when a month is shorter.
+- Weeks start on Monday; days of the neighboring months paint muted and are
+  not clickable.
+
+Rules for date pickers:
+
+- Bind `selected()` for the value and `month()` for the visible page; use
+  `changed()` for user picks only. Programmatic `set_selected` and `show_month`
+  emit only property signals.
+- For a dropdown field, place the picker inside a `Popover` anchored to a
+  button or text field; the calendar itself is an ordinary inline widget.
+- Style it through the `date-picker` style target; the selected day paints the
+  theme selection color and the focused cursor day a soft accent outline.
