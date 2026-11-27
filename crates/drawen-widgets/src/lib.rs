@@ -33,6 +33,7 @@ mod checkbox;
 mod command_palette;
 #[cfg(feature = "cubex")]
 mod cubex_view;
+mod date_picker;
 mod dialog;
 mod divider;
 mod dock_area;
@@ -101,6 +102,7 @@ pub use checkbox::Checkbox;
 pub use command_palette::{CommandPalette, PaletteCommand};
 #[cfg(feature = "cubex")]
 pub use cubex_view::CubeXView;
+pub use date_picker::{Date, DatePicker};
 pub use dialog::Dialog;
 pub use divider::{Divider, DividerAxis};
 pub use dock_area::{DockArea, DockAreaError, DockItem};
