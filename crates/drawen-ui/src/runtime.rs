@@ -13,7 +13,7 @@ use drawen_core::{
     Modifiers, NamedKey, Point, PointerButton, PointerId, Rect, Size, WidgetId,
 };
 use drawen_render::{
-    DisplayList, DisplayListStats, PaintContext, PaintTransition, TextLayoutCacheStats,
+    DisplayList, DisplayListStats, FrameDamage, PaintContext, PaintTransition, TextLayoutCacheStats,
 };
 use drawen_signals::{Binding, Property, PropertyDamage};
 
@@ -714,6 +714,24 @@ impl UiRuntime {
     #[must_use]
     pub const fn frame_diagnostics(&self) -> FrameDiagnostics {
         self.stats
+    }
+
+    /// Returns the region a backend must rasterize for the most recent frame.
+    ///
+    /// Call this immediately after [`Self::paint`] and forward the result to
+    /// the backend alongside the display list. A reused display list reports
+    /// [`FrameDamage::Unchanged`]; a rebuilt one reports its recorded damage,
+    /// or [`FrameDamage::Full`] when no region is known (including before the
+    /// first paint), which is always safe.
+    #[must_use]
+    pub const fn frame_damage(&self) -> FrameDamage {
+        if self.stats.last_paint_reused() && self.stats.paint_passes() > 0 {
+            return FrameDamage::Unchanged;
+        }
+        match self.stats.last_damage() {
+            Some(rect) => FrameDamage::Region(rect),
+            None => FrameDamage::Full,
+        }
     }
 
     /// Returns mutable access to the shared environment and invalidates layout.
@@ -3066,7 +3084,7 @@ mod tests {
         Color, Constraints, InputEvent, Key, Modifiers, NamedKey, Point, PointerButton,
         PointerButtons, PointerEvent, PointerId, Rect, Size, WidgetId,
     };
-    use drawen_render::{DisplayCommand, DisplayList, PaintContext};
+    use drawen_render::{DisplayCommand, DisplayList, FrameDamage, PaintContext};
 
     use crate::{
         ChildLayout, DismissPolicy, EventContext, EventPhase, EventStatus, LayoutContext,
@@ -4482,6 +4500,30 @@ mod tests {
         // Empty regions change nothing and must not schedule a frame.
         runtime.invalidate_rect(Rect::ZERO);
         assert!(!runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn frame_damage_reports_region_then_unchanged() {
+        let (mut runtime, _child) = panel_runtime(AnimationProbe {
+            local: true,
+            change_pending: false,
+        });
+        assert_eq!(runtime.frame_damage(), FrameDamage::Full);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+
+        let region = Rect::new(Point::new(10.0, 10.0), size(30.0, 30.0));
+        runtime.invalidate_rect(region);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("localized paint succeeds");
+        assert_eq!(runtime.frame_damage(), FrameDamage::Region(region));
+
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("reused paint succeeds");
+        assert_eq!(runtime.frame_damage(), FrameDamage::Unchanged);
     }
 
     #[test]
