@@ -323,9 +323,6 @@ pub enum DisplayCommand {
 
 /// Antialiasing slack added to shape bounds for damage culling.
 const SHAPE_CULL_MARGIN: f32 = 2.0;
-/// Glyph bitmaps can overshoot the advance-based layout size (bearings and
-/// italic overhang), so text gets a wider culling margin than shapes.
-const TEXT_CULL_MARGIN: f32 = 8.0;
 
 impl DisplayCommand {
     /// Returns conservative bounds of the pixels this command can touch,
@@ -347,7 +344,11 @@ impl DisplayCommand {
             }
             Self::Shadow { rect, blur, .. } => (*rect, blur + SHAPE_CULL_MARGIN),
             Self::DrawText { layout, origin } => {
-                (Rect::new(*origin, layout.size()), TEXT_CULL_MARGIN)
+                // Glyph bitmaps can overshoot the advance-based layout size
+                // (negative bearings, italic overhang), so text gets a margin
+                // proportional to its line height instead of a fixed slack.
+                let margin = layout.size().height() * 0.5 + SHAPE_CULL_MARGIN;
+                (Rect::new(*origin, layout.size()), margin)
             }
             Self::DrawImage { destination, .. } | Self::DrawTexture { destination, .. } => {
                 (*destination, SHAPE_CULL_MARGIN)
