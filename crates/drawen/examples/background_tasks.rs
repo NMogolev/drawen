@@ -20,7 +20,7 @@ use drawen::{
         WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation,
         WindowWaker,
     },
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
     tasks::{TaskPool, UiDispatcher, UiSender},
 };
 
@@ -277,6 +277,10 @@ impl WindowApplication for TaskApp {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

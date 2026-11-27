@@ -11,7 +11,7 @@ use drawen::{
     LayoutNode, LayoutResult, PanelId, Point, Rect, Size, Subscription, TreeNode, TreeView,
     UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 const TOOLBAR_HEIGHT: f32 = 44.0;
@@ -181,6 +181,10 @@ impl WindowApplication for WorkspaceDemo {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

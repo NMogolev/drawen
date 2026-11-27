@@ -26,7 +26,7 @@ use drawen::{
     platform::{
         WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation, action_for,
     },
-    render::{DisplayList, PaintContext, RasterImage, TextLayout, TextStyle},
+    render::{DisplayList, FrameDamage, PaintContext, RasterImage, TextLayout, TextStyle},
 };
 
 #[cfg(feature = "media")]
@@ -791,6 +791,10 @@ impl WindowApplication for StyleShowcase {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

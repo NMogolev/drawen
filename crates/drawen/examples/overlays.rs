@@ -25,7 +25,7 @@ use drawen::{
     PopoverTrigger, Rect, Row, Size, SizedBox, SplitButton, Subscription, Text, Toast, ToastHost,
     ToastTone, Tooltip, UiEnvironment, UiRuntime, Widget, WidgetId,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
@@ -752,6 +752,10 @@ impl WindowApplication for OverlayDemo {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

@@ -8,7 +8,7 @@ use std::{cell::Cell, rc::Rc};
 use drawen::{
     Box as DrawenBox, Button, Color, Constraints, Size, Subscription, Text, UiRuntime,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
@@ -101,6 +101,10 @@ impl WindowApplication for HelloDrawen {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

@@ -9,7 +9,7 @@ use drawen::{
     LayoutContext, LayoutNode, LayoutResult, NamedKey, PanelId, Point, Rect, Size, Theme,
     UiEnvironment, UiRuntime, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 const WINDOW_WIDTH: f32 = 1_140.0;
@@ -260,6 +260,10 @@ impl WindowApplication for CalculatorApp {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

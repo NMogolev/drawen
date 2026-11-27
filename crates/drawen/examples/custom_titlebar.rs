@@ -13,7 +13,7 @@ use drawen::{
     platform::{
         WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation, action_for,
     },
-    render::{DisplayList, PaintContext, TextStyle},
+    render::{DisplayList, FrameDamage, PaintContext, TextStyle},
 };
 
 const WINDOW_WIDTH: f32 = 960.0;
@@ -317,6 +317,10 @@ impl WindowApplication for CustomTitleBar {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

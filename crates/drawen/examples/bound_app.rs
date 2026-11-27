@@ -17,7 +17,7 @@ use drawen::{
     LayoutResult, NumberInput, Point, Property, RangeSlider, Rect, Size, Subscription, Text,
     TextField, UiEnvironment, UiRuntime, Widget,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
@@ -308,6 +308,10 @@ impl WindowApplication for BoundApp {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {

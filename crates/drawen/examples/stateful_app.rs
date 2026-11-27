@@ -15,7 +15,7 @@ use drawen::{
     Button, ChildLayout, Color, Constraints, LayoutContext, LayoutResult, Point, Rect, Size,
     Subscription, Text, UiEnvironment, UiRuntime, Widget,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
-    render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
+    render::{DisplayList, FontdueTextShaper, FrameDamage, PaintContext, TextStyle},
 };
 
 fn main() -> Result<(), drawen_platform_winit::RunError> {
@@ -171,6 +171,10 @@ impl WindowApplication for CounterApp {
     fn presentation_changed(&mut self, presentation: WindowPresentation) -> WindowAction {
         self.runtime.set_presented(presentation.is_presented());
         WindowAction::None
+    }
+
+    fn frame_damage(&self) -> FrameDamage {
+        self.runtime.frame_damage()
     }
 
     fn redraw(&mut self) -> DisplayList {
