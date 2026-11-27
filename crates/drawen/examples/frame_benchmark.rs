@@ -14,7 +14,7 @@ use std::{
 use drawen::{
     Color, Constraints, InputEvent, Modifiers, Point, Rect, Size, UiRuntime, VirtualDataSource,
     VirtualList, WheelDelta, WheelEvent, Widget,
-    render::{DisplayList, PaintContext},
+    render::{DisplayList, FrameDamage, PaintContext},
     software::{PixelBuffer, SoftwareRenderer},
 };
 
@@ -27,6 +27,8 @@ fn main() {
     retained_frame_benchmark();
     software_fill_benchmark(1_920, 1_080);
     software_fill_benchmark(3_840, 2_160);
+    software_damage_benchmark(1_920, 1_080);
+    runtime_local_damage_benchmark();
     virtual_list_scroll_benchmark();
 }
 
@@ -77,6 +79,101 @@ fn software_fill_benchmark(width: u32, height: u32) {
     println!(
         "  median fill rate {:.2} Gpixel/s\n",
         pixels_per_second / 1e9
+    );
+}
+
+fn software_damage_benchmark(width: u32, height: u32) {
+    // A dense grid of rounded fills and strokes gives the culler many commands
+    // to skip when only a small region is damaged.
+    let mut list = DisplayList::new();
+    {
+        let mut paint = PaintContext::new(&mut list);
+        let cell = 40.0;
+        let mut y = 0.0;
+        while y < u32_to_f32(height) {
+            let mut x = 0.0;
+            while x < u32_to_f32(width) {
+                let rect = Rect::new(
+                    Point::new(x + 2.0, y + 2.0),
+                    fixed_size(cell - 4.0, cell - 4.0),
+                );
+                paint.fill_rounded_rect(rect, 6.0, Color::rgba8(32, 96, 160, 255));
+                paint.stroke_rounded_rect(rect, 6.0, 1.5, Color::rgba8(200, 220, 240, 255));
+                x += cell;
+            }
+            y += cell;
+        }
+    }
+
+    let renderer = SoftwareRenderer;
+    let mut pixels =
+        PixelBuffer::new(width, height).expect("benchmark buffer dimensions are valid");
+    renderer.render(&list, &mut pixels).expect("scene renders");
+
+    let full = measure(|| {
+        renderer.render(&list, &mut pixels).expect("scene renders");
+    });
+    // A single damaged cell, grown by the effect margin the runtime uses.
+    let region = Rect::new(Point::new(400.0, 300.0), fixed_size(88.0, 88.0));
+    let damaged = measure(|| {
+        renderer
+            .render_with_damage(&list, &mut pixels, 1.0, FrameDamage::Region(region))
+            .expect("scene renders");
+    });
+    let unchanged = measure(|| {
+        renderer
+            .render_with_damage(&list, &mut pixels, 1.0, FrameDamage::Unchanged)
+            .expect("scene renders");
+    });
+
+    println!("software damage {width}x{height} ({} commands)", list.len());
+    println!("  full repaint");
+    print_timing(&full);
+    println!("  one damaged region");
+    print_timing(&damaged);
+    println!("  unchanged frame");
+    print_timing(&unchanged);
+    let speedup = percentile(&full, 50).as_secs_f64() / percentile(&damaged, 50).as_secs_f64();
+    println!("  median region speedup {speedup:.1}x\n");
+}
+
+fn runtime_local_damage_benchmark() {
+    let size = fixed_size(WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = UiRuntime::new(GridScene);
+    layout(&mut runtime, size);
+    let list = paint_frame(&mut runtime);
+
+    let renderer = SoftwareRenderer;
+    let mut pixels = PixelBuffer::new(1_280, 800).expect("benchmark buffer dimensions are valid");
+    renderer.render(&list, &mut pixels).expect("scene renders");
+
+    // Full invalidation rebuilds and repaints the whole window.
+    let full = measure(|| {
+        runtime.invalidate_paint();
+        let list = paint_frame(&mut runtime);
+        renderer.render(&list, &mut pixels).expect("scene renders");
+    });
+    // Local invalidation reports a region the backend can rasterize alone.
+    let region = Rect::new(Point::new(400.0, 300.0), fixed_size(88.0, 88.0));
+    let mut reported_region = false;
+    let local = measure(|| {
+        runtime.invalidate_rect(region);
+        let list = paint_frame(&mut runtime);
+        let damage = runtime.frame_damage();
+        reported_region = matches!(damage, FrameDamage::Region(_));
+        renderer
+            .render_with_damage(&list, &mut pixels, 1.0, damage)
+            .expect("scene renders");
+    });
+
+    println!("runtime local damage (grid scene, 1280x800)");
+    println!("  full invalidate + repaint");
+    print_timing(&full);
+    println!("  invalidate_rect + damage repaint");
+    print_timing(&local);
+    println!(
+        "  runtime reported a region: {reported_region}  speedup {:.1}x\n",
+        percentile(&full, 50).as_secs_f64() / percentile(&local, 50).as_secs_f64()
     );
 }
 
@@ -179,6 +276,41 @@ impl Widget for FillScene {
 
     fn paint(&self, context: &mut PaintContext<'_>, _: &drawen::UiEnvironment, bounds: Rect) {
         context.fill_rect(bounds, Color::rgba8(32, 96, 160, 255));
+    }
+}
+
+struct GridScene;
+
+impl Widget for GridScene {
+    fn layout(
+        &mut self,
+        _: &mut drawen::LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> drawen::LayoutResult {
+        drawen::LayoutResult::new(constraints.constrain(fixed_size(WINDOW_WIDTH, WINDOW_HEIGHT)))
+    }
+
+    fn style_target(&self) -> drawen::StyleTarget {
+        drawen::StyleTarget::new("benchmark-grid")
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, _: &drawen::UiEnvironment, bounds: Rect) {
+        context.fill_rect(bounds, Color::rgba8(16, 20, 26, 255));
+        let cell = 40.0;
+        let mut y = bounds.origin.y;
+        while y + cell <= bounds.bottom() {
+            let mut x = bounds.origin.x;
+            while x + cell <= bounds.right() {
+                let rect = Rect::new(
+                    Point::new(x + 2.0, y + 2.0),
+                    fixed_size(cell - 4.0, cell - 4.0),
+                );
+                context.fill_rounded_rect(rect, 6.0, Color::rgba8(32, 96, 160, 255));
+                context.stroke_rounded_rect(rect, 6.0, 1.5, Color::rgba8(200, 220, 240, 255));
+                x += cell;
+            }
+            y += cell;
+        }
     }
 }
 
