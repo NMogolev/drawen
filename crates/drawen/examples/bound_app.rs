@@ -2,17 +2,19 @@
 //!
 //! Application state lives in `Property` cells. Widget signals write into
 //! those cells, property subscriptions derive validity, and
-//! `UiRuntime::bind` copies validity into `Button::enabled`. Watched and bound
-//! properties wake the runtime themselves, so the event loop needs no dirty
-//! flag: `take_redraw_request` already reports every property change.
+//! `UiRuntime::bind` copies validity into `Button::enabled` and a quantity into
+//! `NumberInput::value`. Watched and bound properties wake the runtime
+//! themselves, so the event loop needs no dirty flag: `take_redraw_request`
+//! already reports every property change.
 //!
 //! Run it with `cargo run -p drawen --example bound_app`.
 
 use std::rc::Rc;
 
 use drawen::{
-    Binding, Button, Checkbox, ChildLayout, Color, Constraints, LayoutContext, LayoutResult, Point,
-    Property, Rect, Size, Subscription, Text, TextField, UiEnvironment, UiRuntime, Widget,
+    Binding, Button, Checkbox, ChildLayout, Color, Constraints, LayoutContext, LayoutResult,
+    NumberInput, Point, Property, Rect, Size, Subscription, Text, TextField, UiEnvironment,
+    UiRuntime, Widget,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -25,6 +27,7 @@ fn main() -> Result<(), drawen_platform_winit::RunError> {
 struct FormState {
     name: Property<String>,
     agreed: Property<bool>,
+    quantity: Property<f64>,
     is_valid: Property<bool>,
     submissions: Property<u32>,
 }
@@ -34,6 +37,7 @@ impl FormState {
         Self {
             name: Property::new(String::new()),
             agreed: Property::new(false),
+            quantity: Property::new(1.0),
             is_valid: Property::new(false),
             submissions: Property::new(0),
         }
@@ -96,6 +100,13 @@ impl Widget for FormView {
             Point::new(bounds.origin.x + 24.0, bounds.origin.y + 48.0),
         );
 
+        let quantity = format!("Quantity: {}", self.state.quantity.get());
+        let quantity = shaper.layout(&quantity, &TextStyle::new(12.0, muted), None);
+        context.draw_text(
+            quantity,
+            Point::new(bounds.origin.x + 24.0, bounds.origin.y + 76.0),
+        );
+
         let hint = if self.state.is_valid.get() {
             "Ready to submit."
         } else {
@@ -104,7 +115,7 @@ impl Widget for FormView {
         let hint = shaper.layout(hint, &TextStyle::new(12.0, muted), None);
         context.draw_text(
             hint,
-            Point::new(bounds.origin.x + 24.0, bounds.origin.y + 240.0),
+            Point::new(bounds.origin.x + 24.0, bounds.origin.y + 284.0),
         );
     }
 
@@ -156,6 +167,20 @@ impl BoundApp {
             )
             .expect("checkbox exists");
 
+        // A numeric field bound to state: the binding copies state into the
+        // widget, and the user-only `changed` signal writes back.
+        let number = NumberInput::new().with_range(1.0, 99.0).with_value(1.0);
+        let quantity_subscription = number.changed().subscribe({
+            let state = Rc::clone(&state);
+            move |value| {
+                state.quantity.set(*value);
+            }
+        });
+        let number_value = number.value();
+        runtime
+            .append_child(runtime.root(), number)
+            .expect("root exists");
+
         let button = Button::new();
         let enabled = button.enabled();
         let submit_subscription = button.activated().subscribe({
@@ -176,7 +201,12 @@ impl BoundApp {
 
         // Property subscriptions derive validity; the binding drives the
         // widget. Both wake redraws without an application dirty flag.
-        let mut subscriptions = vec![name_subscription, agreed_subscription, submit_subscription];
+        let mut subscriptions = vec![
+            name_subscription,
+            agreed_subscription,
+            quantity_subscription,
+            submit_subscription,
+        ];
         subscriptions.push(state.name.subscribe({
             let state = Rc::clone(&state);
             move |_| state.revalidate()
@@ -186,9 +216,11 @@ impl BoundApp {
             move |_| state.revalidate()
         }));
         let binding = runtime.bind(&enabled, &state.is_valid);
+        let quantity_binding = runtime.bind(&number_value, &state.quantity);
         runtime.watch(&state.submissions);
+        runtime.watch(&state.quantity);
 
-        let size = Size::new(480.0, 320.0).expect("window size is valid");
+        let size = Size::new(480.0, 360.0).expect("window size is valid");
         runtime
             .layout(Constraints::tight(size).expect("window constraints are valid"))
             .expect("layout succeeds");
@@ -196,7 +228,7 @@ impl BoundApp {
         Self {
             runtime,
             size,
-            _bindings: vec![binding],
+            _bindings: vec![binding, quantity_binding],
             _subscriptions: subscriptions,
         }
     }

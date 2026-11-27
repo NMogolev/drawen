@@ -96,7 +96,7 @@ pub use drawen_widgets::{
     Badge, BadgeTone, Box, Button, ButtonStyle, Card, CardStyle, Checkbox, ComboBox,
     CommandPalette, Container, Dialog, Divider, DividerAxis, DockArea, DockAreaError, DockItem,
     Dropdown, Expander, Image, ImageFit, ImageViewer, ListView, Menu, MenuBar, MenuEntry, Modal,
-    ModalHandle, Padding, PaletteCommand, Popover, PopoverTrigger, ProgressBar, RadioButton,
+    ModalHandle, NumberInput, Padding, PaletteCommand, Popover, PopoverTrigger, ProgressBar, RadioButton,
     RadioGroup, ScrollAxis, ScrollView, SegmentedControl, SelectionMode, SelectionModel, SizedBox,
     Skeleton, Slider, Spinner, SplitAxis, SplitButton, Splitter, Stack, Switch, TabBar, Text,
     TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toast, ToastCorner, ToastHandle,

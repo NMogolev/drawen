@@ -13,6 +13,13 @@ in the headings because the version itself must stay valid semver; see
   select everything, and Escape to clear. The selection paints with the theme
   selection color and the text is never edited. Plain `Text` stays decorative
   and ignores pointer input and focus.
+- Added `NumberInput`, a single-line numeric entry control with stacked
+  increment/decrement steppers. It edits through the shared grapheme-aware
+  editor, accepts only numeric characters, and commits a parsed number clamped
+  to `[minimum, maximum]`. The value is a `Property<f64>` for binding;
+  `changed()` fires on user edits, steps, and commits. ArrowUp/ArrowDown and the
+  stepper buttons step by `step`; Enter commits, Escape reverts, and losing
+  focus commits. Invalid text reverts to the last committed number.
 
 ## 0.3.0 - 2026-11-25
 

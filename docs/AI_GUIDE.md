@@ -72,6 +72,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | Transient corner notifications | `ToastHost` + `ToastHandle::show(Toast::new("..."))`; cards paint above the tree and expire on their own |
 | A primary action plus a dropdown | `SplitButton::new("Save")` with one `Menu` child; `activated()` runs the action, the arrow floats the menu |
 | Copyable read-only text | `Text::styled("...", style).selectable()`; drag or double-click to select, Ctrl+C copies, the text is never edited |
+| A numeric field with steppers | `NumberInput::new().with_range(min, max).with_step(s)`; `value()` is a `Property<f64>`, arrows and steppers step, Enter commits |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
@@ -305,6 +306,26 @@ Ctrl+C to copy, Ctrl+A to select everything, and Escape to clear. The selection
 paints with the theme selection color; the text is never edited and the widget
 reports a read-only, focusable label to accessibility. Use a `TextEdit` instead
 when the user must change the text.
+
+### "Add a numeric input with up/down steppers."
+
+`NumberInput` edits a number, not free text. Give it a range and a step, then
+bind its value property to state:
+
+```rust
+let input = NumberInput::new().with_range(0.0, 100.0).with_step(1.0).with_value(10.0);
+let value = input.value();
+let changed = input.changed();
+let input = runtime.append_child(parent, input)?;
+let _binding = runtime.bind(&value, &state.amount);
+```
+
+Only numeric characters are accepted. ArrowUp/ArrowDown and the stacked arrows
+on the right step by `step`, clamped to the range. Enter commits the typed text,
+Escape reverts, and losing focus commits; unparseable text reverts to the last
+committed number. `value()` is a `Property<f64>` (every write is clamped), while
+`changed()` fires only on user interaction. See
+[RECIPES.md](RECIPES.md#15-a-number-input).
 
 ### "Play this MP4 and turn on the sound."
 

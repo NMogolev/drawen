@@ -1128,3 +1128,56 @@ Rules for copyable text:
   byte range maps through the same shaped layout the widget paints.
 - Copying uses the runtime clipboard, so a headless runtime keeps an in-memory
   clipboard and tests can assert the copied string directly.
+
+## 15. A number input
+
+`NumberInput` is a single-line numeric entry control with stacked increment and
+decrement steppers. It edits through the same grapheme-aware editor as
+`TextField`, but accepts only numeric characters and commits a parsed, clamped
+number:
+
+```rust
+use drawen::NumberInput;
+
+let input = NumberInput::new()
+    .with_range(0.0, 100.0)
+    .with_step(1.0)
+    .with_value(10.0);
+let value = input.value();       // Property<f64>, every write clamped
+let changed = input.changed();   // user edits, steps, and commits only
+let input = runtime.append_child(parent, input)?;
+```
+
+The value is a `Property<f64>`, so bind state with
+`runtime.bind(&input.value(), &state.amount)` and read the scalar with
+`input.value().get()`. A reversed range is swapped, NaN bounds become infinite,
+and a non-positive step falls back to one.
+
+Interaction:
+
+- ArrowUp / ArrowDown step by `step`; the stacked arrows on the right do the
+  same with the pointer. Every step is clamped to `[minimum, maximum]`.
+- Type a number and press Enter to commit, or just move focus away — losing
+  focus commits. Escape reverts to the last committed number.
+- Non-numeric characters are dropped as you type. Text that does not parse to a
+  finite number reverts on commit; a valid number is clamped into the range.
+- Caret movement, selection, clipboard, and undo work like `TextField`.
+
+```rust
+let _binding = runtime.bind(&value, &state.amount); // state -> widget
+let _subscription = changed.subscribe(move |number| {
+    state.amount.set(*number); // widget -> state
+});
+```
+
+Rules for number inputs:
+
+- Use `changed()` for user intent and `value().changed()` for every write,
+  exactly like the other bindable controls. Programmatic `set_value` emits the
+  property signal but not `changed()`.
+- The committed number and the in-progress text are distinct: typing does not
+  change `value()` until a commit or step, so a half-typed `-` or `1.` never
+  pushes an invalid number into bound state.
+- Style it through the `number-input` style target; padding, background, border,
+  corner radius, and foreground resolve from DSS or the theme. The stepper
+  column shares the surface and is separated by a one-pixel divider.
