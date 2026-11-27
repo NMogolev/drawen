@@ -75,6 +75,7 @@ mod title_bar;
 mod toast;
 mod toolbar;
 mod tooltip;
+mod tree_view;
 #[cfg(feature = "media")]
 mod video;
 #[cfg(feature = "media")]
@@ -147,6 +148,7 @@ pub use title_bar::{TitleBar, TitleBarStyle, WindowChromeState, WindowControl};
 pub use toast::{Toast, ToastCorner, ToastHandle, ToastHost, ToastTone};
 pub use toolbar::Toolbar;
 pub use tooltip::Tooltip;
+pub use tree_view::{TreeNode, TreeView};
 #[cfg(feature = "media")]
 pub use video::Video;
 #[cfg(feature = "media")]
