@@ -12,7 +12,7 @@
 use std::{sync::Arc, time::Duration};
 
 use drawen_core::{Clipboard, InputEvent, Rect, Size};
-use drawen_render::DisplayList;
+use drawen_render::{DisplayList, FrameDamage};
 
 /// A cloneable, thread-safe handle that wakes a native event loop.
 ///
@@ -373,6 +373,17 @@ pub trait WindowApplication {
     /// Platform adapters may execute this list asynchronously and continue to
     /// present the last completed frame while it is rendering.
     fn redraw(&mut self) -> DisplayList;
+
+    /// Returns the part of the frame that changed since the previous one.
+    ///
+    /// Adapters query this immediately after [`Self::redraw`] and pass it to
+    /// damage-aware backends so they can rasterize less than the whole window.
+    /// Applications that use a `UiRuntime` normally forward
+    /// `UiRuntime::frame_damage` here. The default is [`FrameDamage::Full`],
+    /// which is always correct.
+    fn frame_damage(&self) -> FrameDamage {
+        FrameDamage::Full
+    }
 
     /// Returns the current accessibility tree for this window, if any.
     ///
