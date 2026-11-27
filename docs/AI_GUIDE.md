@@ -71,6 +71,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A searchable command palette | `Modal` + `CommandPalette::new([PaletteCommand::new("...")])`; `executed(index)` dismisses the modal |
 | Transient corner notifications | `ToastHost` + `ToastHandle::show(Toast::new("..."))`; cards paint above the tree and expire on their own |
 | A primary action plus a dropdown | `SplitButton::new("Save")` with one `Menu` child; `activated()` runs the action, the arrow floats the menu |
+| Copyable read-only text | `Text::styled("...", style).selectable()`; drag or double-click to select, Ctrl+C copies, the text is never edited |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
@@ -288,6 +289,22 @@ invalidate layout and focus the menu after the next pass. Enter and Space always
 activate the primary segment; `ArrowDown` opens the menu. Do not close the menu
 from `selected` — the split button dismisses itself.
 See [RECIPES.md](RECIPES.md#12-a-split-button).
+
+### "Let the user copy text from a label."
+
+Plain `Text` is decorative. Call `.selectable()` to opt it into read-only
+selection:
+
+```rust
+let label = Text::styled("Build 2026.11.27", TextStyle::new(14.0, color)).selectable();
+let label = runtime.append_child(parent, label)?;
+```
+
+The reader can drag a range, double-click a word, Shift-click to extend, press
+Ctrl+C to copy, Ctrl+A to select everything, and Escape to clear. The selection
+paints with the theme selection color; the text is never edited and the widget
+reports a read-only, focusable label to accessibility. Use a `TextEdit` instead
+when the user must change the text.
 
 ### "Play this MP4 and turn on the sound."
 

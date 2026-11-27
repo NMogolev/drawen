@@ -4,6 +4,16 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
+## Unreleased
+
+### Widgets
+
+- `Text::selectable()` opts a label into read-only selection: drag to select a
+  range, double-click a word, Shift-click to extend, Ctrl+C to copy, Ctrl+A to
+  select everything, and Escape to clear. The selection paints with the theme
+  selection color and the text is never edited. Plain `Text` stays decorative
+  and ignores pointer input and focus.
+
 ## 0.3.0 - 2026-11-25
 
 ### Overlays

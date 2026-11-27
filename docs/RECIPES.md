@@ -1096,3 +1096,35 @@ subscription code keeps compiling; only `const` contexts and scalar reads
 `.query()`, `.offset()`) need updating to `.get()`. Setter signatures are
 unchanged. `RadioGroup::changed()` keeps its 0.3 semantics (fires on every
 `set_selected`, silent on `clear`); only the `selected()` return type changed.
+
+## 14. Copyable text
+
+`Text` is decorative by default: it ignores pointer input and focus. Call
+`.selectable()` to let the reader select and copy it without ever editing it:
+
+```rust
+use drawen::{Text, TextStyle};
+
+let label = Text::styled("Build 2026.11.27", TextStyle::new(14.0, color)).selectable();
+let label = runtime.append_child(parent, label)?;
+```
+
+A selectable label accepts focus and pointer input:
+
+- Drag to select a range; the selection paints with the theme selection color.
+- Double-click to select a word; Shift-click to extend from the anchor.
+- Ctrl+C copies the selection to the clipboard, Ctrl+A selects everything, and
+  Escape clears it.
+
+The text is read-only: there is no caret editing, undo, or paste. Reach for
+`TextEdit` when the user must change the content. Accessibility reports a
+focusable, read-only label whose value is the full text.
+
+Rules for copyable text:
+
+- Opt in per label with `.selectable()`; leave ordinary captions decorative so
+  they do not steal focus or intercept clicks meant for a surrounding button.
+- Selection works on any `Text` constructor (`new`, `wrapping`, `styled`); the
+  byte range maps through the same shaped layout the widget paints.
+- Copying uses the runtime clipboard, so a headless runtime keeps an in-memory
+  clipboard and tests can assert the copied string directly.
