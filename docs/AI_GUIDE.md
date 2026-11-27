@@ -78,6 +78,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | A calendar date picker | `DatePicker::with_month(y, m).with_value(Date::new(y, m, d)?)`; `selected()` is a `Property<Option<Date>>`, header arrows and PageUp/PageDown page months, no platform clock |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
+| A virtualized table with columns | `VirtualTable::new(source, vec![TableColumn::new("Name", 240.0), ...])`; `TableColumn` is the facade alias for table column metadata, while `Column` stays the vertical layout container |
 
 ## Q&A
 

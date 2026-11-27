@@ -1,11 +1,15 @@
-//! Interactive component laboratory for all standard Drawen widgets.
+//! Interactive component laboratory for the whole Drawen library.
 //!
 //! Run with `cargo run -p drawen --example style_showcase`.
 //!
 //! The showcase follows the Qt/AUI idea of a directly configurable interface:
 //! the "Appearance" page edits the same semantic theme that every standard
 //! widget resolves during layout and paint, so palette, typography, density,
-//! corner radius, and animation changes apply live.
+//! corner radius, and animation changes apply live. Fourteen pages cover the
+//! full surface of the toolkit: controls, data entry, virtualized data views,
+//! layout primitives, docking, media, software 3D, DSS styling, overlays,
+//! background tasks and frame diagnostics, the agent bridge, and Servo
+//! interop.
 
 use std::{
     cell::{Cell, RefCell},
@@ -14,27 +18,44 @@ use std::{
 };
 
 use drawen::{
-    Alert, AlertTone, Avatar, AvatarStatus, Badge, BadgeTone, Box as DrawenBox, Button, Checkbox,
-    ChildLayout, Clipboard, Color, CommandPalette, Constraints, Divider, DockArea, DockAxis,
-    Dropdown, Expander, Image, Insets, LayoutContext, LayoutNode, LayoutResult, ListView, Menu,
-    MenuBar, MenuEntry, Modal, PaletteCommand, PanelId, Point, Popover, PopoverTrigger,
-    ProgressBar, RadioButton, RadioGroup, Rect, ScrollView, SegmentedControl, Size, Skeleton,
-    Slider, Spinner, SplitAxis, SplitButton, Splitter, Styled, Subscription, Switch, TabBar, Text,
-    TextEdit, TextField, Theme, TitleBar, TitleBarStyle, Toast, ToastHandle, ToastHost, ToastTone,
-    Toolbar, Tooltip, UiEnvironment, UiRuntime, Widget, WindowChromeState, WindowControl,
+    Alert, AlertTone, Align, Alignment, Autocomplete, Avatar, AvatarStatus, Badge, BadgeTone,
+    Binding, Box as DrawenBox, Button, Card, CardStyle, Checkbox, ChildLayout, Clipboard, Color,
+    CommandPalette, Constraints, Date, DatePicker, Divider, DockArea, DockAxis, Dropdown, Expander,
+    Image, ImageViewer, Insets, LayoutContext, LayoutNode, LayoutResult, ListView, Menu, MenuBar,
+    MenuEntry, Modal, NumberInput, Padding, PaletteCommand, PanelId, Point, Popover,
+    PopoverTrigger, ProgressBar, Property, RadioButton, RadioGroup, RangeSlider, Rect, Row,
+    ScrollView, SegmentedControl, SelectionMode, SizedBox, Size, Skeleton, Slider, Spinner,
+    SplitAxis, SplitButton, Splitter, Stack, Styled, Subscription, SurfaceStyle, Switch, TabBar,
+    Text, TextEdit, TextField, Theme, TitleBar, TitleBarStyle, Toast, ToastHandle, ToastHost,
+    ToastTone, Toolbar, Tooltip, TreeNode, TreeView, UiEnvironment, UiRuntime, VirtualDataSource,
+    VirtualList, VirtualTable, VirtualTableSource, Widget, WindowChromeState, WindowControl,
     WindowFrame, WorkspaceLayout,
     platform::{
-        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation, action_for,
+        WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation,
+        WindowWaker, action_for,
     },
     render::{DisplayList, FrameDamage, PaintContext, RasterImage, TextLayout, TextStyle},
+    tasks::{TaskHandle, TaskPool, UiDispatcher, UiSender},
+};
+
+#[cfg(feature = "cubex")]
+use drawen::{
+    CubeXView,
+    cubex::{
+        Camera, Color as SceneColor, DirectionalLight, Material, Quat, Scene, Transform, Vec3,
+        primitives,
+    },
 };
 
 #[cfg(feature = "media")]
-use drawen::{AudioPlayer, AudioPlayerLayout, PlayerBehavior, PlayerTheme, Video, VideoControls};
+use drawen::{
+    AnimatedImage, AnimationFrame, AudioPlayer, AudioPlayerLayout, PlayerBehavior, PlayerTheme,
+    Video, VideoControls,
+};
 
-const WINDOW_WIDTH: f32 = 1_320.0;
+const WINDOW_WIDTH: f32 = 1_440.0;
 const WINDOW_HEIGHT: f32 = 860.0;
-const WINDOW_WIDTH_PX: u32 = 1_320;
+const WINDOW_WIDTH_PX: u32 = 1_440;
 const WINDOW_HEIGHT_PX: u32 = 860;
 const MENU_MAX_HEIGHT: f32 = 58.0;
 const TOOLBAR_MAX_HEIGHT: f32 = 78.0;
@@ -43,6 +64,7 @@ const TITLE_BAR_HEIGHT: f32 = 42.0;
 const PAGE_PADDING: f32 = 24.0;
 const BASE_FONT_SIZE: f32 = 14.0;
 const BASE_SPACING: f32 = 8.0;
+const PAGE_COUNT: usize = 14;
 
 /// Scoped DSS rules used by the dedicated stylesheet page. They deliberately
 /// target only `.dss-sample`, leaving the semantic-theme laboratory untouched.
@@ -84,13 +106,18 @@ fn write_snapshots() {
     for (index, name) in [
         "overview",
         "components",
-        "appearance",
+        "entry",
+        "data",
         "layout",
         "workspace",
+        "media",
+        "cubex",
+        "appearance",
         "dss",
-        "servo",
-        "agents",
         "overlays",
+        "runtime",
+        "agents",
+        "servo",
     ]
     .iter()
     .enumerate()
@@ -99,7 +126,7 @@ fn write_snapshots() {
         render_snapshot(&mut app, name);
     }
 
-    let mut light = StyleShowcase::new(2);
+    let mut light = StyleShowcase::new(8);
     {
         let mut appearance = light.appearance.borrow_mut();
         appearance.preset = Preset::Daylight;
@@ -117,8 +144,8 @@ fn write_snapshots() {
     render_snapshot(&mut light, "appearance-light");
 
     let mut components = StyleShowcase::new(1);
-    components.layout(valid_size(WINDOW_WIDTH, 3_000.0));
-    render_snapshot_sized(&mut components, "components-tall", WINDOW_WIDTH_PX, 3_000);
+    components.layout(valid_size(WINDOW_WIDTH, 3_600.0));
+    render_snapshot_sized(&mut components, "components-tall", WINDOW_WIDTH_PX, 3_600);
 }
 
 fn render_snapshot(app: &mut StyleShowcase, name: &str) {
@@ -450,6 +477,87 @@ impl Theme for ShowcaseTheme {
 }
 
 // ---------------------------------------------------------------------------
+// Background work model
+// ---------------------------------------------------------------------------
+
+/// Values delivered from the worker pool to the UI thread.
+enum TaskMessage {
+    Progress(f32),
+    Finished(u64),
+    Cancelled,
+}
+
+/// Plain data owned by the UI thread; workers only capture the sender.
+struct TaskDemo {
+    pool: TaskPool,
+    sender: RefCell<Option<UiSender<TaskMessage>>>,
+    handle: RefCell<Option<TaskHandle<()>>>,
+    progress: Property<f32>,
+    status: Rc<RefCell<String>>,
+    busy: Cell<bool>,
+}
+
+impl TaskDemo {
+    fn new() -> Self {
+        Self {
+            pool: TaskPool::new(2).expect("worker threads start"),
+            sender: RefCell::new(None),
+            handle: RefCell::new(None),
+            progress: Property::new(0.0),
+            status: Rc::new(RefCell::new(
+                "Idle — run the checksum job.".to_owned(),
+            )),
+            busy: Cell::new(false),
+        }
+    }
+
+    fn start(&self) {
+        if self.busy.replace(true) {
+            return;
+        }
+        self.progress.set(0.0);
+        "Running on a worker thread…".clone_into(&mut self.status.borrow_mut());
+        let Some(sender) = self.sender.borrow().clone() else {
+            self.busy.set(false);
+            "No dispatcher attached yet.".clone_into(&mut self.status.borrow_mut());
+            return;
+        };
+
+        let progress_sender = sender.clone();
+        let finish_sender = sender;
+        let handle = self.pool.spawn_with_progress(
+            move |context| {
+                const STEPS: u64 = 160;
+                let mut checksum = 0u64;
+                for step in 0..STEPS {
+                    if context.is_cancelled() {
+                        let _ = finish_sender.send(TaskMessage::Cancelled);
+                        return;
+                    }
+                    // Stand-in for decoding, parsing, or network work.
+                    std::thread::sleep(Duration::from_millis(10));
+                    checksum = checksum.wrapping_add(step * step);
+                    context.report_units(step + 1, STEPS);
+                }
+                let _ = finish_sender.send(TaskMessage::Finished(checksum));
+            },
+            move |progress| {
+                let _ =
+                    progress_sender.send(TaskMessage::Progress(progress.fraction().unwrap_or(0.0)));
+            },
+        );
+        *self.handle.borrow_mut() = Some(handle);
+    }
+
+    fn cancel(&self) {
+        if let Some(handle) = self.handle.borrow().as_ref() {
+            handle.cancel();
+            "Cancelling…".clone_into(&mut self.status.borrow_mut());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Application shell
 // ---------------------------------------------------------------------------
 
@@ -463,8 +571,14 @@ struct StyleShowcase {
     agent_observation_requested: Rc<Cell<bool>>,
     #[cfg(feature = "agent")]
     agent_report: Rc<RefCell<String>>,
-    toast_requested: Rc<Cell<bool>>,
+    toast_queue: Rc<RefCell<Vec<ToastTone>>>,
     toast_handle: ToastHandle,
+    task_demo: Rc<TaskDemo>,
+    task_dispatcher: Option<UiDispatcher<TaskMessage>>,
+    task_status_id: drawen::WidgetId,
+    diagnostics: Rc<RefCell<String>>,
+    diagnostics_id: drawen::WidgetId,
+    diagnostics_cache: String,
     #[cfg(feature = "media")]
     media_import_requested: Rc<Cell<Option<MediaImport>>>,
     #[cfg(feature = "audio")]
@@ -475,6 +589,7 @@ struct StyleShowcase {
     audio_preview_parent: drawen::WidgetId,
     #[cfg(feature = "audio")]
     audio_preview: drawen::WidgetId,
+    _bindings: Vec<Binding>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -498,7 +613,11 @@ impl StyleShowcase {
             "Press \"Capture semantic tree\" to inspect this retained UI through drawen-agent."
                 .to_owned(),
         ));
-        let toast_requested = Rc::new(Cell::new(false));
+        let toast_queue = Rc::new(RefCell::new(Vec::new()));
+        let task_demo = Rc::new(TaskDemo::new());
+        let diagnostics = Rc::new(RefCell::new(
+            "Interact with the lab — counters sample on every input event.".to_owned(),
+        ));
         #[cfg(feature = "media")]
         let media_import_requested = Rc::new(Cell::new(None));
         let chrome = WindowChromeState::new();
@@ -518,7 +637,7 @@ impl StyleShowcase {
         let root = runtime.root();
         let title_bar = TitleBar::new("Drawen Style Lab")
             .with_icon("◆")
-            .with_subtitle("  component and platform laboratory")
+            .with_subtitle("  the complete component and platform laboratory")
             .with_controls([
                 WindowControl::Minimize,
                 WindowControl::Maximize,
@@ -537,6 +656,7 @@ impl StyleShowcase {
             .append_child(root, ShowcaseShell)
             .expect("window frame exists");
         let mut subscriptions = Vec::new();
+        let mut bindings = Vec::new();
 
         let menu = MenuBar::new(["File", "Edit", "View", "Help"]);
         subscriptions.push(menu.activated().subscribe(|index| {
@@ -565,15 +685,20 @@ impl StyleShowcase {
         let mut tabs = TabBar::new([
             "Overview",
             "Components",
-            "Appearance",
+            "Entry",
+            "Data",
             "Layout",
             "Workspace",
+            "Media",
+            "3D",
+            "Appearance",
             "DSS",
-            "Servo",
-            "Agents",
             "Overlays",
+            "Runtime",
+            "Agents",
+            "Servo",
         ]);
-        tabs.set_selected(Some(selected_tab.min(8)));
+        tabs.set_selected(Some(selected_tab.min(PAGE_COUNT - 1)));
         subscriptions.push(
             tabs.changed()
                 .subscribe(|index| println!("TabBar: opened page {}.", index + 1)),
@@ -582,8 +707,13 @@ impl StyleShowcase {
             .append_child(root, tabs)
             .expect("showcase root exists");
 
-        append_overview_page(&mut runtime, &appearance, tabs);
-        let media_previews = append_components_page(
+        append_overview_page(&mut runtime, tabs);
+        append_components_page(&mut runtime, &mut subscriptions, tabs);
+        append_entry_page(&mut runtime, &mut subscriptions, &mut bindings, tabs);
+        append_data_page(&mut runtime, &mut subscriptions, tabs);
+        append_layout_page(&mut runtime, tabs);
+        append_workspace_page(&mut runtime, tabs);
+        let media_previews = append_media_page(
             &mut runtime,
             &mut subscriptions,
             #[cfg(feature = "media")]
@@ -595,11 +725,24 @@ impl StyleShowcase {
             media_previews;
         #[cfg(not(feature = "audio"))]
         let _ = media_previews;
+        append_cubex_page(&mut runtime, tabs);
         append_appearance_page(&mut runtime, &mut subscriptions, &appearance, &dirty, tabs);
-        append_layout_page(&mut runtime, tabs);
-        append_workspace_page(&mut runtime, tabs);
         append_dss_page(&mut runtime, tabs);
-        append_servo_page(&mut runtime, tabs);
+        let toast_handle = append_overlay_page(
+            &mut runtime,
+            &mut subscriptions,
+            &dirty,
+            &toast_queue,
+            tabs,
+        );
+        let (task_status_id, diagnostics_id) = append_runtime_page(
+            &mut runtime,
+            &mut subscriptions,
+            &task_demo,
+            &diagnostics,
+            &mut bindings,
+            tabs,
+        );
         append_agent_page(
             &mut runtime,
             &mut subscriptions,
@@ -609,13 +752,7 @@ impl StyleShowcase {
             &agent_report,
             tabs,
         );
-        let toast_handle = append_overlay_page(
-            &mut runtime,
-            &mut subscriptions,
-            &dirty,
-            &toast_requested,
-            tabs,
-        );
+        append_servo_page(&mut runtime, tabs);
 
         runtime
             .append_child(root, StatusBar::new(Rc::clone(&appearance)))
@@ -631,8 +768,14 @@ impl StyleShowcase {
             agent_observation_requested,
             #[cfg(feature = "agent")]
             agent_report,
-            toast_requested,
+            toast_queue,
             toast_handle,
+            task_demo,
+            task_dispatcher: None,
+            task_status_id,
+            diagnostics,
+            diagnostics_id,
+            diagnostics_cache: String::new(),
             #[cfg(feature = "media")]
             media_import_requested,
             #[cfg(feature = "audio")]
@@ -643,6 +786,7 @@ impl StyleShowcase {
             audio_preview_parent,
             #[cfg(feature = "audio")]
             audio_preview,
+            _bindings: bindings,
             _subscriptions: subscriptions,
         };
         app.layout(size);
@@ -653,6 +797,68 @@ impl StyleShowcase {
         self.size = size;
         if let Ok(constraints) = Constraints::tight(size) {
             let _ = self.runtime.layout(constraints);
+        }
+    }
+
+    /// Delivers worker results on the UI thread; returns true when anything
+    /// arrived. The progress property binding damages the bar by itself.
+    fn drain_tasks(&mut self) -> bool {
+        let Some(dispatcher) = &self.task_dispatcher else {
+            return false;
+        };
+        let messages = dispatcher.drain();
+        if messages.is_empty() {
+            return false;
+        }
+        for message in messages {
+            match message {
+                TaskMessage::Progress(fraction) => {
+                    self.task_demo.progress.set(fraction);
+                }
+                TaskMessage::Finished(checksum) => {
+                    self.task_demo.busy.set(false);
+                    *self.task_demo.status.borrow_mut() =
+                        format!("Done · checksum {checksum}");
+                }
+                TaskMessage::Cancelled => {
+                    self.task_demo.busy.set(false);
+                    "Cancelled.".clone_into(&mut self.task_demo.status.borrow_mut());
+                }
+            }
+        }
+        true
+    }
+
+    /// Samples the runtime's frame diagnostics into the live readout. Only a
+    /// changed report invalidates, and only the readout's own region.
+    fn capture_diagnostics(&mut self) {
+        let stats = self.runtime.stats();
+        let damage = match self.runtime.frame_damage() {
+            FrameDamage::Full => "full frame".to_owned(),
+            FrameDamage::Region(rect) => format!(
+                "region {:.0}×{:.0} at ({:.0}, {:.0})",
+                rect.size.width(),
+                rect.size.height(),
+                rect.origin.x,
+                rect.origin.y
+            ),
+            FrameDamage::Unchanged => "unchanged (retained frame)".to_owned(),
+        };
+        let text = format!(
+            "layout passes: {} · paint passes: {}\nlast layout: {} µs{}\nlast paint: {} µs · {} commands{}\nframe damage: {}",
+            stats.layout_passes(),
+            stats.paint_passes(),
+            stats.last_layout_time().as_micros(),
+            if stats.last_layout_reused() { " (reused)" } else { "" },
+            stats.last_paint_time().as_micros(),
+            stats.last_paint_command_count(),
+            if stats.last_paint_reused() { " (reused)" } else { "" },
+            damage,
+        );
+        if text != self.diagnostics_cache {
+            self.diagnostics_cache.clone_from(&text);
+            *self.diagnostics.borrow_mut() = text;
+            self.runtime.invalidate_paint_for(self.diagnostics_id);
         }
     }
 
@@ -719,7 +925,7 @@ impl StyleShowcase {
 
 impl WindowApplication for StyleShowcase {
     fn window_options(&self) -> WindowOptions {
-        WindowOptions::new("Drawen — Style Lab / Appearance Studio", self.size)
+        WindowOptions::new("Drawen — Style Lab / Complete Gallery", self.size)
             .with_decorations(false)
             .with_resizable(true)
             .with_min_size(valid_size(720.0, 520.0))
@@ -727,6 +933,12 @@ impl WindowApplication for StyleShowcase {
 
     fn attach_clipboard(&mut self, clipboard: Box<dyn Clipboard>) {
         self.runtime.set_clipboard(clipboard);
+    }
+
+    fn attach_waker(&mut self, waker: WindowWaker) {
+        let (dispatcher, sender) = UiDispatcher::new(move || waker.wake());
+        *self.task_demo.sender.borrow_mut() = Some(sender);
+        self.task_dispatcher = Some(dispatcher);
     }
 
     fn window_event(&mut self, event: WindowEvent) -> WindowAction {
@@ -746,10 +958,22 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
-                if self.toast_requested.replace(false) {
-                    let _ = self
-                        .toast_handle
-                        .show(Toast::new("Overlay queue updated").with_tone(ToastTone::Success));
+                if self.drain_tasks() {
+                    self.runtime.invalidate_paint_for(self.task_status_id);
+                }
+                let toasts: Vec<ToastTone> = self.toast_queue.borrow_mut().drain(..).collect();
+                if !toasts.is_empty() {
+                    for tone in toasts {
+                        let message = match tone {
+                            ToastTone::Info => "Queued · informational",
+                            ToastTone::Success => "Queued · success",
+                            ToastTone::Warning => "Queued · warning",
+                            ToastTone::Danger => "Queued · danger",
+                        };
+                        let _ = self
+                            .toast_handle
+                            .show(Toast::new(message).with_tone(tone));
+                    }
                     self.runtime.invalidate_paint();
                 }
                 #[cfg(feature = "agent")]
@@ -769,6 +993,7 @@ impl WindowApplication for StyleShowcase {
                         .set_animations_enabled(animations);
                     self.runtime.invalidate_layout();
                 }
+                self.capture_diagnostics();
                 let mut action = WindowAction::None;
                 for command in self.runtime.take_window_commands() {
                     action = action_for(command);
@@ -784,7 +1009,14 @@ impl WindowApplication for StyleShowcase {
             WindowEvent::Visible(_) | WindowEvent::Minimized(_) | WindowEvent::Occluded(_) => {
                 WindowAction::None
             }
-            WindowEvent::RedrawRequested => WindowAction::None,
+            WindowEvent::RedrawRequested => {
+                if self.drain_tasks() {
+                    self.runtime.invalidate_paint_for(self.task_status_id);
+                    WindowAction::RequestRedraw
+                } else {
+                    WindowAction::None
+                }
+            }
         }
     }
 
@@ -1146,6 +1378,51 @@ impl Widget for FixedHeight {
     }
 }
 
+/// Caps the width offered to its single child, keeping the child's natural
+/// height. Used to keep calendars and numeric fields at a readable size.
+struct MaxWidth {
+    width: f32,
+}
+
+impl MaxWidth {
+    const fn new(width: f32) -> Self {
+        Self { width }
+    }
+}
+
+impl Widget for MaxWidth {
+    fn layout(
+        &mut self,
+        context: &mut LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> LayoutResult {
+        let max = constraints.max();
+        let width = if max.width().is_finite() {
+            max.width().min(self.width)
+        } else {
+            self.width
+        };
+        let mut children = Vec::new();
+        let child_size = if context.child_count() == 1 {
+            let (id, layout) = context
+                .layout_child(
+                    0,
+                    Constraints::loose(valid_size(width, max.height())),
+                )
+                .expect("max-width child exists");
+            children.push(ChildLayout::new(id, Point::ZERO));
+            layout.size()
+        } else {
+            Size::ZERO
+        };
+        LayoutResult::with_children(constraints.constrain(child_size), children)
+    }
+
+    fn participates_in_hit_test(&self) -> bool {
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Theme-aware text and presentation widgets
 // ---------------------------------------------------------------------------
@@ -1219,25 +1496,19 @@ impl Widget for Label {
     }
 }
 
-/// Live, clipped agent output. It owns only snapshot text, never the UI tree.
-#[cfg(feature = "agent")]
-struct AgentReport {
-    report: Rc<RefCell<String>>,
+/// Live, clipped report text. It owns only a string, never the UI tree.
+struct LiveText {
+    text: Rc<RefCell<String>>,
     layout: Option<TextLayout>,
 }
 
-#[cfg(feature = "agent")]
-impl AgentReport {
-    fn new(report: Rc<RefCell<String>>) -> Self {
-        Self {
-            report,
-            layout: None,
-        }
+impl LiveText {
+    fn new(text: Rc<RefCell<String>>) -> Self {
+        Self { text, layout: None }
     }
 }
 
-#[cfg(feature = "agent")]
-impl Widget for AgentReport {
+impl Widget for LiveText {
     fn layout(
         &mut self,
         context: &mut LayoutContext<'_>,
@@ -1246,10 +1517,10 @@ impl Widget for AgentReport {
         let size = available_size(constraints);
         self.layout = Some(layout_text(
             context.environment(),
-            &self.report.borrow(),
+            &self.text.borrow(),
             0.82,
             context.environment().theme().foreground(),
-            Some(size.width()),
+            Some((size.width() - 24.0).max(0.0)),
         ));
         LayoutResult::new(size)
     }
@@ -1749,11 +2020,7 @@ impl Widget for FormRow {
 // Page content: overview
 // ---------------------------------------------------------------------------
 
-fn append_overview_page(
-    runtime: &mut UiRuntime,
-    appearance: &Rc<RefCell<Appearance>>,
-    tabs: drawen::WidgetId,
-) {
+fn append_overview_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
     let stack = append_scroll_page(runtime, tabs);
 
     let hero = runtime
@@ -1772,7 +2039,7 @@ fn append_overview_page(
     append_label(
         runtime,
         hero_column,
-        "An experimental interface laboratory: theme, typography, density, and geometry change live while the application runs — similar to Qt and AUI.",
+        "The complete laboratory: every standard widget, the live semantic theme, DSS styling, virtualized data, docking, media, software 3D, overlays, background tasks, and frame diagnostics — all in one retained tree.",
         1.02,
         TextTone::Muted,
     );
@@ -1781,9 +2048,10 @@ fn append_overview_page(
             hero_column,
             Chips::new(&[
                 "Live palette",
-                "Qt/AUI approach",
-                "EN / RU input",
                 "Retained tree",
+                "Frame damage",
+                "EN / RU input",
+                "Headless snapshots",
             ]),
         )
         .expect("hero column exists");
@@ -1793,9 +2061,9 @@ fn append_overview_page(
         .append_child(hero_column, HStack::new(14.0).with_equal(true))
         .expect("hero column exists");
     for (value, caption) in [
-        ("3", "palettes"),
-        ("40+", "components"),
-        ("9", "showcase pages"),
+        ("14", "showcase pages"),
+        ("60+", "widgets & primitives"),
+        ("3", "live palettes"),
     ] {
         runtime
             .append_child(stats, StatCard::new(value, caption))
@@ -1811,6 +2079,30 @@ fn append_overview_page(
     runtime
         .append_child(palette_card, PalettePreview)
         .expect("palette card exists");
+
+    let map_card = append_card(
+        runtime,
+        stack,
+        "Capability map",
+        "Each page demonstrates one area of the library. Everything below is live — click, type, drag, and scroll.",
+    );
+    for line in [
+        "Components — text editing, selectable labels, choice controls, buttons, status widgets, alerts, expanders.",
+        "Entry — NumberInput, RangeSlider, Autocomplete, DatePicker, and one-way Property bindings.",
+        "Data — TreeView, VirtualList (10,000 rows), VirtualTable, ListView, and the zoomable ImageViewer.",
+        "Layout — Splitter, Row / Column / Stack / Align / Padding / SizedBox, and horizontal scrolling.",
+        "Workspace — DockArea with a serializable panel model, tabs, and draggable splits.",
+        "Media — Video and AudioPlayer with configurable controls, plus frame-based AnimatedImage.",
+        "3D — CubeXView: a deterministic software rasterizer presenting a rotating lit scene.",
+        "Appearance — the live semantic theme: palette, accent hue, typography, density, radius, motion.",
+        "DSS — scoped stylesheet: custom properties, calc(), combinators, pseudo-classes, !important.",
+        "Overlays — Tooltip, Popover, Menu, Modal, CommandPalette, SplitButton, and queued toasts.",
+        "Runtime — TaskPool background work with a UiDispatcher, plus live frame-damage diagnostics.",
+        "Agents — the semantic-tree inspector for LLM-driven UI observation and control.",
+        "Servo — the shared-texture browser interop contract.",
+    ] {
+        append_label(runtime, map_card, line, 0.9, TextTone::Muted);
+    }
 
     let atlas = append_card(
         runtime,
@@ -1828,7 +2120,6 @@ fn append_overview_page(
         0.86,
         TextTone::Muted,
     );
-    let _ = appearance;
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,13 +2130,7 @@ fn append_overview_page(
 fn append_components_page(
     runtime: &mut UiRuntime,
     subscriptions: &mut Vec<Subscription>,
-    #[cfg(feature = "media")] media_import_requested: &Rc<Cell<Option<MediaImport>>>,
     tabs: drawen::WidgetId,
-) -> (
-    drawen::WidgetId,
-    drawen::WidgetId,
-    drawen::WidgetId,
-    drawen::WidgetId,
 ) {
     let stack = append_scroll_page(runtime, tabs);
 
@@ -1853,7 +2138,7 @@ fn append_components_page(
         runtime,
         stack,
         "Text",
-        "Single-line and multiline editing. Type in any language — missing scripts fall back to the system fonts.",
+        "Single-line and multiline editing, plus selectable read-only labels. Type in any language — missing scripts fall back to the system fonts.",
     );
     let field = TextField::with_text("Hello, Drawen! Edit this text.");
     subscriptions.push(
@@ -1885,6 +2170,18 @@ fn append_components_page(
             "TextEdit reuses TextField's grapheme navigation, undo, and clipboard behavior.",
         ),
         editor,
+    );
+    append_form(
+        runtime,
+        text_card,
+        FormRow::new("Selectable label").with_description(
+            "Drag to select, double-click a word, Ctrl+C copies to the OS clipboard, Ctrl+A selects all.",
+        ),
+        Text::styled(
+            "Drawen keeps a retained widget tree: select this sentence and copy it with Ctrl+C — the text reaches the native clipboard.",
+            TextStyle::new(BASE_FONT_SIZE, Color::rgba8(148, 163, 184, 255)),
+        )
+        .selectable(),
     );
 
     let choice_card = append_card(
@@ -2042,6 +2339,73 @@ fn append_components_page(
         append_badge(runtime, badges, tone, text);
     }
 
+    let variants_card = append_card(
+        runtime,
+        stack,
+        "Button variants",
+        "Buttons resolve background, hover, and press colors from the theme; local builders override geometry and state without breaking the palette.",
+    );
+    let variants = runtime
+        .append_child(variants_card, HStack::new(10.0))
+        .expect("variants card exists");
+    let disabled = Button::new().with_enabled(false);
+    let disabled = runtime
+        .append_child(variants, disabled)
+        .expect("variants row exists");
+    append_label(runtime, disabled, "Disabled", 0.96, TextTone::Muted);
+    let pill = Button::new().with_corner_radius(20.0);
+    subscriptions.push(pill.activated().subscribe(|()| println!("Pill button.")));
+    let pill = runtime
+        .append_child(variants, pill)
+        .expect("variants row exists");
+    append_label(runtime, pill, "Pill radius", 0.96, TextTone::Primary);
+    let roomy = Button::new().with_padding(Insets::new(12.0, 26.0, 12.0, 26.0));
+    subscriptions.push(roomy.activated().subscribe(|()| println!("Roomy button.")));
+    let roomy = runtime
+        .append_child(variants, roomy)
+        .expect("variants row exists");
+    append_label(runtime, roomy, "Roomy padding", 0.96, TextTone::Primary);
+
+    let surfaces_card = append_card(
+        runtime,
+        stack,
+        "Card surfaces",
+        "Card is the standard raised container: rounded surface, border, padding, and a soft multi-layer shadow. CardStyle overrides elevation and padding locally.",
+    );
+    let surfaces = runtime
+        .append_child(surfaces_card, HStack::new(14.0).with_equal(true))
+        .expect("surfaces card exists");
+    let plain = runtime
+        .append_child(surfaces, Card::new())
+        .expect("surfaces row exists");
+    append_label(
+        runtime,
+        plain,
+        "Default card · elevation 6 · padding 12",
+        0.9,
+        TextTone::Muted,
+    );
+    let raised = runtime
+        .append_child(
+            surfaces,
+            Card::new().with_style(CardStyle {
+                surface: SurfaceStyle {
+                    padding: Some(Insets::all(16.0)),
+                    ..SurfaceStyle::default()
+                },
+                elevation: 16.0,
+                shadow_color: None,
+            }),
+        )
+        .expect("surfaces row exists");
+    append_label(
+        runtime,
+        raised,
+        "CardStyle · elevation 16 · padding 16",
+        0.9,
+        TextTone::Muted,
+    );
+
     let alert_card = append_card(
         runtime,
         stack,
@@ -2081,102 +2445,6 @@ fn append_components_page(
             .expect("alert card exists");
     }
 
-    #[cfg(feature = "media")]
-    let media_card = append_card(
-        runtime,
-        stack,
-        "Media players",
-        "Video and AudioPlayer expose configurable native controls. These previews use local frames and manual clocks, so they need no decoder or external media file.",
-    );
-    #[cfg(feature = "media")]
-    let video_frame = runtime
-        .append_child(media_card, FixedHeight::new(210.0))
-        .expect("media card exists");
-    #[cfg(feature = "media")]
-    let media_preview = runtime
-        .append_child(
-            video_frame,
-            Video::with_frame(drawen_logo())
-                .with_title("Drawen release overview")
-                .with_subtitle("Manual frame · configurable overlay")
-                .with_duration(Duration::from_secs(215))
-                .with_position(Duration::from_secs(74))
-                .with_control_set(VideoControls::minimal())
-                .with_behavior(PlayerBehavior::new().with_auto_hide(None))
-                .with_theme(PlayerTheme::new().with_accent(Color::rgba8(94, 234, 212, 255))),
-        )
-        .expect("video frame exists");
-    #[cfg(feature = "media")]
-    let import_video = Button::new();
-    #[cfg(feature = "media")]
-    subscriptions.push(import_video.activated().subscribe({
-        let media_import_requested = Rc::clone(media_import_requested);
-        move |()| media_import_requested.set(Some(MediaImport::Video))
-    }));
-    #[cfg(feature = "media")]
-    let import_video = runtime
-        .append_child(media_card, import_video)
-        .expect("media card exists");
-    #[cfg(feature = "media")]
-    append_label(
-        runtime,
-        import_video,
-        "Import video with audio…",
-        0.96,
-        TextTone::Primary,
-    );
-    #[cfg(feature = "media")]
-    append_label(
-        runtime,
-        media_card,
-        "Run with `--features audio` to play the chosen video's audio track. The video player then follows the audio-mastered clock.",
-        0.86,
-        TextTone::Muted,
-    );
-    #[cfg(feature = "media")]
-    let audio_preview = runtime
-        .append_child(
-            media_card,
-            AudioPlayer::new()
-                .with_title("Night drive")
-                .with_subtitle("AudioPlayer · inline layout")
-                .with_duration(Duration::from_secs(214))
-                .with_position(Duration::from_secs(86))
-                .with_volume(0.7)
-                .with_cover(drawen_logo()),
-        )
-        .expect("media card exists");
-    #[cfg(feature = "media")]
-    let import_audio = Button::new();
-    #[cfg(feature = "media")]
-    subscriptions.push(import_audio.activated().subscribe({
-        let media_import_requested = Rc::clone(media_import_requested);
-        move |()| media_import_requested.set(Some(MediaImport::Audio))
-    }));
-    #[cfg(feature = "media")]
-    let import_audio = runtime
-        .append_child(media_card, import_audio)
-        .expect("media card exists");
-    #[cfg(feature = "media")]
-    append_label(
-        runtime,
-        import_audio,
-        "Import audio…",
-        0.96,
-        TextTone::Primary,
-    );
-    #[cfg(feature = "media")]
-    runtime
-        .append_child(
-            media_card,
-            AudioPlayer::new()
-                .with_title("Compact queue item")
-                .with_duration(Duration::from_secs(182))
-                .with_position(Duration::from_secs(35))
-                .with_layout(AudioPlayerLayout::Compact),
-        )
-        .expect("media card exists");
-
     let expander_card = append_card(
         runtime,
         stack,
@@ -2206,14 +2474,398 @@ fn append_components_page(
         0.92,
         TextTone::Muted,
     );
-    #[cfg(feature = "media")]
-    {
-        (video_frame, media_preview, media_card, audio_preview)
+}
+
+// ---------------------------------------------------------------------------
+// Page content: data entry
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_lines)]
+fn append_entry_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    bindings: &mut Vec<Binding>,
+    tabs: drawen::WidgetId,
+) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    let numeric_card = append_card(
+        runtime,
+        stack,
+        "Numeric entry",
+        "NumberInput clamps to its range and steps with the arrows; RangeSlider keeps two thumbs ordered on one track.",
+    );
+    let number = NumberInput::new()
+        .with_range(0.0, 240.0)
+        .with_step(0.5)
+        .with_value(42.0);
+    subscriptions.push(
+        number
+            .changed()
+            .subscribe(|value| println!("NumberInput: {value:.1}")),
+    );
+    let number_row = runtime
+        .append_child(
+            numeric_card,
+            FormRow::new("NumberInput")
+                .with_description("Type a value, use the steppers, or press ArrowUp/ArrowDown. Out-of-range input clamps on commit. Range 0–240, step 0.5.")
+                .without_stretch(),
+        )
+        .expect("numeric card exists");
+    let number_width = runtime
+        .append_child(number_row, MaxWidth::new(220.0))
+        .expect("quantity row exists");
+    runtime
+        .append_child(number_width, number)
+        .expect("max-width wrapper exists");
+
+    let range = RangeSlider::with_value(0.0, 100.0, 20.0, 80.0);
+    subscriptions.push(range.changed().subscribe(|(lower, upper)| {
+        println!("RangeSlider: {lower:.0} – {upper:.0}");
+    }));
+    append_form(
+        runtime,
+        numeric_card,
+        FormRow::new("RangeSlider")
+            .with_description("Drag either thumb; it stops at the other. ArrowDown/Up pick a thumb, ArrowLeft/Right step it."),
+        range,
+    );
+
+    let autocomplete_card = append_card(
+        runtime,
+        stack,
+        "Autocomplete",
+        "An editable combobox: typing filters options into a floating suggestion list measured only while open.",
+    );
+    let cities = Autocomplete::new([
+        "Amsterdam",
+        "Berlin",
+        "Lisbon",
+        "London",
+        "Paris",
+        "Prague",
+        "Seoul",
+        "Singapore",
+        "Stockholm",
+        "Sydney",
+        "Tokyo",
+        "Toronto",
+        "Vienna",
+        "Warsaw",
+        "Zurich",
+        "Москва",
+        "Новосибирск",
+        "Санкт-Петербург",
+    ])
+    .with_placeholder("Search cities…");
+    subscriptions.push(cities.selected().subscribe(|index| {
+        println!("Autocomplete: committed option {index}");
+    }));
+    let popup = cities.popup();
+    let cities = append_form(
+        runtime,
+        autocomplete_card,
+        FormRow::new("City")
+            .with_description("ArrowUp/ArrowDown move the highlight; Enter or a click commits; Escape closes."),
+        cities,
+    );
+    runtime
+        .append_child(cities, popup)
+        .expect("autocomplete exists");
+
+    let calendar_card = append_card(
+        runtime,
+        stack,
+        "Calendar",
+        "DatePicker never reads the platform clock — the application supplies the initial date. Weeks start on Monday.",
+    );
+    let picker = DatePicker::with_month(2026, 11)
+        .with_value(Date::new(2026, 11, 27).expect("demo date is valid"));
+    subscriptions.push(picker.changed().subscribe(|date| {
+        println!(
+            "DatePicker: {}",
+            date.map_or_else(|| "<none>".to_owned(), |date| date.to_string())
+        );
+    }));
+    let picker_row = runtime
+        .append_child(
+            calendar_card,
+            FormRow::new("Deadline")
+                .with_description("Header arrows and PageUp/PageDown page months; arrow keys walk days and weeks; Enter selects.")
+                .without_stretch(),
+        )
+        .expect("calendar card exists");
+    let picker_width = runtime
+        .append_child(picker_row, MaxWidth::new(340.0))
+        .expect("deadline row exists");
+    runtime
+        .append_child(picker_width, picker)
+        .expect("max-width wrapper exists");
+
+    let binding_card = append_card(
+        runtime,
+        stack,
+        "Live bindings",
+        "Property + runtime.bind is a thin one-way copy that wakes redraws — no callbacks, no dependency graph. Drag the slider: the progress bar follows through a binding alone.",
+    );
+    let drive = Slider::with_value(0.0, 100.0, 64.0);
+    let drive_value = drive.value();
+    append_form(
+        runtime,
+        binding_card,
+        FormRow::new("Drive").with_description("The source property."),
+        drive,
+    );
+    let follower = ProgressBar::with_progress(0.64);
+    bindings.push(runtime.bind(&follower.progress(), &drive_value));
+    append_form(
+        runtime,
+        binding_card,
+        FormRow::new("Follower").with_description("ProgressBar.progress() bound to the slider's value."),
+        follower,
+    );
+
+    let source = NumberInput::new()
+        .with_range(0.0, 1_000.0)
+        .with_step(1.0)
+        .with_value(128.0);
+    let source_value = source.value();
+    let source_row = runtime
+        .append_child(
+            binding_card,
+            FormRow::new("Source")
+                .with_description("Edit this field…")
+                .without_stretch(),
+        )
+        .expect("binding card exists");
+    let source_width = runtime
+        .append_child(source_row, MaxWidth::new(220.0))
+        .expect("source row exists");
+    runtime
+        .append_child(source_width, source)
+        .expect("max-width wrapper exists");
+    let mirror = NumberInput::new()
+        .with_range(0.0, 1_000.0)
+        .with_step(1.0)
+        .with_value(128.0);
+    bindings.push(runtime.bind(&mirror.value(), &source_value));
+    let mirror_row = runtime
+        .append_child(
+            binding_card,
+            FormRow::new("Mirror (one-way)")
+                .with_description("…and the mirror updates. Editing the mirror does not write back: bindings are one-way by design.")
+                .without_stretch(),
+        )
+        .expect("binding card exists");
+    let mirror_width = runtime
+        .append_child(mirror_row, MaxWidth::new(220.0))
+        .expect("mirror row exists");
+    runtime
+        .append_child(mirror_width, mirror)
+        .expect("max-width wrapper exists");
+}
+
+// ---------------------------------------------------------------------------
+// Page content: data views
+// ---------------------------------------------------------------------------
+
+/// Ten thousand log rows backed by plain data, never by widgets.
+struct LogSource;
+
+impl VirtualDataSource for LogSource {
+    fn row_count(&self) -> usize {
+        10_000
     }
-    #[cfg(not(feature = "media"))]
-    {
-        (stack, stack, stack, stack)
+
+    fn row_key(&self, row: usize) -> u64 {
+        row as u64
     }
+
+    fn row_text(&self, row: usize) -> String {
+        format!("[{row:05}] event=frame.commit channel=render severity=info")
+    }
+
+    fn label(&self) -> Option<String> {
+        Some("Render log".to_owned())
+    }
+}
+
+/// Five thousand table rows with four typed columns.
+struct SceneTable;
+
+impl VirtualTableSource for SceneTable {
+    fn row_count(&self) -> usize {
+        5_000
+    }
+
+    fn row_key(&self, row: usize) -> u64 {
+        row as u64
+    }
+
+    fn column_count(&self) -> usize {
+        4
+    }
+
+    fn column_title(&self, column: usize) -> String {
+        ["ID", "Name", "Kind", "Score"][column].to_owned()
+    }
+
+    fn column_width(&self, column: usize) -> f32 {
+        [80.0, 240.0, 180.0, 100.0][column]
+    }
+
+    fn cell_text(&self, row: usize, column: usize) -> String {
+        match column {
+            0 => format!("{row:05}"),
+            1 => format!("node-{:04}", row % 1_000),
+            2 => ["Mesh", "Light", "Camera", "Material"][row % 4].to_owned(),
+            _ => format!("{}", (row * 37) % 100),
+        }
+    }
+
+    fn label(&self) -> Option<String> {
+        Some("Scene graph".to_owned())
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn append_data_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    tabs: drawen::WidgetId,
+) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    let tree_card = append_card(
+        runtime,
+        stack,
+        "TreeView",
+        "Hierarchical data with expandable branches. Selection addresses stable node ids, so it survives expanding, collapsing, and replacing the roots.",
+    );
+    let tree = TreeView::new().with_roots(vec![
+        TreeNode::new("assets", "assets")
+            .child(
+                TreeNode::new("textures", "textures")
+                    .child(TreeNode::new("logo", "logo.png")),
+            )
+            .child(TreeNode::new("audio", "audio")),
+        TreeNode::new("scenes", "scenes").child(TreeNode::new("main", "main.graph")),
+        TreeNode::new("src", "src")
+            .child(TreeNode::new("lib", "lib.rs"))
+            .child(TreeNode::new("main_rs", "main.rs")),
+        TreeNode::new("docs", "docs"),
+    ]);
+    subscriptions.push(tree.changed().subscribe(|id| {
+        println!("TreeView: selected {}", id.as_deref().unwrap_or("<none>"));
+    }));
+    subscriptions.push(
+        tree.activated()
+            .subscribe(|id| println!("TreeView: open {id}")),
+    );
+    subscriptions.push(tree.toggled().subscribe(|(id, expanded)| {
+        println!("TreeView: {id} expanded={expanded}");
+    }));
+    let tree_frame = runtime
+        .append_child(tree_card, FixedHeight::new(280.0))
+        .expect("tree card exists");
+    runtime
+        .append_child(tree_frame, tree)
+        .expect("tree frame exists");
+    append_label(
+        runtime,
+        tree_card,
+        "Click a twisty to expand, a row to select; double-click or Enter activates. Arrow keys navigate, expand, and collapse.",
+        0.86,
+        TextTone::Muted,
+    );
+
+    let list_card = append_card(
+        runtime,
+        stack,
+        "VirtualList · 10,000 rows",
+        "Only visible rows plus overscan are measured and painted. Ctrl-click and Shift-click extend the selection; the data source is plain Rust, not widgets.",
+    );
+    let mut log = VirtualList::new(LogSource, 24.0);
+    log.selection_mut().set_mode(SelectionMode::Multiple);
+    subscriptions.push(log.selection_changed().subscribe(|rows| {
+        println!("VirtualList: {} rows selected", rows.len());
+    }));
+    subscriptions.push(
+        log.activated()
+            .subscribe(|row| println!("VirtualList: activated row {row}")),
+    );
+    let log_frame = runtime
+        .append_child(list_card, FixedHeight::new(260.0))
+        .expect("virtual list card exists");
+    runtime
+        .append_child(log_frame, log)
+        .expect("virtual list frame exists");
+
+    let table_card = append_card(
+        runtime,
+        stack,
+        "VirtualTable · 5,000 rows",
+        "Column headers, stable row keys, and the same selection model as VirtualList. Double-click a cell to activate it.",
+    );
+    let table = VirtualTable::new(
+        SceneTable,
+        vec![
+            drawen::TableColumn::new("ID", 80.0),
+            drawen::TableColumn::new("Name", 240.0),
+            drawen::TableColumn::new("Kind", 180.0),
+            drawen::TableColumn::new("Score", 100.0),
+        ],
+    );
+    subscriptions.push(table.selection_changed().subscribe(|rows| {
+        println!("VirtualTable: {} rows selected", rows.len());
+    }));
+    subscriptions.push(table.activated().subscribe(|(row, column)| {
+        println!("VirtualTable: activated cell ({row}, {column})");
+    }));
+    let table_frame = runtime
+        .append_child(table_card, FixedHeight::new(260.0))
+        .expect("table card exists");
+    runtime
+        .append_child(table_frame, table)
+        .expect("table frame exists");
+
+    let custom_card = append_card(
+        runtime,
+        stack,
+        "ListView",
+        "The offset-virtualized list for custom row widgets: only visible rows plus overscan are measured and painted.",
+    );
+    let list_frame = runtime
+        .append_child(custom_card, FixedHeight::new(286.0))
+        .expect("list card exists");
+    let list = runtime
+        .append_child(list_frame, ListView::new(46.0))
+        .expect("list frame exists");
+    for index in 0..36 {
+        runtime
+            .append_child(list, ListRow { index })
+            .expect("list view exists");
+    }
+
+    let viewer_card = append_card(
+        runtime,
+        stack,
+        "ImageViewer",
+        "Drag to pan, wheel to zoom. The zoom is a Property, so application state can drive or follow it.",
+    );
+    let viewer = ImageViewer::new(showcase_texture())
+        .with_label("Procedural 128×128 texture · drag to pan · wheel to zoom");
+    subscriptions.push(
+        viewer
+            .zoom_changed()
+            .subscribe(|zoom| println!("ImageViewer: zoom {zoom:.2}×")),
+    );
+    let viewer_frame = runtime
+        .append_child(viewer_card, FixedHeight::new(280.0))
+        .expect("viewer card exists");
+    runtime
+        .append_child(viewer_frame, viewer)
+        .expect("viewer frame exists");
 }
 
 // ---------------------------------------------------------------------------
@@ -2386,6 +3038,601 @@ fn append_appearance_page(
 // Page content: layout
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
+fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    let card = append_card(
+        runtime,
+        stack,
+        "Splitter",
+        "Drag the vertical splitter. Both panels receive new tight constraints instead of simply shifting.",
+    );
+    let frame = runtime
+        .append_child(card, FixedHeight::new(310.0))
+        .expect("layout card exists");
+    let splitter = runtime
+        .append_child(frame, Splitter::new(SplitAxis::Horizontal, 0.46))
+        .expect("fixed splitter frame exists");
+    runtime
+        .append_child(
+            splitter,
+            PanelCard::new(
+                "First panel",
+                "Panels paint their background from theme.surface() with a slight accent tint, so switching palettes is immediately visible.",
+                0.07,
+            ),
+        )
+        .expect("splitter exists");
+    runtime
+        .append_child(
+            splitter,
+            PanelCard::new(
+                "Second panel",
+                "Splitter works with the pointer and keyboard while keeping focus inside the retained tree.",
+                0.13,
+            ),
+        )
+        .expect("splitter exists");
+
+    let primitives_card = append_card(
+        runtime,
+        stack,
+        "Layout primitives",
+        "Row, Column, Stack, Align, Padding, and SizedBox are the standard building blocks; the showcase's own VStack/HStack above are built from the same Widget contract.",
+    );
+    let demos = runtime
+        .append_child(primitives_card, HStack::new(16.0).with_equal(true))
+        .expect("primitives card exists");
+
+    let row_demo = runtime
+        .append_child(demos, VStack::new(8.0))
+        .expect("demos row exists");
+    let row = runtime
+        .append_child(row_demo, Row::new())
+        .expect("row demo exists");
+    for (width, color) in [
+        (44.0, Color::rgba8(94, 234, 212, 255)),
+        (60.0, Color::rgba8(167, 139, 250, 255)),
+        (80.0, Color::rgba8(251, 191, 36, 255)),
+    ] {
+        let cell = runtime
+            .append_child(
+                row,
+                DrawenBox::new()
+                    .with_background(color)
+                    .with_corner_radius(8.0),
+            )
+            .expect("row exists");
+        runtime
+            .append_child(cell, SizedBox::new(Some(width), Some(44.0)))
+            .expect("colored box exists");
+    }
+    append_label(runtime, row_demo, "Row · sums child widths", 0.8, TextTone::Muted);
+
+    let column_demo = runtime
+        .append_child(demos, VStack::new(8.0))
+        .expect("demos row exists");
+    let column = runtime
+        .append_child(column_demo, drawen::Column::new())
+        .expect("column demo exists");
+    for color in [
+        Color::rgba8(94, 234, 212, 255),
+        Color::rgba8(167, 139, 250, 255),
+    ] {
+        let cell = runtime
+            .append_child(
+                column,
+                DrawenBox::new()
+                    .with_background(color)
+                    .with_corner_radius(6.0),
+            )
+            .expect("column exists");
+        runtime
+            .append_child(cell, SizedBox::new(Some(120.0), Some(26.0)))
+            .expect("colored box exists");
+    }
+    append_label(
+        runtime,
+        column_demo,
+        "Column · stacks children",
+        0.8,
+        TextTone::Muted,
+    );
+
+    let stack_demo = runtime
+        .append_child(demos, VStack::new(8.0))
+        .expect("demos row exists");
+    let overlay = runtime
+        .append_child(stack_demo, Stack::new())
+        .expect("stack demo exists");
+    let base = runtime
+        .append_child(
+            overlay,
+            DrawenBox::new()
+                .with_background(Color::rgba8(94, 234, 212, 70))
+                .with_corner_radius(8.0),
+        )
+        .expect("stack exists");
+    runtime
+        .append_child(base, SizedBox::new(Some(110.0), Some(66.0)))
+        .expect("base layer box exists");
+    let inset = runtime
+        .append_child(overlay, Padding::new(Insets::new(18.0, 0.0, 0.0, 26.0)))
+        .expect("stack exists");
+    let top = runtime
+        .append_child(
+            inset,
+            DrawenBox::new()
+                .with_background(Color::rgba8(167, 139, 250, 255))
+                .with_corner_radius(6.0),
+        )
+        .expect("padding exists");
+    runtime
+        .append_child(top, SizedBox::new(Some(64.0), Some(36.0)))
+        .expect("top layer box exists");
+    append_label(
+        runtime,
+        stack_demo,
+        "Stack · overlays at the origin",
+        0.8,
+        TextTone::Muted,
+    );
+
+    let align_demo = runtime
+        .append_child(demos, VStack::new(8.0))
+        .expect("demos row exists");
+    let align_width = runtime
+        .append_child(align_demo, MaxWidth::new(220.0))
+        .expect("align demo exists");
+    let align_frame = runtime
+        .append_child(align_width, FixedHeight::new(88.0))
+        .expect("max width exists");
+    let align = runtime
+        .append_child(
+            align_frame,
+            Align::new(Alignment::End, Alignment::Center),
+        )
+        .expect("fixed frame exists");
+    let aligned = runtime
+        .append_child(
+            align,
+            DrawenBox::new()
+                .with_background(Color::rgba8(251, 191, 36, 255))
+                .with_corner_radius(8.0),
+        )
+        .expect("align exists");
+    runtime
+        .append_child(aligned, SizedBox::new(Some(40.0), Some(40.0)))
+        .expect("aligned box exists");
+    append_label(
+        runtime,
+        align_demo,
+        "Align · end / center",
+        0.8,
+        TextTone::Muted,
+    );
+
+    let padding_demo = runtime
+        .append_child(demos, VStack::new(8.0))
+        .expect("demos row exists");
+    let outer = runtime
+        .append_child(
+            padding_demo,
+            DrawenBox::new()
+                .with_background(Color::rgba8(128, 140, 160, 60))
+                .with_corner_radius(8.0),
+        )
+        .expect("padding demo exists");
+    let padded = runtime
+        .append_child(outer, Padding::new(Insets::all(14.0)))
+        .expect("outer box exists");
+    let inner = runtime
+        .append_child(
+            padded,
+            DrawenBox::new()
+                .with_background(Color::rgba8(94, 234, 212, 255))
+                .with_corner_radius(6.0),
+        )
+        .expect("padding exists");
+    runtime
+        .append_child(inner, SizedBox::new(Some(72.0), Some(40.0)))
+        .expect("inner box exists");
+    append_label(
+        runtime,
+        padding_demo,
+        "Padding · insets around a child",
+        0.8,
+        TextTone::Muted,
+    );
+
+    let scroll_card = append_card(
+        runtime,
+        stack,
+        "Horizontal scrolling",
+        "ScrollView::horizontal() gives its child unbounded width; the Row below is wider than the page, so the wheel and drag scroll it.",
+    );
+    let scroll_frame = runtime
+        .append_child(scroll_card, FixedHeight::new(150.0))
+        .expect("scroll card exists");
+    let scroll = runtime
+        .append_child(scroll_frame, ScrollView::horizontal())
+        .expect("scroll frame exists");
+    let tiles = runtime
+        .append_child(scroll, Row::new())
+        .expect("horizontal scroll exists");
+    for index in 0..16 {
+        let tile = runtime
+            .append_child(tiles, Padding::new(Insets::new(6.0, 12.0, 6.0, 0.0)))
+            .expect("tiles row exists");
+        let column = runtime
+            .append_child(tile, VStack::new(6.0))
+            .expect("tile exists");
+        runtime
+            .append_child(column, Image::with_size(showcase_texture(), 88.0, 88.0))
+            .expect("tile column exists");
+        append_label(
+            runtime,
+            column,
+            &format!("Tile {:02}", index + 1),
+            0.8,
+            TextTone::Muted,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page content: dock workspace
+// ---------------------------------------------------------------------------
+
+fn append_workspace_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let page = runtime
+        .append_child(tabs, WorkspacePage)
+        .expect("tab bar exists");
+    let layout = Rc::new(RefCell::new(
+        WorkspaceLayout::new(LayoutNode::split(
+            DockAxis::Horizontal,
+            0.25,
+            LayoutNode::Panel {
+                id: PanelId::from("navigator"),
+            },
+            LayoutNode::tabs(vec![PanelId::from("scene"), PanelId::from("inspector")]),
+        ))
+        .expect("showcase workspace layout is valid"),
+    ));
+    let mut dock = DockArea::new(layout);
+    dock.register_panel(PanelId::from("navigator"))
+        .expect("panel is unique");
+    dock.register_panel(PanelId::from("scene"))
+        .expect("panel is unique");
+    dock.register_panel(PanelId::from("inspector"))
+        .expect("panel is unique");
+    let dock = runtime
+        .append_child(page, dock)
+        .expect("workspace page exists");
+    for panel in [
+        PanelCard::new(
+            "Navigator",
+            "DockArea projects the stable WorkspaceLayout model onto retained children.",
+            0.05,
+        ),
+        PanelCard::new(
+            "Scene",
+            "Switch tabs and drag the splitter between groups.",
+            0.10,
+        ),
+        PanelCard::new(
+            "Inspector",
+            "DockArea keeps the UI separate from the serializable panel model.",
+            0.15,
+        ),
+    ] {
+        runtime.append_child(dock, panel).expect("dock area exists");
+    }
+}
+
+struct WorkspacePage;
+
+impl Widget for WorkspacePage {
+    fn layout(
+        &mut self,
+        context: &mut LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> LayoutResult {
+        let size = available_size(constraints);
+        let inset = PAGE_PADDING
+            .min(size.width() / 12.0)
+            .min(size.height() / 12.0);
+        let mut children = Vec::new();
+        if context.child_count() == 1 {
+            let (id, _) = context
+                .layout_child(
+                    0,
+                    tight(
+                        (size.width() - inset * 2.0).max(0.0),
+                        (size.height() - inset * 2.0).max(0.0),
+                    ),
+                )
+                .expect("workspace dock exists");
+            children.push(ChildLayout::new(id, Point::new(inset, inset)));
+        }
+        LayoutResult::with_children(size, children)
+    }
+
+    fn paint(&self, context: &mut PaintContext<'_>, environment: &UiEnvironment, bounds: Rect) {
+        context.fill_rect(bounds, environment.theme().background());
+    }
+
+    fn participates_in_hit_test(&self) -> bool {
+        false
+    }
+
+    fn clips_children(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page content: media
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_lines)]
+#[cfg_attr(not(feature = "media"), allow(unused_variables, clippy::ptr_arg))]
+fn append_media_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    #[cfg(feature = "media")] media_import_requested: &Rc<Cell<Option<MediaImport>>>,
+    tabs: drawen::WidgetId,
+) -> (
+    drawen::WidgetId,
+    drawen::WidgetId,
+    drawen::WidgetId,
+    drawen::WidgetId,
+) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    #[cfg(feature = "media")]
+    {
+        let anim_card = append_card(
+            runtime,
+            stack,
+            "AnimatedImage",
+            "Frame-based animation on the media clock: each frame is a RasterImage with a duration. from_gif() decodes real GIF bytes; this loop is generated procedurally.",
+        );
+        let anim_row = runtime
+            .append_child(anim_card, HStack::new(18.0))
+            .expect("animated image card exists");
+        runtime
+            .append_child(
+                anim_row,
+                AnimatedImage::new(animation_frames())
+                    .with_size(120.0, 120.0)
+                    .with_label("Procedural 12-frame loop"),
+            )
+            .expect("animated row exists");
+        append_label(
+            runtime,
+            anim_row,
+            "The animation advances through UiRuntime::tick and freezes while the window is hidden or the page is offscreen — no forced frames.",
+            0.9,
+            TextTone::Muted,
+        );
+
+        let media_card = append_card(
+            runtime,
+            stack,
+            "Media players",
+            "Video and AudioPlayer expose configurable native controls. These previews use local frames and manual clocks, so they need no decoder or external media file.",
+        );
+        let video_frame = runtime
+            .append_child(media_card, FixedHeight::new(210.0))
+            .expect("media card exists");
+        let media_preview = runtime
+            .append_child(
+                video_frame,
+                Video::with_frame(procedural_texture(0.35))
+                    .with_title("Drawen release overview")
+                    .with_subtitle("Manual frame · minimal overlay")
+                    .with_duration(Duration::from_secs(215))
+                    .with_position(Duration::from_secs(74))
+                    .with_control_set(VideoControls::minimal())
+                    .with_behavior(PlayerBehavior::new().with_auto_hide(None))
+                    .with_theme(PlayerTheme::new().with_accent(Color::rgba8(94, 234, 212, 255))),
+            )
+            .expect("video frame exists");
+        let full_frame = runtime
+            .append_child(media_card, FixedHeight::new(210.0))
+            .expect("media card exists");
+        runtime
+            .append_child(
+                full_frame,
+                Video::with_frame(showcase_texture())
+                    .with_title("Full control set")
+                    .with_subtitle("VideoControls::new() · volume, rate, fullscreen")
+                    .with_duration(Duration::from_secs(180))
+                    .with_position(Duration::from_secs(42))
+                    .with_control_set(VideoControls::new()),
+            )
+            .expect("full-control frame exists");
+        let import_video = Button::new();
+        subscriptions.push(import_video.activated().subscribe({
+            let media_import_requested = Rc::clone(media_import_requested);
+            move |()| media_import_requested.set(Some(MediaImport::Video))
+        }));
+        let import_video = runtime
+            .append_child(media_card, import_video)
+            .expect("media card exists");
+        append_label(
+            runtime,
+            import_video,
+            "Import video with audio…",
+            0.96,
+            TextTone::Primary,
+        );
+        append_label(
+            runtime,
+            media_card,
+            "Run with `--features audio` to play the chosen video's audio track. The video player then follows the audio-mastered clock.",
+            0.86,
+            TextTone::Muted,
+        );
+        let audio_preview = runtime
+            .append_child(
+                media_card,
+                AudioPlayer::new()
+                    .with_title("Night drive")
+                    .with_subtitle("AudioPlayer · inline layout")
+                    .with_duration(Duration::from_secs(214))
+                    .with_position(Duration::from_secs(86))
+                    .with_volume(0.7)
+                    .with_cover(procedural_texture(0.6)),
+            )
+            .expect("media card exists");
+        let import_audio = Button::new();
+        subscriptions.push(import_audio.activated().subscribe({
+            let media_import_requested = Rc::clone(media_import_requested);
+            move |()| media_import_requested.set(Some(MediaImport::Audio))
+        }));
+        let import_audio = runtime
+            .append_child(media_card, import_audio)
+            .expect("media card exists");
+        append_label(
+            runtime,
+            import_audio,
+            "Import audio…",
+            0.96,
+            TextTone::Primary,
+        );
+        runtime
+            .append_child(
+                media_card,
+                AudioPlayer::new()
+                    .with_title("Compact queue item")
+                    .with_duration(Duration::from_secs(182))
+                    .with_position(Duration::from_secs(35))
+                    .with_layout(AudioPlayerLayout::Compact),
+            )
+            .expect("media card exists");
+
+        (video_frame, media_preview, media_card, audio_preview)
+    }
+    #[cfg(not(feature = "media"))]
+    {
+        let card = append_card(
+            runtime,
+            stack,
+            "Media",
+            "Media playback is disabled in this build. Enable Drawen's `media` feature for Video, AudioPlayer, and AnimatedImage; add `audio` for audio-mastered playback.",
+        );
+        append_label(
+            runtime,
+            card,
+            "cargo run -p drawen --example style_showcase --features audio",
+            0.92,
+            TextTone::Muted,
+        );
+        (stack, stack, stack, stack)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page content: software 3D
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cubex")]
+fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "CubeX · software 3D",
+        "3D content goes through drawen::cubex: a Scene of indexed meshes, lights, and a Camera, rasterized deterministically on the CPU. CubeXView caches the RasterImage and stays on the UI thread.",
+    );
+    runtime
+        .append_child(
+            card,
+            Chips::new(&[
+                "Deterministic rasterizer",
+                "No GPU required",
+                "Cached RasterImage",
+                "Auto-rotate via tick",
+            ]),
+        )
+        .expect("cubex card exists");
+
+    let mut scene = Scene::new()
+        .with_background(SceneColor::from_srgb8(16, 18, 24, 255))
+        .with_ambient(SceneColor::linear_rgb(0.12, 0.13, 0.16));
+    scene.add_light(
+        DirectionalLight::new(Vec3::new(-0.4, 0.9, 0.6), SceneColor::WHITE).with_intensity(1.1),
+    );
+    scene.add(
+        primitives::plane(12.0),
+        Transform::from_translation(Vec3::new(0.0, -1.2, 0.0)),
+        Material::new(SceneColor::from_srgb8(48, 54, 66, 255)),
+    );
+    scene.add(
+        primitives::cube(1.4),
+        Transform::from_rotation(Quat::from_axis_angle(Vec3::Y, 0.5)),
+        Material::new(SceneColor::from_srgb8(230, 126, 48, 255)),
+    );
+    scene.add(
+        primitives::sphere(0.7, 32, 16),
+        Transform::from_translation(Vec3::new(1.8, -0.5, 0.8)),
+        Material::new(SceneColor::from_srgb8(80, 150, 230, 255)),
+    );
+    scene.add(
+        primitives::cube(0.6),
+        Transform::from_translation(Vec3::new(-1.9, -0.9, 0.6)),
+        Material::new(SceneColor::from_srgb8(94, 234, 212, 255)),
+    );
+
+    let frame = runtime
+        .append_child(card, FixedHeight::new(470.0))
+        .expect("cubex card exists");
+    runtime
+        .append_child(
+            frame,
+            CubeXView::new(
+                scene,
+                Camera::orbiting(Vec3::new(0.0, 0.0, 0.0), 5.5, 0.0, 0.28),
+            )
+            .with_resolution(1_360, 470)
+            .with_auto_rotate(0.35)
+            .with_label("Rotating CubeX scene"),
+        )
+        .expect("cubex frame exists");
+    append_label(
+        runtime,
+        card,
+        "Rotation advances through Widget::advance_animation while the page is visible and freezes while hidden — the same rule as every purely visual animation.",
+        0.86,
+        TextTone::Muted,
+    );
+}
+
+#[cfg(not(feature = "cubex"))]
+fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "CubeX · software 3D",
+        "The cubex feature is disabled in this build. Enable Drawen's `cubex` feature to present deterministic software-rasterized 3D scenes through CubeXView.",
+    );
+    append_label(
+        runtime,
+        card,
+        "cargo run -p drawen --example style_showcase --features cubex",
+        0.92,
+        TextTone::Muted,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Page content: DSS
+// ---------------------------------------------------------------------------
+
 fn append_dss_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
     let stack = append_scroll_page(runtime, tabs);
 
@@ -2475,7 +3722,7 @@ fn append_dss_button(
 }
 
 // ---------------------------------------------------------------------------
-// Page content: Servo browser interop
+// Page content: overlays
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
@@ -2483,7 +3730,7 @@ fn append_overlay_page(
     runtime: &mut UiRuntime,
     subscriptions: &mut Vec<Subscription>,
     dirty: &Rc<Cell<bool>>,
-    toast_requested: &Rc<Cell<bool>>,
+    toast_queue: &Rc<RefCell<Vec<ToastTone>>>,
     tabs: drawen::WidgetId,
 ) -> ToastHandle {
     let stack = append_scroll_page(runtime, tabs);
@@ -2533,15 +3780,72 @@ fn append_overlay_page(
     );
     runtime.append_child(popover, menu).expect("popover exists");
 
-    let toast_button = Button::new();
-    subscriptions.push(toast_button.activated().subscribe({
-        let toast_requested = Rc::clone(toast_requested);
-        move |()| toast_requested.set(true)
+    let toast_card = append_card(
+        runtime,
+        stack,
+        "Toast notifications",
+        "ToastHost stacks transient notifications in a window corner. Each tone resolves a semantic theme color; the queue is drained on the UI thread after the input event.",
+    );
+    let toast_host = ToastHost::new();
+    let toast_handle = toast_host.handle();
+    let tones = runtime
+        .append_child(toast_card, HStack::new(10.0))
+        .expect("toast card exists");
+    for (tone, label) in [
+        (ToastTone::Info, "Info toast"),
+        (ToastTone::Success, "Success toast"),
+        (ToastTone::Warning, "Warning toast"),
+        (ToastTone::Danger, "Danger toast"),
+    ] {
+        let button = Button::new();
+        subscriptions.push(button.activated().subscribe({
+            let toast_queue = Rc::clone(toast_queue);
+            move |()| toast_queue.borrow_mut().push(tone)
+        }));
+        let button = runtime
+            .append_child(tones, button)
+            .expect("toast tone row exists");
+        append_label(runtime, button, label, 0.94, TextTone::Primary);
+    }
+    let clear = Button::new();
+    subscriptions.push(clear.activated().subscribe({
+        let toast_handle = toast_handle.clone();
+        move |()| toast_handle.clear()
     }));
-    let toast_button = runtime
-        .append_child(controls, toast_button)
-        .expect("overlay controls exist");
-    append_label(runtime, toast_button, "Show toast", 0.94, TextTone::Primary);
+    let clear = runtime
+        .append_child(tones, clear)
+        .expect("toast tone row exists");
+    append_label(runtime, clear, "Clear all", 0.94, TextTone::Primary);
+
+    let corner_card = append_card(
+        runtime,
+        stack,
+        "Toast corners",
+        "ToastHost::with_corner picks any window corner. This second host stacks to the top-left; its handle shows a longer-lived toast directly.",
+    );
+    let corner_host = ToastHost::new().with_corner(drawen::ToastCorner::TopLeft);
+    let corner_handle = corner_host.handle();
+    let corner_button = Button::new();
+    subscriptions.push(corner_button.activated().subscribe({
+        let corner_handle = corner_handle.clone();
+        move |()| {
+            let _ = corner_handle.show(
+                Toast::new("Top-left corner · 8 s lifetime")
+                    .with_tone(ToastTone::Success)
+                    .with_duration(Duration::from_secs(8)),
+            );
+        }
+    }));
+    let corner_button = runtime
+        .append_child(corner_card, corner_button)
+        .expect("corner card exists");
+    append_label(
+        runtime,
+        corner_button,
+        "Show top-left toast",
+        0.94,
+        TextTone::Primary,
+    );
 
     let modal_card = append_card(
         runtime,
@@ -2671,13 +3975,174 @@ fn append_overlay_page(
         .append_child(split, split_menu)
         .expect("split button exists");
 
-    let toast_host = ToastHost::new();
-    let toast_handle = toast_host.handle();
     runtime
         .append_child(stack, toast_host)
         .expect("overlay stack exists");
+    runtime
+        .append_child(stack, corner_host)
+        .expect("overlay stack exists");
     toast_handle
 }
+
+// ---------------------------------------------------------------------------
+// Page content: runtime, tasks, diagnostics
+// ---------------------------------------------------------------------------
+
+fn append_runtime_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    task_demo: &Rc<TaskDemo>,
+    diagnostics: &Rc<RefCell<String>>,
+    bindings: &mut Vec<Binding>,
+    tabs: drawen::WidgetId,
+) -> (drawen::WidgetId, drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+
+    let task_card = append_card(
+        runtime,
+        stack,
+        "Background tasks",
+        "TaskPool runs the job on a worker thread; a UiSender delivers progress and the result to a UiDispatcher, and the UI thread drains them in window_event. Workers never touch widgets, signals, or subscriptions.",
+    );
+    let actions = runtime
+        .append_child(task_card, HStack::new(10.0))
+        .expect("task card exists");
+    let run = Button::new();
+    subscriptions.push(run.activated().subscribe({
+        let task_demo = Rc::clone(task_demo);
+        move |()| task_demo.start()
+    }));
+    let run = runtime
+        .append_child(actions, run)
+        .expect("task actions exist");
+    append_label(runtime, run, "Run checksum job", 0.94, TextTone::Primary);
+    let cancel = Button::new();
+    subscriptions.push(cancel.activated().subscribe({
+        let task_demo = Rc::clone(task_demo);
+        move |()| task_demo.cancel()
+    }));
+    let cancel = runtime
+        .append_child(actions, cancel)
+        .expect("task actions exist");
+    append_label(runtime, cancel, "Cancel", 0.94, TextTone::Primary);
+
+    let bar = ProgressBar::with_progress(0.0);
+    bindings.push(runtime.bind(&bar.progress(), &task_demo.progress));
+    append_form(
+        runtime,
+        task_card,
+        FormRow::new("Progress")
+            .with_description("Bound to the task's progress Property — no callbacks in the widget."),
+        bar,
+    );
+    let status_frame = runtime
+        .append_child(task_card, FixedHeight::new(56.0))
+        .expect("task card exists");
+    let task_status_id = runtime
+        .append_child(status_frame, LiveText::new(Rc::clone(&task_demo.status)))
+        .expect("status frame exists");
+
+    let diag_card = append_card(
+        runtime,
+        stack,
+        "Frame diagnostics",
+        "UiRuntime::stats reports layout/paint passes, timings, command counts, and cache reuse. The readout below is sampled after every input event and only invalidates its own region when the text changes.",
+    );
+    let diag_frame = runtime
+        .append_child(diag_card, FixedHeight::new(120.0))
+        .expect("diagnostics card exists");
+    let diagnostics_id = runtime
+        .append_child(diag_frame, LiveText::new(Rc::clone(diagnostics)))
+        .expect("diagnostics frame exists");
+
+    let damage_card = append_card(
+        runtime,
+        stack,
+        "Frame damage contract",
+        "The showcase forwards UiRuntime::frame_damage from WindowApplication::frame_damage, so the backend repaints only the damaged region.",
+    );
+    for line in [
+        "Full — rasterize the whole frame; the conservative default.",
+        "Region(rect) — only this logical-pixel region changed; the rest keeps its previous pixels.",
+        "Unchanged — the frame is identical; the backend still presents the retained frame.",
+        "Local changes use invalidate_paint_for(id) / invalidate_rect(rect); geometry changes invalidate layout.",
+    ] {
+        append_label(runtime, damage_card, line, 0.9, TextTone::Muted);
+    }
+
+    (task_status_id, diagnostics_id)
+}
+
+// ---------------------------------------------------------------------------
+// Page content: agent bridge
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "agent")]
+fn append_agent_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    observation_requested: &Rc<Cell<bool>>,
+    report: &Rc<RefCell<String>>,
+    tabs: drawen::WidgetId,
+) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Semantic UI inspector",
+        "drawen-agent reads the same accessibility tree used by assistive technology. It returns owned data, so an LLM can inspect and drive a UI without screenshots or GPU access.",
+    );
+    let button = Button::new();
+    subscriptions.push(button.activated().subscribe({
+        let observation_requested = Rc::clone(observation_requested);
+        move |()| observation_requested.set(true)
+    }));
+    let button = runtime
+        .append_child(card, button)
+        .expect("agent card exists");
+    append_label(
+        runtime,
+        button,
+        "Capture semantic tree",
+        0.96,
+        TextTone::Primary,
+    );
+    let frame = runtime
+        .append_child(card, FixedHeight::new(260.0))
+        .expect("agent card exists");
+    runtime
+        .append_child(frame, LiveText::new(Rc::clone(report)))
+        .expect("agent report frame exists");
+    append_label(
+        runtime,
+        card,
+        "The report is intentionally compact. Agent::execute can then target a current widget by id, name, or role and receives a fresh snapshot after every action.",
+        0.88,
+        TextTone::Muted,
+    );
+}
+
+#[cfg(not(feature = "agent"))]
+fn append_agent_page(runtime: &mut UiRuntime, _: &mut Vec<Subscription>, tabs: drawen::WidgetId) {
+    let stack = append_scroll_page(runtime, tabs);
+    let card = append_card(
+        runtime,
+        stack,
+        "Semantic UI inspector",
+        "The agent bridge is opt-in, keeping ordinary applications free of serde and transport dependencies.",
+    );
+    append_label(
+        runtime,
+        card,
+        "Run `cargo run -p drawen --example style_showcase --features agent` to activate the live semantic-tree inspector. Use `agent-serve` when an external process should use the loopback JSON-lines bridge.",
+        0.92,
+        TextTone::Muted,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Page content: Servo browser interop
+// ---------------------------------------------------------------------------
 
 fn append_servo_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
     let stack = append_scroll_page(runtime, tabs);
@@ -2739,128 +4204,6 @@ fn append_servo_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
         "finish_consumer_frame() → returns ownership after the final GPU submission.",
     ] {
         append_label(runtime, contract, text, 0.9, TextTone::Primary);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Page content: agent bridge
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "agent")]
-fn append_agent_page(
-    runtime: &mut UiRuntime,
-    subscriptions: &mut Vec<Subscription>,
-    observation_requested: &Rc<Cell<bool>>,
-    report: &Rc<RefCell<String>>,
-    tabs: drawen::WidgetId,
-) {
-    let stack = append_scroll_page(runtime, tabs);
-    let card = append_card(
-        runtime,
-        stack,
-        "Semantic UI inspector",
-        "drawen-agent reads the same accessibility tree used by assistive technology. It returns owned data, so an LLM can inspect and drive a UI without screenshots or GPU access.",
-    );
-    let button = Button::new();
-    subscriptions.push(button.activated().subscribe({
-        let observation_requested = Rc::clone(observation_requested);
-        move |()| observation_requested.set(true)
-    }));
-    let button = runtime
-        .append_child(card, button)
-        .expect("agent card exists");
-    append_label(
-        runtime,
-        button,
-        "Capture semantic tree",
-        0.96,
-        TextTone::Primary,
-    );
-    let frame = runtime
-        .append_child(card, FixedHeight::new(260.0))
-        .expect("agent card exists");
-    runtime
-        .append_child(frame, AgentReport::new(Rc::clone(report)))
-        .expect("agent report frame exists");
-    append_label(
-        runtime,
-        card,
-        "The report is intentionally compact. Agent::execute can then target a current widget by id, name, or role and receives a fresh snapshot after every action.",
-        0.88,
-        TextTone::Muted,
-    );
-}
-
-#[cfg(not(feature = "agent"))]
-fn append_agent_page(runtime: &mut UiRuntime, _: &mut Vec<Subscription>, tabs: drawen::WidgetId) {
-    let stack = append_scroll_page(runtime, tabs);
-    let card = append_card(
-        runtime,
-        stack,
-        "Semantic UI inspector",
-        "The agent bridge is opt-in, keeping ordinary applications free of serde and transport dependencies.",
-    );
-    append_label(
-        runtime,
-        card,
-        "Run `cargo run -p drawen --example style_showcase --features agent` to activate the live semantic-tree inspector. Use `agent-serve` when an external process should use the loopback JSON-lines bridge.",
-        0.92,
-        TextTone::Muted,
-    );
-}
-
-fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
-    let stack = append_scroll_page(runtime, tabs);
-
-    let card = append_card(
-        runtime,
-        stack,
-        "Splitter",
-        "Drag the vertical splitter. Both panels receive new tight constraints instead of simply shifting.",
-    );
-    let frame = runtime
-        .append_child(card, FixedHeight::new(310.0))
-        .expect("layout card exists");
-    let splitter = runtime
-        .append_child(frame, Splitter::new(SplitAxis::Horizontal, 0.46))
-        .expect("fixed splitter frame exists");
-    runtime
-        .append_child(
-            splitter,
-            PanelCard::new(
-                "First panel",
-                "Panels paint their background from theme.surface() with a slight accent tint, so switching palettes is immediately visible.",
-                0.07,
-            ),
-        )
-        .expect("splitter exists");
-    runtime
-        .append_child(
-            splitter,
-            PanelCard::new(
-                "Second panel",
-                "Splitter works with the pointer and keyboard while keeping focus inside the retained tree.",
-                0.13,
-            ),
-        )
-        .expect("splitter exists");
-
-    let list_card = append_card(
-        runtime,
-        stack,
-        "ListView",
-        "The list is virtualized: only visible rows plus overscan are measured and painted.",
-    );
-    let list_frame = runtime
-        .append_child(list_card, FixedHeight::new(286.0))
-        .expect("list card exists");
-    let list = runtime
-        .append_child(list_frame, ListView::new(46.0))
-        .expect("list frame exists");
-    for index in 0..36 {
-        runtime
-            .append_child(list, ListRow { index })
-            .expect("list view exists");
     }
 }
 
@@ -3002,97 +4345,6 @@ impl Widget for ListRow {
 
     fn participates_in_hit_test(&self) -> bool {
         false
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Page content: dock workspace
-// ---------------------------------------------------------------------------
-
-fn append_workspace_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
-    let page = runtime
-        .append_child(tabs, WorkspacePage)
-        .expect("tab bar exists");
-    let layout = Rc::new(RefCell::new(
-        WorkspaceLayout::new(LayoutNode::split(
-            DockAxis::Horizontal,
-            0.25,
-            LayoutNode::Panel {
-                id: PanelId::from("navigator"),
-            },
-            LayoutNode::tabs(vec![PanelId::from("scene"), PanelId::from("inspector")]),
-        ))
-        .expect("showcase workspace layout is valid"),
-    ));
-    let mut dock = DockArea::new(layout);
-    dock.register_panel(PanelId::from("navigator"))
-        .expect("panel is unique");
-    dock.register_panel(PanelId::from("scene"))
-        .expect("panel is unique");
-    dock.register_panel(PanelId::from("inspector"))
-        .expect("panel is unique");
-    let dock = runtime
-        .append_child(page, dock)
-        .expect("workspace page exists");
-    for panel in [
-        PanelCard::new(
-            "Navigator",
-            "DockArea projects the stable WorkspaceLayout model onto retained children.",
-            0.05,
-        ),
-        PanelCard::new(
-            "Scene",
-            "Switch tabs and drag the splitter between groups.",
-            0.10,
-        ),
-        PanelCard::new(
-            "Inspector",
-            "DockArea keeps the UI separate from the serializable panel model.",
-            0.15,
-        ),
-    ] {
-        runtime.append_child(dock, panel).expect("dock area exists");
-    }
-}
-
-struct WorkspacePage;
-
-impl Widget for WorkspacePage {
-    fn layout(
-        &mut self,
-        context: &mut LayoutContext<'_>,
-        constraints: Constraints,
-    ) -> LayoutResult {
-        let size = available_size(constraints);
-        let inset = PAGE_PADDING
-            .min(size.width() / 12.0)
-            .min(size.height() / 12.0);
-        let mut children = Vec::new();
-        if context.child_count() == 1 {
-            let (id, _) = context
-                .layout_child(
-                    0,
-                    tight(
-                        (size.width() - inset * 2.0).max(0.0),
-                        (size.height() - inset * 2.0).max(0.0),
-                    ),
-                )
-                .expect("workspace dock exists");
-            children.push(ChildLayout::new(id, Point::new(inset, inset)));
-        }
-        LayoutResult::with_children(size, children)
-    }
-
-    fn paint(&self, context: &mut PaintContext<'_>, environment: &UiEnvironment, bounds: Rect) {
-        context.fill_rect(bounds, environment.theme().background());
-    }
-
-    fn participates_in_hit_test(&self) -> bool {
-        false
-    }
-
-    fn clips_children(&self) -> bool {
-        true
     }
 }
 
@@ -3319,6 +4571,78 @@ fn drawen_logo() -> RasterImage {
         }
     }
     RasterImage::new(16, 16, pixels).expect("built-in logo has valid RGBA pixels")
+}
+
+/// A procedural 128×128 texture for the image viewer and scroll tiles.
+fn showcase_texture() -> RasterImage {
+    procedural_texture(0.0)
+}
+
+/// A procedural texture whose palette rotates with `phase` (0..1), so media
+/// previews and tiles can show distinct frames without external assets.
+fn procedural_texture(phase: f32) -> RasterImage {
+    const SIZE: usize = 128;
+    let mut pixels = Vec::with_capacity(SIZE * SIZE * 4);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let u = usize_to_f32(x) / 127.0;
+            let v = usize_to_f32(y) / 127.0;
+            let diagonal = f32::midpoint(u, v);
+            let grid = if x % 16 == 0 || y % 16 == 0 { 0.16 } else { 0.0 };
+            let wave = (diagonal + phase).rem_euclid(1.0);
+            let color = Color::rgb(
+                0.10 + 0.27 * wave + grid,
+                0.14 + 0.78 * diagonal * (1.0 - v * 0.4) + grid,
+                0.24 + 0.59 * (1.0 - wave) + grid,
+            );
+            pixels.extend_from_slice(&[
+                color_component(color.red),
+                color_component(color.green),
+                color_component(color.blue),
+                255,
+            ]);
+        }
+    }
+    RasterImage::new(128, 128, pixels).expect("procedural texture has valid RGBA pixels")
+}
+
+/// Twelve procedural frames for the `AnimatedImage` demo loop.
+#[cfg(feature = "media")]
+fn animation_frames() -> Vec<AnimationFrame> {
+    const SIZE: usize = 64;
+    (0..12)
+        .map(|frame| {
+            let angle = usize_to_f32(frame) / 12.0 * std::f32::consts::TAU;
+            let center_x = 32.0 + angle.cos() * 18.0;
+            let center_y = 32.0 + angle.sin() * 18.0;
+            let hue = usize_to_f32(frame) * 30.0;
+            let dot = hsl(hue, 0.7, 0.6);
+            let mut pixels = Vec::with_capacity(SIZE * SIZE * 4);
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let dx = usize_to_f32(x) - center_x;
+                    let dy = usize_to_f32(y) - center_y;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    let color = if distance < 9.0 {
+                        dot
+                    } else if distance < 11.0 {
+                        dot.with_alpha(0.4)
+                    } else {
+                        Color::rgba8(19, 24, 35, 255)
+                    };
+                    pixels.extend_from_slice(&[
+                        color_component(color.red),
+                        color_component(color.green),
+                        color_component(color.blue),
+                        color_component(color.alpha),
+                    ]);
+                }
+            }
+            let image =
+                RasterImage::new(64, 64, pixels).expect("animation frame has valid RGBA pixels");
+            AnimationFrame::new(image, Duration::from_millis(90))
+        })
+        .collect()
 }
 
 fn color_component(value: f32) -> u8 {

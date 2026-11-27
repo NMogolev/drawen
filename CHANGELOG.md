@@ -104,6 +104,23 @@ in the headings because the version itself must stay valid semver; see
   displayed page a `Property<(i32, u8)>`; header arrows and PageUp/PageDown page
   months, arrow keys walk the cursor, Enter/Space select. The workspace demo's
   Inspector panel now hosts a calendar.
+- The facade re-exports `VirtualTable`'s column metadata as `TableColumn`, so
+  applications can build tables without importing `drawen-widgets`; `Column`
+  remains the vertical layout container.
+
+### Examples
+
+- `style_showcase` is now a complete fourteen-page laboratory for the whole
+  library: components and selectable text, numeric entry (`NumberInput`,
+  `RangeSlider`, `Autocomplete`, `DatePicker`) with live one-way bindings,
+  virtualized data (`TreeView`, `VirtualList` over 10,000 rows, `VirtualTable`
+  over 5,000 rows, `ListView`, `ImageViewer`), layout primitives (`Row`,
+  `Column`, `Stack`, `Align`, `Padding`, `SizedBox`, horizontal `ScrollView`),
+  docking, media (`AnimatedImage`, `Video`, `AudioPlayer`), software 3D
+  (`CubeXView`), the live appearance lab, DSS, overlays with all four toast
+  tones and corners, background tasks (`TaskPool` + `UiDispatcher`) with live
+  frame-damage diagnostics, the agent inspector, and Servo interop. Headless
+  `--snapshot` mode renders every page plus light-palette and tall variants.
 
 ## 0.3.0 - 2026-11-25
 

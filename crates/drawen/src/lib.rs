@@ -104,6 +104,11 @@ pub use drawen_widgets::{
     Tooltip, TreeNode, TreeView, VirtualDataSource, VirtualList, VirtualListHandle, VirtualTable,
     VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
 };
+/// A [`VirtualTable`] column's display metadata.
+///
+/// Re-exported under a distinct name because [`Column`] is the vertical layout
+/// container.
+pub use drawen_widgets::Column as TableColumn;
 #[cfg(feature = "media")]
 pub use drawen_widgets::{
     AnimatedImage, AnimationFrame, FfmpegConfig, GifDecodeError, MediaClock, MediaError,
