@@ -486,6 +486,7 @@ enum MediaImport {
 }
 
 impl StyleShowcase {
+    #[allow(clippy::too_many_lines)]
     fn new(selected_tab: usize) -> Self {
         let size = valid_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         let appearance = Rc::new(RefCell::new(Appearance::default()));
@@ -2469,6 +2470,7 @@ fn append_dss_button(
 // Page content: Servo browser interop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 fn append_overlay_page(
     runtime: &mut UiRuntime,
     subscriptions: &mut Vec<Subscription>,
