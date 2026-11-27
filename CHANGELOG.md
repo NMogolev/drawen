@@ -34,6 +34,13 @@ in the headings because the version itself must stay valid semver; see
   the other; ArrowDown/ArrowUp select a thumb, ArrowLeft/ArrowRight step it, and
   Home/End send it to the range ends. `changed()` fires on user interaction
   only.
+- Added `TreeView` and `TreeNode`, a hierarchical list with expandable branches
+  and single selection addressed by stable node id. `selected()` is a
+  `Property<Option<String>>` for binding; `changed()`, `activated()`
+  (double-click or Enter), and `toggled()` (user expand/collapse) report user
+  intent. Arrow keys navigate, expand, and collapse; the wheel scrolls content
+  taller than the control. The workspace demo's Project panel now hosts a live
+  tree.
 
 ## 0.3.0 - 2026-11-25
 

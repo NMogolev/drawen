@@ -8,8 +8,8 @@ use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 use drawen::{
     Button, ChildLayout, Color, Constraints, DockArea, DocumentId, LayoutContext, LayoutNode,
-    LayoutResult, PanelId, Point, Rect, Size, Subscription, UiEnvironment, UiRuntime, Widget,
-    WorkspaceLayout,
+    LayoutResult, PanelId, Point, Rect, Size, Subscription, TreeNode, TreeView, UiEnvironment,
+    UiRuntime, Widget, WorkspaceLayout,
     platform::{WindowAction, WindowApplication, WindowEvent, WindowOptions, WindowPresentation},
     render::{DisplayList, FontdueTextShaper, PaintContext, TextStyle},
 };
@@ -80,13 +80,7 @@ impl WorkspaceDemo {
                 .expect("every dock item is registered once");
         }
         let dock = runtime.append_child(root, dock_area).expect("root exists");
-        append_panel(
-            &mut runtime,
-            dock,
-            "Project",
-            "assets\nscenes\nmaterials",
-            Color::rgba8(44, 66, 89, 255),
-        );
+        append_project_panel(&mut runtime, dock, &mut subscriptions);
         append_panel(
             &mut runtime,
             dock,
@@ -251,8 +245,21 @@ struct Panel {
 }
 
 impl Widget for Panel {
-    fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
-        LayoutResult::new(available_size(constraints))
+    fn layout(&mut self, context: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+        let size = available_size(constraints);
+        let mut children = Vec::new();
+        for index in 0..context.child_count() {
+            let child_size = Size::new(
+                (size.width() - 36.0).max(0.0),
+                (size.height() - 76.0).max(0.0),
+            )
+            .expect("panel child size is valid");
+            let (id, _) = context
+                .layout_child(index, Constraints::loose(child_size))
+                .expect("panel owns its children");
+            children.push(ChildLayout::new(id, Point::new(18.0, 58.0)));
+        }
+        LayoutResult::with_children(size, children)
     }
 
     fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
@@ -330,10 +337,37 @@ fn append_panel(
     title: &'static str,
     body: &'static str,
     color: Color,
-) {
+) -> drawen::WidgetId {
     runtime
         .append_child(parent, Panel { title, body, color })
-        .expect("dock area exists");
+        .expect("dock area exists")
+}
+
+/// Fills the Project panel with a live tree: selection and activation are
+/// ordinary signals, so the demo just reports them.
+fn append_project_panel(
+    runtime: &mut UiRuntime,
+    dock: drawen::WidgetId,
+    subscriptions: &mut Vec<Subscription>,
+) {
+    let project = append_panel(runtime, dock, "Project", "", Color::rgba8(44, 66, 89, 255));
+    let tree = TreeView::new().with_roots(vec![
+        TreeNode::new("assets", "assets")
+            .child(TreeNode::new("textures", "textures"))
+            .child(TreeNode::new("audio", "audio")),
+        TreeNode::new("scenes", "scenes").child(TreeNode::new("main", "main.graph")),
+        TreeNode::new("materials", "materials"),
+    ]);
+    subscriptions.push(tree.changed().subscribe(move |id| {
+        println!("Project selection: {}", id.as_deref().unwrap_or("<none>"));
+    }));
+    subscriptions.push(
+        tree.activated()
+            .subscribe(move |id| println!("Project open: {id}")),
+    );
+    runtime
+        .append_child(project, tree)
+        .expect("project panel exists");
 }
 
 fn label(text: &str, size: f32, color: Color) -> drawen::Text {

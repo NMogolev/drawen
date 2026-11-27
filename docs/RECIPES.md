@@ -1233,3 +1233,54 @@ Rules for range sliders:
 - Style it through the `range-slider` style target; the track, filled segment,
   and both thumbs resolve accent, background, border, and corner radius from
   DSS or the theme, like `Slider`.
+
+## 17. A tree view
+
+`TreeView` displays hierarchical data with expandable branches and single
+selection addressed by node id:
+
+```rust
+use drawen::{TreeNode, TreeView};
+
+let tree = TreeView::new().with_roots(vec![
+    TreeNode::new("src", "Source")
+        .child(TreeNode::new("main", "main.rs"))
+        .child(TreeNode::new("lib", "lib.rs")),
+    TreeNode::new("docs", "Docs"),
+]);
+let selected = tree.selected(); // Property<Option<String>>, a node id
+let tree = runtime.append_child(parent, tree)?;
+let _binding = runtime.bind(&selected, &state.current_node);
+```
+
+Ids must be unique across the tree; they survive expanding, collapsing, and
+`set_roots` (unknown ids are pruned). Labels are what the user reads.
+
+Interaction:
+
+- Clicking a row selects it; clicking its twisty (the disclosure triangle)
+  expands or collapses the branch and emits `toggled()` with `(id, expanded)`.
+- `ArrowUp`/`ArrowDown` move the selection through visible rows; `ArrowRight`
+  expands a closed branch or enters an open one; `ArrowLeft` collapses an open
+  branch or climbs to its parent; `Home`/`End` jump to the ends.
+- Double-click or `Enter` emits `activated()` with the row id; the tree never
+  opens anything itself.
+- Content taller than the control scrolls with the wheel; keyboard navigation
+  keeps the cursor inside the viewport.
+
+```rust
+let _selection = tree.changed().subscribe(move |id| {
+    state.current_node.set(id.clone()); // user selection only
+});
+let _open = tree.activated().subscribe(move |id| open_document(&id));
+```
+
+Rules for tree views:
+
+- Bind `selected()`, not row indices: ids stay meaningful when branches expand
+  or collapse, while indices shift under the user.
+- Use `changed()` for user selection, `activated()` for open intent, and
+  `toggled()` for disclosure intent; programmatic `set_selected`, `expand`, and
+  `collapse` emit only the property signal or nothing.
+- Style it through the `tree-view` style target; rows paint the theme selection
+  color, and the focused cursor row gets a soft accent outline.

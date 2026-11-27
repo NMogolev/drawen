@@ -74,6 +74,7 @@ application state -> widgets -> layout -> input -> paint -> DisplayList -> rende
 | Copyable read-only text | `Text::styled("...", style).selectable()`; drag or double-click to select, Ctrl+C copies, the text is never edited |
 | A numeric field with steppers | `NumberInput::new().with_range(min, max).with_step(s)`; `value()` is a `Property<f64>`, arrows and steppers step, Enter commits |
 | An interval with two thumbs | `RangeSlider::with_value(min, max, lo, hi)`; `value()` is a `Property<(f32, f32)>`, thumbs stop at each other, arrows select and step |
+| A hierarchical tree with selection | `TreeView::new().with_roots(vec![TreeNode::new(id, label).child(...)])`; `selected()` is a `Property<Option<String>>` of node ids, twisties expand, Enter/double-click activates |
 | An editable combobox / mention picker | `Autocomplete::new([...])` with its `popup()` appended as the single child; `selected(index)` commits, `with_caret_anchor(true)` for mentions |
 | A chat timeline with wrapped messages | `VirtualList::new(source, estimate).with_variable_heights(true)`; stable `row_key`, `VirtualListHandle::anchor_prepended(count)` when history loads above |
 
@@ -344,6 +345,26 @@ The pointer grabs the nearest thumb and stops it at the other thumb;
 Binding copies clamp both ends and swap a reversed pair, so state can never
 push an inverted interval into the widget. See
 [RECIPES.md](RECIPES.md#16-a-range-slider).
+
+### "Show a file tree the user can expand and select."
+
+`TreeView` flattens the branches whose ancestors are expanded and addresses
+selection by stable node id:
+
+```rust
+let tree = TreeView::new().with_roots(vec![
+    TreeNode::new("src", "Source").child(TreeNode::new("main", "main.rs")),
+]);
+let selected = tree.selected(); // Property<Option<String>>
+let tree = runtime.append_child(parent, tree)?;
+let _binding = runtime.bind(&selected, &state.current_node);
+```
+
+Click a twisty to expand or collapse (`toggled()`), click a row to select
+(`changed()`), double-click or press Enter to open (`activated()`). Arrow keys
+navigate, expand, and collapse; ids survive structure changes, so bind the id
+property rather than row indices. See
+[RECIPES.md](RECIPES.md#17-a-tree-view).
 
 ### "Copy from my native window never reaches the OS clipboard."
 

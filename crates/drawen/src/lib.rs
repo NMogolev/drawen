@@ -100,7 +100,7 @@ pub use drawen_widgets::{
     RadioGroup, RangeSlider, ScrollAxis, ScrollView, SegmentedControl, SelectionMode, SelectionModel, SizedBox,
     Skeleton, Slider, Spinner, SplitAxis, SplitButton, Splitter, Stack, Switch, TabBar, Text,
     TextEdit, TextField, TextInput, TitleBar, TitleBarStyle, Toast, ToastCorner, ToastHandle,
-    ToastHost, ToastTone, Toolbar, Tooltip, VirtualDataSource, VirtualList, VirtualListHandle,
+    ToastHost, ToastTone, Toolbar, Tooltip, TreeNode, TreeView, VirtualDataSource, VirtualList, VirtualListHandle,
     VirtualTable, VirtualTableSource, WindowChromeState, WindowControl, WindowFrame,
 };
 #[cfg(feature = "media")]
