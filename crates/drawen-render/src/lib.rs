@@ -17,7 +17,7 @@ mod image;
 mod paint;
 mod text;
 
-pub use display_list::{DisplayCommand, DisplayList, DisplayListStats, TextureId};
+pub use display_list::{DisplayCommand, DisplayList, DisplayListStats, FrameDamage, TextureId};
 pub use font::{
     DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, FontFamily, FontMetrics,
     FontSize, FontStyle, FontWeight, GlyphBitmap,
