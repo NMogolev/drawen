@@ -13,6 +13,6 @@ workspace = true
 
 [dependencies]
 accesskit = "0.24"
-drawen-core = { version = "0.3", path = "../drawen-core" }
-drawen-render = { version = "0.3", path = "../drawen-render" }
-drawen-signals = { version = "0.3", path = "../drawen-signals" }
+drawen-core = { version = "0.4", path = "../drawen-core" }
+drawen-render = { version = "0.4", path = "../drawen-render" }
+drawen-signals = { version = "0.4", path = "../drawen-signals" }

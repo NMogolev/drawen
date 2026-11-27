@@ -458,7 +458,7 @@ Common causes:
 Paste this before asking a model for Drawen code:
 
 ```text
-Use Drawen 0.3. Application code depends on the `drawen` facade, plus
+Use Drawen 0.4. Application code depends on the `drawen` facade, plus
 `drawen-platform-winit` for a native window. Do not use drawen-ui or
 drawen-widgets directly.
 

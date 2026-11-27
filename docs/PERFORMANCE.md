@@ -141,3 +141,11 @@ frames that invalidate everything.
 - Continuous animation: return a frame interval from `next_frame_in` and let
   bounded animations finish; do not force frames for purely visual effects
   while the window is hidden or offscreen.
+
+## Next direction: memory
+
+The damage pipeline removed most redundant CPU work; the next optimization
+milestone targets memory instead. The retained footprint of the widget tree,
+display lists, and renderer caches is the thing to shrink, and the same rule
+applies as for CPU caches: measure first, and do not add a cache that is rarely
+hit — it only adds memory and invalidation bugs.

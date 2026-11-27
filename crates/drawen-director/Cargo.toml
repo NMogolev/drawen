@@ -12,5 +12,5 @@ readme.workspace = true
 workspace = true
 
 [dependencies]
-drawen-platform = { version = "0.3", path = "../drawen-platform" }
-drawen-widgets = { version = "0.3", path = "../drawen-widgets", features = ["media"] }
+drawen-platform = { version = "0.4", path = "../drawen-platform" }
+drawen-widgets = { version = "0.4", path = "../drawen-widgets", features = ["media"] }

@@ -165,6 +165,12 @@ shadows, skeletal animation, instancing fast path, or hierarchical scene graph.
 The software rasterizer is tuned for correctness and small interactive scenes,
 not for large scenes or high frame rates.
 
+The quality bar is still low: the 3D layer is an early experiment. Flat
+Lambert shading without antialiasing, CPU-only rasterization, and none of the
+visual polish of the 2D stack put it far behind the rest of Drawen in both
+looks and speed. Use it for small deterministic previews and tests, not
+production rendering; a later GPU backend is the intended path out.
+
 Those are layer boundaries, not game-engine decisions. A game can be built on
 top of CubeX, but the crate deliberately does not provide a game loop, an entity
 system, input mapping, physics, or asset loading. Later layers can add a GPU

@@ -25,13 +25,13 @@ media = ["dep:image", "dep:paleo-player"]
 audio = ["media", "paleo-player/device"]
 
 [dependencies]
-cubex = { version = "0.3", path = "../cubex", optional = true }
+cubex = { version = "0.4", path = "../cubex", optional = true }
 image = { version = "0.25", default-features = false, features = ["gif"], optional = true }
-paleo-player = { version = "0.3", path = "../paleo-player", default-features = false, optional = true }
-drawen-core = { version = "0.3", path = "../drawen-core" }
-drawen-render = { version = "0.3", path = "../drawen-render" }
-drawen-ui = { version = "0.3", path = "../drawen-ui" }
-drawen-workspace = { version = "0.3", path = "../drawen-workspace" }
+paleo-player = { version = "0.4", path = "../paleo-player", default-features = false, optional = true }
+drawen-core = { version = "0.4", path = "../drawen-core" }
+drawen-render = { version = "0.4", path = "../drawen-render" }
+drawen-ui = { version = "0.4", path = "../drawen-ui" }
+drawen-workspace = { version = "0.4", path = "../drawen-workspace" }
 unicode-segmentation = "1.12"
 
 [[test]]

@@ -12,9 +12,9 @@ readme.workspace = true
 workspace = true
 
 [dependencies]
-drawen-core = { version = "0.3", path = "../drawen-core" }
-drawen-render = { version = "0.3", path = "../drawen-render" }
-drawen-servo = { version = "0.3", path = "../drawen-servo" }
-drawen-ui = { version = "0.3", path = "../drawen-ui" }
-drawen-wgpu = { version = "0.3", path = "../drawen-wgpu" }
+drawen-core = { version = "0.4", path = "../drawen-core" }
+drawen-render = { version = "0.4", path = "../drawen-render" }
+drawen-servo = { version = "0.4", path = "../drawen-servo" }
+drawen-ui = { version = "0.4", path = "../drawen-ui" }
+drawen-wgpu = { version = "0.4", path = "../drawen-wgpu" }
 wgpu = "30.0.2"

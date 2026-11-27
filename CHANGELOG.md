@@ -4,7 +4,7 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
-## Unreleased
+## 0.4.0 - 2026-11-28
 
 ### Performance
 
@@ -61,6 +61,38 @@ in the headings because the version itself must stay valid semver; see
 - The focus ring is clipped to the focused widget's scrolling ancestors, so a
   control scrolled under a sticky header no longer draws its ring over that
   header, and a fully offscreen focused control draws no ring at all.
+
+### Signals and property bindings
+
+- Added the `drawen-signals` crate: `Signal` and `Subscription` move out of
+  `drawen-ui` into a standalone crate. `drawen-ui` and the facade re-export
+  them, so existing import paths keep resolving.
+- Added `Property<T>`, a shared value cell with a synchronous change signal.
+  Clones share one value; `set` emits `changed()` only when the value actually
+  differs, so chains and cycles of bindings converge instead of looping.
+  `Property::normalized` passes every write, including binding copies, through
+  a normalizer, so widget state stays inside its valid domain (a slider clamps
+  to its range). `with` reads by borrow without cloning.
+- `UiRuntime::bind(&target, &source)` is a thin one-way copy: it synchronizes
+  the current value once, watches the target for paint damage, and follows the
+  source until the returned `Binding` is dropped. `watch`, `watch_layout`, and
+  `bind_layout` cover state a widget reads at paint or layout time; layout
+  damage implies paint damage. There is no dependency graph, no queued
+  delivery, and no two-way magic: the reverse direction stays an explicit
+  subscription that writes the state property.
+- Widget state converts to properties: `Button::enabled()`, `Checkbox` and
+  `Switch` checked, `Expander` expanded, `Slider` value, `ProgressBar` and
+  `Spinner` progress, `TabBar` / `SegmentedControl` / `Dropdown` selection,
+  `RadioGroup` selection, `ImageViewer` zoom, `Splitter` ratio, `TextField` and
+  `TextEdit` text, `Autocomplete` and `CommandPalette` query, and `ScrollView`,
+  `ListView`, `VirtualList`, and `VirtualTable` scroll offset are now
+  `Property` handles. Programmatic setters emit the property's `changed()` on a
+  real change; the user-interaction signals keep their 0.3 semantics. A
+  disabled button ignores activation, skips focus, and matches
+  `button:disabled` in DSS. Two-way text bindings converge and keep the caret.
+- Bound and watched properties wake the runtime themselves: the change drains
+  into `take_redraw_request`, `tick`, and `paint`, so an event loop whose
+  painted state is all properties can drop the manual dirty flag.
 
 ### Widgets
 
@@ -121,6 +153,133 @@ in the headings because the version itself must stay valid semver; see
   tones and corners, background tasks (`TaskPool` + `UiDispatcher`) with live
   frame-damage diagnostics, the agent inspector, and Servo interop. Headless
   `--snapshot` mode renders every page plus light-palette and tall variants.
+- Added `bound_app`: property cells, `UiRuntime::bind`, watched state, and no
+  manual dirty flag — the canonical property-binding example.
+
+### Agent bridge
+
+- Added `drawen-agent`: graphics-free observation and control of a Drawen UI
+  for LLM agents. `Agent` renders the runtime's `SemanticTree` as a compact
+  text outline or JSON and applies typed commands — click, toggle, focus,
+  select, set value, increment, decrement, expand, collapse, scroll, key
+  press, text input, and coordinate clicks — through the same accessibility
+  and input paths a human uses. Every reply carries a fresh snapshot, so one
+  round trip is a complete observe-act-observe step.
+- Targets resolve by arena index, accessible-name substring, or role/label
+  query. Exact names win, ambiguous queries fail with the candidate list, and
+  stale indices fail instead of hitting recycled slots. Name matching uses
+  Unicode lowercasing; `press_key` accepts any single Unicode scalar value.
+- Observations are bounded: snapshots keep at most `DEFAULT_MAX_NODES` (200)
+  nodes and report `total` and `truncated`. `observe` accepts a target subtree
+  and a `max_nodes` budget, so a large application never floods the agent's
+  context; ids stay global across subtree views.
+- `advance` steps the animation clock deterministically in 60 Hz frames and
+  `wait_until_idle` advances until no frames remain scheduled, reporting a
+  timeout for live loops. Agents read settled state instead of mid-transition
+  frames.
+- `perform_accessibility_action(Focus)` now reports whether focus actually
+  landed on the target, so disabled and non-focusable widgets decline focus
+  consistently with every other refused action.
+- The `serve` feature adds `AgentServer`, a loopback JSON-lines TCP endpoint.
+  Socket work runs on a `TaskPool`; commands cross to the UI thread through a
+  `UiDispatcher` the application drains once per event-loop turn. The facade
+  exposes the crate as `drawen::agent` behind the `agent` and `agent-serve`
+  features.
+- `UiRuntime::ensure_layout` re-runs layout with the last constraints after
+  invalidation, so semantic bounds are current without recording a paint pass.
+  The facade now re-exports `SemanticTree` and `SemanticNode`.
+
+### CubeX
+
+- Added the `cubex` crate, a dependency-free pure-Rust 3D layer: column-major
+  `Vec2`/`Vec3`/`Vec4`/`Mat3`/`Mat4`/`Quat`/`Transform` math, validated indexed
+  meshes with cube, plane, and sphere primitives, a perspective camera, and a
+  flat scene of lit instances.
+- The deterministic software rasterizer clips against the near and far planes,
+  culls back faces, interpolates normals with perspective correction,
+  depth-tests against a reusable buffer, and shades with ambient light plus any
+  number of directional lights. `Renderer::render` clears both buffers, so a
+  frame never depends on earlier frames.
+- Added `CubeXView` to `drawen-widgets`: it renders a scene at a fixed offscreen
+  resolution, caches the result as a `RasterImage`, orbits on pointer drag,
+  zooms on the wheel, and auto-rotates through the runtime animation path. The
+  facade exposes it as `drawen::cubex` behind the default `cubex` feature.
+- `docs/CUBEX.md` documents the conventions, scene model, renderer, widget, and
+  limits; `cubex_showcase` opens a native window and `spinning_cube` writes a
+  headless PPM sequence.
+- The 3D layer is still an early experiment in quality: opaque CPU triangles
+  with flat Lambert shading, no textures, transparency, shadows, or
+  antialiasing, and no speed for large scenes. Visually and performance-wise
+  it is far behind the rest of the library; treat it as a deterministic
+  preview and test surface, not a production renderer.
+
+### Documentation
+
+- `RECIPES.md` grows to eighteen patterns: property bindings with a
+  migrating-from-0.3 accessor table, copyable text, number input, range slider,
+  tree view, and date picker join the twelve.
+- `AGENT.md` documents the agent bridge: the snapshot formats, the JSON
+  protocol, target resolution, the threading contract, a ready-made model
+  prompt, and the headless and native-window examples.
+- Added `docs/PERFORMANCE.md`: the event-driven frame pipeline, damage
+  diagnostics, backend behavior, and the reproducible frame benchmark.
+- `AI_GUIDE.md` and `AGENTS.md` cover property bindings, local damage, the
+  agent bridge, and CubeX; the ready-made model prompt now names Drawen 0.4.
+
+### Packaging
+
+- Three new crates join the published set: `drawen-signals`, `drawen-agent`,
+  and `cubex`.
+- The facade gains the opt-in `agent` and `agent-serve` features re-exporting
+  `drawen::agent`, and the default `cubex` feature re-exporting `drawen::cubex`
+  and `CubeXView`.
+- `drawen-ui` depends on `drawen-signals` and re-exports `Signal`,
+  `Subscription`, `Property`, `PropertyDamage`, and `Binding`; the facade
+  re-exports the same set.
+
+### Breaking changes
+
+Verified with `cargo semver-checks check-release --baseline-rev v0.3.0
+--all-features --release-type patch` against every crate published in 0.3.0
+(`cubex`, `drawen-signals`, and `drawen-agent` are first published in 0.4.0 and
+have no baseline):
+
+- `drawen-ui`: `Signal` and `Subscription` are now re-exports of
+  `drawen-signals` instead of locally defined types (`struct_missing`). The
+  import paths keep resolving, but the types are foreign to `drawen-ui` now,
+  so orphan-rule trait impls on them must move to `drawen-signals`.
+- `drawen-widgets`: `ListView`, `Spinner`, `ProgressBar`, and `ScrollView` are
+  no longer `Send` / `Sync` / `UnwindSafe` / `RefUnwindSafe`
+  (`auto_trait_impl_removed`); their state lives in `Rc`-backed properties.
+  Widgets are UI-thread-only, so keep them on the thread that builds the tree.
+- `drawen-widgets`: the state accessors are no longer `const`
+  (`inherent_method_const_removed`): `Checkbox::is_checked`,
+  `Switch::is_checked`, `Expander::is_expanded`, `Expander::with_expanded`,
+  `Slider::value`, `ProgressBar::new`, `ProgressBar::progress`,
+  `Spinner::progress`, `TabBar::selected`, `SegmentedControl::selected`,
+  `Dropdown::selected`, `ImageViewer::zoom`, `Splitter::ratio`,
+  `ScrollView::new`, `ScrollView::vertical`, `ScrollView::horizontal`,
+  `ScrollView::offset`, `ListView::offset`, and `VirtualList::offset`.
+- `drawen-widgets`: the value accessors return `Property<T>` handles instead
+  of scalars: `Slider::value`, `ProgressBar::progress`, `ImageViewer::zoom`,
+  `Splitter::ratio`, `ScrollView::offset`, `ListView::offset`, and
+  `VirtualList::offset` return `Property<f32>`; `Spinner::progress` returns
+  `Property<Option<f32>>`; `TabBar::selected`, `SegmentedControl::selected`,
+  and `Dropdown::selected` return `Property<Option<usize>>`;
+  `RadioGroup::selected` returns `Property<Option<T>>`; `TextField::text`,
+  `TextEdit::text`, `Autocomplete::query`, and `CommandPalette::query` return
+  `Property<String>` instead of `&str`. Read the scalar with `.get()`.
+  Setter signatures are unchanged, but programmatic setters now emit the
+  property's `changed()` on a real change where they were silent; the
+  user-interaction signals keep their 0.3 semantics. The accessor-by-accessor
+  migration table lives in `RECIPES.md` recipe 13, "Migrating from 0.3".
+
+### Next milestone
+
+- The next development direction is memory optimization: shrinking the
+  retained footprint of the widget tree, display lists, and renderer caches.
+  `docs/PERFORMANCE.md` records the direction next to the CPU-side damage
+  work.
 
 ## 0.3.0 - 2026-11-25
 
@@ -369,67 +528,12 @@ in the headings because the version itself must stay valid semver; see
   callback once instead of once per value, and receiving re-arms the wake so
   values sent during a drain are never stranded without a wake-up.
 
-### Agent bridge
-
-- Added `drawen-agent`: graphics-free observation and control of a Drawen UI
-  for LLM agents. `Agent` renders the runtime's `SemanticTree` as a compact
-  text outline or JSON and applies typed commands — click, toggle, focus,
-  select, set value, increment, decrement, expand, collapse, scroll, key
-  press, text input, and coordinate clicks — through the same accessibility
-  and input paths a human uses. Every reply carries a fresh snapshot, so one
-  round trip is a complete observe-act-observe step.
-- Targets resolve by arena index, accessible-name substring, or role/label
-  query. Exact names win, ambiguous queries fail with the candidate list, and
-  stale indices fail instead of hitting recycled slots. Name matching uses
-  Unicode lowercasing; `press_key` accepts any single Unicode scalar value.
-- Observations are bounded: snapshots keep at most `DEFAULT_MAX_NODES` (200)
-  nodes and report `total` and `truncated`. `observe` accepts a target subtree
-  and a `max_nodes` budget, so a large application never floods the agent's
-  context; ids stay global across subtree views.
-- `advance` steps the animation clock deterministically in 60 Hz frames and
-  `wait_until_idle` advances until no frames remain scheduled, reporting a
-  timeout for live loops. Agents read settled state instead of mid-transition
-  frames.
-- `perform_accessibility_action(Focus)` now reports whether focus actually
-  landed on the target, so disabled and non-focusable widgets decline focus
-  consistently with every other refused action.
-- The `serve` feature adds `AgentServer`, a loopback JSON-lines TCP endpoint.
-  Socket work runs on a `TaskPool`; commands cross to the UI thread through a
-  `UiDispatcher` the application drains once per event-loop turn. The facade
-  exposes the crate as `drawen::agent` behind the `agent` and `agent-serve`
-  features.
-- `UiRuntime::ensure_layout` re-runs layout with the last constraints after
-  invalidation, so semantic bounds are current without recording a paint pass.
-  The facade now re-exports `SemanticTree` and `SemanticNode`.
-
-### CubeX
-
-- Added the `cubex` crate, a dependency-free pure-Rust 3D layer: column-major
-  `Vec2`/`Vec3`/`Vec4`/`Mat3`/`Mat4`/`Quat`/`Transform` math, validated indexed
-  meshes with cube, plane, and sphere primitives, a perspective camera, and a
-  flat scene of lit instances.
-- The deterministic software rasterizer clips against the near and far planes,
-  culls back faces, interpolates normals with perspective correction,
-  depth-tests against a reusable buffer, and shades with ambient light plus any
-  number of directional lights. `Renderer::render` clears both buffers, so a
-  frame never depends on earlier frames.
-- Added `CubeXView` to `drawen-widgets`: it renders a scene at a fixed offscreen
-  resolution, caches the result as a `RasterImage`, orbits on pointer drag,
-  zooms on the wheel, and auto-rotates through the runtime animation path. The
-  facade exposes it as `drawen::cubex` behind the default `cubex` feature.
-- `docs/CUBEX.md` documents the conventions, scene model, renderer, widget, and
-  limits; `cubex_showcase` opens a native window and `spinning_cube` writes a
-  headless PPM sequence.
-
 ### Documentation
 
 - `RECIPES.md` grows to twelve patterns: tooltips, popovers, and floating
   menus; modal dialogs; the command palette; toast notifications; and the
   split button join the original seven. The virtual-list recipe now covers
   chat-style variable-height rows, autocomplete, and IME caret positioning.
-- `AGENT.md` documents the agent bridge: the snapshot formats, the JSON
-  protocol, target resolution, the threading contract, a ready-made model
-  prompt, and the headless and native-window examples.
 - `AI_GUIDE.md` and `AGENTS.md` cover the overlay widgets, presentation-aware
   background ticking, and the multicodec Paleo backends. `DSS.md` documents
   the extended language; `MEDIA.md` and `PALEO.md` document the player, the
@@ -440,8 +544,8 @@ in the headings because the version itself must stay valid semver; see
 
 ### Packaging
 
-- Six new crates join the published set: `paleo-video`, `paleo-player`,
-  `paleo-hevc`, `paleo-vp9`, `paleo-av1`, and `drawen-agent`.
+- Five new crates join the published set: `paleo-video`, `paleo-player`,
+  `paleo-hevc`, `paleo-vp9`, and `paleo-av1`.
 - `drawen-widgets` now depends only on `paleo-player`: its `media` feature
   links the player with the pure-Rust backends instead of `paleo` plus
   `paleo-h264` directly, and `audio` enables `paleo-player/device`.

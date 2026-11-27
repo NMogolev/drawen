@@ -12,5 +12,5 @@ readme.workspace = true
 workspace = true
 
 [dependencies]
-drawen-core = { version = "0.3", path = "../drawen-core" }
-drawen-render = { version = "0.3", path = "../drawen-render" }
+drawen-core = { version = "0.4", path = "../drawen-core" }
+drawen-render = { version = "0.4", path = "../drawen-render" }

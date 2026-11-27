@@ -761,7 +761,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "cubex"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "cursor-icon"
@@ -836,7 +836,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drawen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cubex",
  "drawen-agent",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen",
  "drawen-core",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-browser"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen-core",
  "drawen-render",
@@ -882,11 +882,11 @@ dependencies = [
 
 [[package]]
 name = "drawen-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "drawen-director"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen-platform",
  "drawen-widgets",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-platform"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "accesskit",
  "drawen-core",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-platform-winit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-render"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen-core",
  "fontdb",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-servo"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen-servo-linux",
  "drawen-servo-macos",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-servo-linux"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ash",
  "khronos-egl",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-servo-macos"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-servo-windows"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pollster",
  "wgpu",
@@ -970,11 +970,11 @@ dependencies = [
 
 [[package]]
 name = "drawen-signals"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "drawen-software"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "drawen-core",
  "drawen-render",
@@ -982,11 +982,11 @@ dependencies = [
 
 [[package]]
 name = "drawen-tasks"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "drawen-ui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "accesskit",
  "drawen-core",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-wgpu"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "drawen-core",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-widgets"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cubex",
  "drawen-core",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "drawen-workspace"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "paleo"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "symphonia",
  "symphonia-opus",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-audio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cpal",
  "paleo",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-av1"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "rusty_av1d",
@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-h264"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "rusty_h264-common",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-hevc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "rusty_h265",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-player"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "paleo-audio",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-video"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "paleo-av1",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "paleo-vp9"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "paleo",
  "rusty_vp9",

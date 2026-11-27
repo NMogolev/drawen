@@ -151,6 +151,9 @@ timing; `stateful_app` adds application state.
   navigation, and local widget signals behave consistently across backends.
 - **Typed signals.** Widgets emit typed, UI-thread-local signals with drop-based
   subscriptions instead of a global dynamic event bus.
+- **Property bindings.** `Property<T>` value cells with change signals and thin
+  one-way `UiRuntime::bind` copies drive widget state; bound and watched
+  properties wake redraws without a manual dirty flag.
 - **Backend-neutral painting.** Widgets record a `DisplayList`; the deterministic
   software renderer and the `wgpu` renderer execute the same commands.
 - **Background work.** A fixed task pool with cooperative cancellation,
@@ -383,6 +386,10 @@ player. The limits that surprise new applications most often:
 - The software rasterizer targets correctness and small interactive scenes, not
   large scenes or high frame rates. `CubeXView` renders at a fixed offscreen
   resolution and scales the cached image into its bounds.
+- The 3D layer is still an early experiment in quality: flat Lambert shading
+  without antialiasing, CPU-only speed, and none of the polish of the 2D stack.
+  Treat CubeX as a deterministic preview and test surface, not a production
+  renderer.
 
 **Platforms**
 
@@ -433,6 +440,8 @@ file import controls.
 - [Media pipeline and backends](https://github.com/NMogolev/drawen/blob/main/docs/MEDIA.md)
 - [Paleo media layer](https://github.com/NMogolev/drawen/blob/main/docs/PALEO.md)
 - [CubeX 3D layer](https://github.com/NMogolev/drawen/blob/main/docs/CUBEX.md)
+- [Performance and frame diagnostics](https://github.com/NMogolev/drawen/blob/main/docs/PERFORMANCE.md)
+- [Agent bridge for LLM agents](https://github.com/NMogolev/drawen/blob/main/docs/AGENT.md)
 - [Background work and threading](https://github.com/NMogolev/drawen/blob/main/docs/THREADING.md)
 - [Versioning and release policy](https://github.com/NMogolev/drawen/blob/main/docs/RELEASING.md)
 - [Using an AI assistant with Drawen](https://github.com/NMogolev/drawen/blob/main/docs/AI_GUIDE.md)

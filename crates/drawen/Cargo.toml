@@ -37,22 +37,22 @@ agent = ["dep:drawen-agent"]
 agent-serve = ["agent", "drawen-agent/serve"]
 
 [dependencies]
-cubex = { version = "0.3", path = "../cubex", optional = true }
-drawen-agent = { version = "0.3", path = "../drawen-agent", optional = true }
-drawen-browser = { version = "0.3", path = "../drawen-browser", optional = true }
-drawen-core = { version = "0.3", path = "../drawen-core" }
-drawen-director = { version = "0.3", path = "../drawen-director", optional = true }
-drawen-render = { version = "0.3", path = "../drawen-render" }
-drawen-software = { version = "0.3", path = "../drawen-software" }
-drawen-wgpu = { version = "0.3", path = "../drawen-wgpu", optional = true }
-drawen-platform = { version = "0.3", path = "../drawen-platform" }
-drawen-tasks = { version = "0.3", path = "../drawen-tasks" }
-drawen-ui = { version = "0.3", path = "../drawen-ui" }
-drawen-widgets = { version = "0.3", path = "../drawen-widgets", default-features = false }
-drawen-workspace = { version = "0.3", path = "../drawen-workspace" }
+cubex = { version = "0.4", path = "../cubex", optional = true }
+drawen-agent = { version = "0.4", path = "../drawen-agent", optional = true }
+drawen-browser = { version = "0.4", path = "../drawen-browser", optional = true }
+drawen-core = { version = "0.4", path = "../drawen-core" }
+drawen-director = { version = "0.4", path = "../drawen-director", optional = true }
+drawen-render = { version = "0.4", path = "../drawen-render" }
+drawen-software = { version = "0.4", path = "../drawen-software" }
+drawen-wgpu = { version = "0.4", path = "../drawen-wgpu", optional = true }
+drawen-platform = { version = "0.4", path = "../drawen-platform" }
+drawen-tasks = { version = "0.4", path = "../drawen-tasks" }
+drawen-ui = { version = "0.4", path = "../drawen-ui" }
+drawen-widgets = { version = "0.4", path = "../drawen-widgets", default-features = false }
+drawen-workspace = { version = "0.4", path = "../drawen-workspace" }
 
 [dev-dependencies]
-drawen-platform-winit = { version = "0.3", path = "../drawen-platform-winit" }
+drawen-platform-winit = { version = "0.4", path = "../drawen-platform-winit" }
 rfd = "0.15"
 
 [[example]]

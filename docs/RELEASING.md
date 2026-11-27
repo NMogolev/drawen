@@ -5,11 +5,11 @@ version lives once in the root `Cargo.toml`:
 
 ```toml
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 ```
 
 Every crate inherits it with `version.workspace = true`, and internal path
-dependencies use a caret requirement (`version = "0.3", path = "../drawen-core"`)
+dependencies use a caret requirement (`version = "0.4", path = "../drawen-core"`)
 so a patch release does not require editing twenty manifests.
 
 ## Why not calendar versioning
@@ -33,16 +33,18 @@ The date is therefore recorded where it does not fight the resolver: in the
 
 | Change | Version |
 | --- | --- |
-| One feature or fix batch | patch: `0.3.0 -> 0.3.1 -> 0.3.2` |
-| Breaking public API change | minor: `0.3.1 -> 0.4.0` |
+| One feature or fix batch | patch: `0.4.0 -> 0.4.1 -> 0.4.2` |
+| Breaking public API change | minor: `0.4.1 -> 0.5.0` |
 | Stable public API | `1.0.0` (not yet planned) |
 
 Every merged feature is released as its own patch version; versions are not
 batched until a large milestone. A breaking change is never shipped in a patch
-release, even while the project is pre-1.0, because `^0.3` accepts `0.3.x` for
+release, even while the project is pre-1.0, because `^0.4` accepts `0.4.x` for
 existing users. A milestone that batches many feature branches and contains a
 breaking change bumps the minor position, as 0.3.0 did for the `Video` `const`
-removals, the new `PseudoClass` variants, and the new default frame caps.
+removals, the new `PseudoClass` variants, and the new default frame caps, and
+0.4.0 did for the widget property conversion and the `drawen-signals`
+extraction.
 
 Examples of breaking changes:
 
@@ -89,43 +91,45 @@ local machine.
    ```text
    cargo install cargo-semver-checks --locked
    git fetch --tags
-   cargo semver-checks check-release --package drawen-core --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-render --baseline-rev v0.3.0
-    cargo semver-checks check-release --package drawen-signals --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-ui --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-widgets --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-software --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-tasks --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-agent --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-platform --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-platform-winit --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-workspace --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen-director --baseline-rev v0.3.0
-   cargo semver-checks check-release --package drawen --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-h264 --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-audio --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-video --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-player --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-hevc --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-vp9 --baseline-rev v0.3.0
-   cargo semver-checks check-release --package paleo-av1 --baseline-rev v0.3.0
+   cargo semver-checks check-release --package cubex --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-core --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-render --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-signals --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-ui --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-widgets --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-wgpu --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-software --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-tasks --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-agent --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-platform --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-platform-winit --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-workspace --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen-director --baseline-rev v0.4.0
+   cargo semver-checks check-release --package drawen --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-h264 --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-audio --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-video --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-player --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-hevc --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-vp9 --baseline-rev v0.4.0
+   cargo semver-checks check-release --package paleo-av1 --baseline-rev v0.4.0
    ```
 
    The browser and Servo crates are checked on their native target. The
-   commands use `v0.3.0` as the baseline for the next release; substitute the
+   commands use `v0.4.0` as the baseline for the next release; substitute the
    tag of the release being superseded. If no baseline tag exists yet (a crate
-   first published in this release, such as `paleo-player` in 0.3.0), skip the
-   check for that crate or use `--baseline-root` against an unpacked previous
-   release instead.
+   first published in this release, such as `drawen-signals` and `cubex` in
+   0.4.0), skip the check for that crate or use `--baseline-root` against an
+   unpacked previous release instead.
 
    When the release bumps the minor position under `0.x`, the tool treats the
    bump as incompatible and skips every lint (`260 skip`), because breaking
    changes are already permitted. To enumerate the breaking changes for the
    changelog's Breaking changes section, force `--release-type patch` so no
    lint is allowed to pass silently; the reported failures are exactly the
-   list to document. The 0.3.0 Breaking changes section was produced this way.
+   list to document. The 0.3.0 and 0.4.0 Breaking changes sections were
+   produced this way.
 
 6. Update `CHANGELOG.md` under the new version with the release date.
 7. `cargo update --workspace` to refresh `Cargo.lock`.
@@ -133,7 +137,7 @@ local machine.
    the date and the changelog summary:
 
    ```text
-   git tag -a v0.3.0 -m "Drawen 0.3.0 (2026-11-25)"
+   git tag -a v0.4.0 -m "Drawen 0.4.0 (2026-11-28)"
    ```
 
 9. Publish in dependency order (core and render first, the facade last):
@@ -155,3 +159,4 @@ unexpected, fix the API or bump the minor version; do not silence the check.
 | 0.1.0 | 2026-11-14 | Initial published crate set |
 | 0.2.0 | 2026-11-17 | GPU paint-order correctness, raster image pipelines, software fill rewrite, worker task boundary |
 | 0.3.0 | 2026-11-25 | Overlay layer and widget families, extended DSS, multilingual fonts, presentation-aware ticking, multicodec Paleo player, variable-height lists and autocomplete |
+| 0.4.0 | 2026-11-28 | Event-driven frames and local damage, property bindings and drawen-signals, agent bridge, experimental CubeX 3D layer, new input widgets, fourteen-page style showcase |

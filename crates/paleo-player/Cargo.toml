@@ -18,6 +18,6 @@ default = ["device"]
 device = ["paleo-audio/device"]
 
 [dependencies]
-paleo = { version = "0.3", path = "../paleo" }
-paleo-audio = { version = "0.3", path = "../paleo-audio", default-features = false }
-paleo-video = { version = "0.3", path = "../paleo-video" }
+paleo = { version = "0.4", path = "../paleo" }
+paleo-audio = { version = "0.4", path = "../paleo-audio", default-features = false }
+paleo-video = { version = "0.4", path = "../paleo-video" }
