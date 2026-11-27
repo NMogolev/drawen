@@ -46,6 +46,16 @@ impl Clipboard for MemoryClipboard {
     }
 }
 
+impl Clipboard for Box<dyn Clipboard> {
+    fn read_text(&mut self) -> Option<String> {
+        (**self).read_text()
+    }
+
+    fn write_text(&mut self, text: &str) {
+        (**self).write_text(text);
+    }
+}
+
 /// A clipboard that discards writes and never produces text.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NoopClipboard;
@@ -56,4 +66,17 @@ impl Clipboard for NoopClipboard {
     }
 
     fn write_text(&mut self, _text: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Clipboard, MemoryClipboard};
+
+    #[test]
+    fn boxed_clipboard_forwards_reads_and_writes() {
+        let mut clipboard: Box<dyn Clipboard> = Box::new(MemoryClipboard::new());
+        assert_eq!(clipboard.read_text(), None);
+        clipboard.write_text("copied");
+        assert_eq!(clipboard.read_text().as_deref(), Some("copied"));
+    }
 }

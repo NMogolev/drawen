@@ -11,7 +11,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use drawen_core::{InputEvent, Rect, Size};
+use drawen_core::{Clipboard, InputEvent, Rect, Size};
 use drawen_render::DisplayList;
 
 /// A cloneable, thread-safe handle that wakes a native event loop.
@@ -420,6 +420,15 @@ pub trait WindowApplication {
     /// so queued values are applied from [`Self::window_event`] on the UI
     /// thread. The default ignores the handle.
     fn attach_waker(&mut self, _waker: WindowWaker) {}
+
+    /// Installs the platform clipboard for this application.
+    ///
+    /// Adapters call this once before the first event with a clipboard backed
+    /// by the operating system, so cut, copy, and paste leave the application.
+    /// Applications that use a `UiRuntime` forward the value to
+    /// `UiRuntime::set_clipboard`; the default ignores it, keeping headless
+    /// runtimes on their in-memory clipboard.
+    fn attach_clipboard(&mut self, _clipboard: Box<dyn Clipboard>) {}
 }
 
 #[cfg(test)]

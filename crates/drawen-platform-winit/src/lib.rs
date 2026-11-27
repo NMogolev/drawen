@@ -62,7 +62,8 @@ impl Error for RunError {}
 
 /// A clipboard backed by the operating system clipboard.
 ///
-/// Applications can install this adapter with
+/// [`run`] delivers one to the application through
+/// `WindowApplication::attach_clipboard`; applications forward it to
 /// `drawen_ui::UiRuntime::set_clipboard` to give editable widgets real
 /// cut, copy, and paste behavior. Construction succeeds even when the platform
 /// clipboard is unavailable; reads then return `None` and writes are ignored.
@@ -127,6 +128,7 @@ pub fn run(application: impl WindowApplication + 'static) -> Result<(), RunError
     });
     let mut application = application;
     application.attach_waker(waker);
+    application.attach_clipboard(Box::new(ArboardClipboard::new()));
     let mut adapter = Adapter::new(Box::new(application), proxy);
     event_loop
         .run_app(&mut adapter)
