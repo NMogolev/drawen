@@ -589,6 +589,12 @@ struct StyleShowcase {
     audio_preview_parent: drawen::WidgetId,
     #[cfg(feature = "audio")]
     audio_preview: drawen::WidgetId,
+    #[cfg(feature = "cubex")]
+    cubex_mount: drawen::WidgetId,
+    #[cfg(feature = "cubex")]
+    cubex_view: Option<drawen::WidgetId>,
+    #[cfg(feature = "cubex")]
+    cubex_start_requested: Rc<Cell<bool>>,
     _bindings: Vec<Binding>,
     _subscriptions: Vec<Subscription>,
 }
@@ -620,6 +626,8 @@ impl StyleShowcase {
         ));
         #[cfg(feature = "media")]
         let media_import_requested = Rc::new(Cell::new(None));
+        #[cfg(feature = "cubex")]
+        let cubex_start_requested = Rc::new(Cell::new(false));
         let chrome = WindowChromeState::new();
         let mut environment = UiEnvironment::from_dss(
             ShowcaseTheme {
@@ -725,7 +733,15 @@ impl StyleShowcase {
             media_previews;
         #[cfg(not(feature = "audio"))]
         let _ = media_previews;
-        append_cubex_page(&mut runtime, tabs);
+        #[cfg(feature = "cubex")]
+        let cubex_mount = append_cubex_page(
+            &mut runtime,
+            &mut subscriptions,
+            &cubex_start_requested,
+            tabs,
+        );
+        #[cfg(not(feature = "cubex"))]
+        let _ = append_cubex_page(&mut runtime, &mut subscriptions, tabs);
         append_appearance_page(&mut runtime, &mut subscriptions, &appearance, &dirty, tabs);
         append_dss_page(&mut runtime, tabs);
         let toast_handle = append_overlay_page(
@@ -786,6 +802,12 @@ impl StyleShowcase {
             audio_preview_parent,
             #[cfg(feature = "audio")]
             audio_preview,
+            #[cfg(feature = "cubex")]
+            cubex_mount,
+            #[cfg(feature = "cubex")]
+            cubex_view: None,
+            #[cfg(feature = "cubex")]
+            cubex_start_requested,
             _bindings: bindings,
             _subscriptions: subscriptions,
         };
@@ -798,6 +820,24 @@ impl StyleShowcase {
         if let Ok(constraints) = Constraints::tight(size) {
             let _ = self.runtime.layout(constraints);
         }
+    }
+
+    #[cfg(feature = "cubex")]
+    fn start_cubex_demo(&mut self) -> bool {
+        if !self.cubex_start_requested.replace(false) || self.cubex_view.is_some() {
+            return false;
+        }
+        let frame = self
+            .runtime
+            .append_child(self.cubex_mount, FixedHeight::new(470.0))
+            .expect("CubeX mount remains in the showcase tree");
+        let view = self
+            .runtime
+            .append_child(frame, cubex_demo_view())
+            .expect("CubeX frame remains in the showcase tree");
+        self.cubex_view = Some(view);
+        self.runtime.invalidate_layout();
+        true
     }
 
     /// Delivers worker results on the UI thread; returns true when anything
@@ -958,6 +998,8 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                #[cfg(feature = "cubex")]
+                let cubex_started = self.start_cubex_demo();
                 if self.drain_tasks() {
                     self.runtime.invalidate_paint_for(self.task_status_id);
                 }
@@ -998,7 +1040,19 @@ impl WindowApplication for StyleShowcase {
                 for command in self.runtime.take_window_commands() {
                     action = action_for(command);
                 }
-                if action == WindowAction::None && self.runtime.take_redraw_request() {
+                if action == WindowAction::None
+                    && (self.runtime.take_redraw_request()
+                        || {
+                            #[cfg(feature = "cubex")]
+                            {
+                                cubex_started
+                            }
+                            #[cfg(not(feature = "cubex"))]
+                            {
+                                false
+                            }
+                        })
+                {
                     WindowAction::RequestRedraw
                 } else {
                     action
@@ -3540,26 +3594,60 @@ fn append_media_page(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "cubex")]
-fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+fn append_cubex_page(
+    runtime: &mut UiRuntime,
+    subscriptions: &mut Vec<Subscription>,
+    start_requested: &Rc<Cell<bool>>,
+    tabs: drawen::WidgetId,
+) -> drawen::WidgetId {
     let stack = append_scroll_page(runtime, tabs);
     let card = append_card(
         runtime,
         stack,
         "CubeX · software 3D",
-        "3D content goes through drawen::cubex: a Scene of indexed meshes, lights, and a Camera, rasterized deterministically on the CPU. CubeXView caches the RasterImage and stays on the UI thread.",
+        "Experimental CPU renderer. It rasterizes an indexed scene into a cached image and can noticeably load the system while rotating.",
     );
     runtime
         .append_child(
             card,
             Chips::new(&[
                 "Deterministic rasterizer",
-                "No GPU required",
-                "Cached RasterImage",
-                "Auto-rotate via tick",
+                "CPU rendering",
+                "Starts on demand",
+                "Cached frame",
             ]),
         )
         .expect("cubex card exists");
 
+    append_label(
+        runtime,
+        card,
+        "The scene and its CPU buffers are not created until you choose to run this interactive example.",
+        0.88,
+        TextTone::Muted,
+    );
+    let start = Button::new();
+    subscriptions.push(start.activated().subscribe({
+        let start_requested = Rc::clone(start_requested);
+        move |()| start_requested.set(true)
+    }));
+    let start = runtime
+        .append_child(card, start)
+        .expect("cubex card exists");
+    append_label(
+        runtime,
+        start,
+        "Run interactive 3D example",
+        0.96,
+        TextTone::Primary,
+    );
+    runtime
+        .append_child(card, VStack::new(0.0))
+        .expect("cubex card exists")
+}
+
+#[cfg(feature = "cubex")]
+fn cubex_demo_view() -> CubeXView {
     let mut scene = Scene::new()
         .with_background(SceneColor::from_srgb8(16, 18, 24, 255))
         .with_ambient(SceneColor::linear_rgb(0.12, 0.13, 0.16));
@@ -3587,32 +3675,21 @@ fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
         Material::new(SceneColor::from_srgb8(94, 234, 212, 255)),
     );
 
-    let frame = runtime
-        .append_child(card, FixedHeight::new(470.0))
-        .expect("cubex card exists");
-    runtime
-        .append_child(
-            frame,
-            CubeXView::new(
-                scene,
-                Camera::orbiting(Vec3::new(0.0, 0.0, 0.0), 5.5, 0.0, 0.28),
-            )
-            .with_resolution(1_360, 470)
-            .with_auto_rotate(0.35)
-            .with_label("Rotating CubeX scene"),
-        )
-        .expect("cubex frame exists");
-    append_label(
-        runtime,
-        card,
-        "Rotation advances through Widget::advance_animation while the page is visible and freezes while hidden — the same rule as every purely visual animation.",
-        0.86,
-        TextTone::Muted,
-    );
+    CubeXView::new(
+        scene,
+        Camera::orbiting(Vec3::new(0.0, 0.0, 0.0), 5.5, 0.0, 0.28),
+    )
+    .with_resolution(1_360, 470)
+    .with_auto_rotate(0.35)
+    .with_label("Rotating CubeX scene")
 }
 
 #[cfg(not(feature = "cubex"))]
-fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
+fn append_cubex_page(
+    runtime: &mut UiRuntime,
+    _: &mut Vec<Subscription>,
+    tabs: drawen::WidgetId,
+) -> drawen::WidgetId {
     let stack = append_scroll_page(runtime, tabs);
     let card = append_card(
         runtime,
@@ -3626,7 +3703,7 @@ fn append_cubex_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
         "cargo run -p drawen --example style_showcase --features cubex",
         0.92,
         TextTone::Muted,
-    );
+    )
 }
 
 // ---------------------------------------------------------------------------
