@@ -46,6 +46,7 @@ mod media;
 mod menu;
 mod menu_bar;
 mod modal;
+mod number_input;
 mod padding;
 #[cfg(feature = "media")]
 mod paleo_session;
@@ -114,6 +115,7 @@ pub use media::{
 pub use menu::{Menu, MenuEntry};
 pub use menu_bar::MenuBar;
 pub use modal::{Modal, ModalHandle};
+pub use number_input::NumberInput;
 pub use padding::Padding;
 #[cfg(feature = "media")]
 pub use paleo_session::PaleoSession;
