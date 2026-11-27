@@ -55,6 +55,7 @@ mod player;
 mod popover;
 mod progress_bar;
 mod radio_button;
+mod range_slider;
 mod scroll_view;
 mod segmented_control;
 mod sized_box;
@@ -127,6 +128,7 @@ pub use player::{
 pub use popover::{Popover, PopoverTrigger};
 pub use progress_bar::ProgressBar;
 pub use radio_button::{RadioButton, RadioGroup};
+pub use range_slider::RangeSlider;
 pub use scroll_view::{ScrollAxis, ScrollView};
 pub use segmented_control::SegmentedControl;
 pub use sized_box::SizedBox;
