@@ -25,6 +25,9 @@ pub use wgpu;
 
 const TEXT_ATLAS_SIZE: u32 = 2048;
 const RASTER_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+// Composed text bitmaps are small but numerous; 16 MiB holds a full window of
+// labels several times over while staying far below the raster image budget.
+const TEXT_BITMAP_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 const SHAPE_SHADER: &str = r"
 struct VertexInput {
@@ -361,6 +364,7 @@ pub struct GpuRenderer {
     // would otherwise be re-uploaded over PCIe on every single frame.
     oversized_image: Option<OversizedRasterImage>,
     max_texture_dimension_2d: u32,
+    text_bitmaps: TextBitmapCache,
     // Swapchain images rotate, so partial damage cannot load the previous
     // surface contents. The frame is rasterized into this retained offscreen
     // texture instead and blitted to the current surface image every frame.
@@ -526,6 +530,7 @@ impl GpuRenderer {
             raster_images: RasterImageCache::default(),
             oversized_image: None,
             max_texture_dimension_2d,
+            text_bitmaps: TextBitmapCache::default(),
             retained_frame: None,
             blit_pipeline,
             clear_pipeline,
@@ -710,7 +715,11 @@ impl GpuRenderer {
             (retained.view.clone(), retained.bind_group.clone())
         };
         let mut prepared = PreparedFrame::new(width, height, scale_factor);
-        prepared.record(display_list, region.map(|(rect, _)| rect))?;
+        prepared.record(
+            display_list,
+            region.map(|(rect, _)| rect),
+            &mut self.text_bitmaps,
+        )?;
         let shape_buffer = (!prepared.shape_vertices.is_empty()).then(|| {
             create_buffer(
                 &self.device,
@@ -1260,7 +1269,7 @@ struct ShapeDraw {
 struct PreparedText {
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    pixels: Arc<[u8]>,
     vertices: [TextVertex; 6],
     scissor: Scissor,
     // True only when the previous display-list command was also text, so the
@@ -1429,6 +1438,105 @@ impl RasterImageCache {
     }
 }
 
+/// Cache key for a composed text bitmap: layout identity, color, and scale.
+///
+/// Identity is stable across clones and recoloring, but the color and scale
+/// still change the composed pixels, so they are part of the key.
+type TextBitmapKey = (u64, [u32; 4], u32);
+
+/// A text run's composed RGBA bitmap, cached across frames.
+struct CachedTextBitmap {
+    pixels: Arc<[u8]>,
+    byte_count: usize,
+    last_used: u64,
+}
+
+/// LRU cache of CPU-composed text bitmaps keyed by layout identity and scale.
+///
+/// Unchanged text keeps the same [`TextLayout::identity`] across frames, so
+/// composing its glyphs again on every rasterized frame is pure repeat work.
+/// Entries share their pixels with the prepared frame via `Arc`, making a
+/// cache hit allocation-free.
+struct TextBitmapCache {
+    entries: HashMap<TextBitmapKey, CachedTextBitmap>,
+    recency: BTreeSet<(u64, TextBitmapKey)>,
+    bytes: usize,
+    budget: usize,
+    next_access: u64,
+}
+
+impl Default for TextBitmapCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: BTreeSet::new(),
+            bytes: 0,
+            budget: TEXT_BITMAP_CACHE_BYTES,
+            next_access: 0,
+        }
+    }
+}
+
+impl TextBitmapCache {
+    fn get(&mut self, key: TextBitmapKey) -> Option<Arc<[u8]>> {
+        let last_used = self.entries.get(&key)?.last_used;
+        self.recency.remove(&(last_used, key));
+        let access = self.record_access();
+        let entry = self
+            .entries
+            .get_mut(&key)
+            .expect("cache entry exists until its recency is updated");
+        entry.last_used = access;
+        self.recency.insert((access, key));
+        Some(Arc::clone(&entry.pixels))
+    }
+
+    fn insert(&mut self, key: TextBitmapKey, mut entry: CachedTextBitmap) {
+        if let Some(previous) = self.entries.remove(&key) {
+            self.recency.remove(&(previous.last_used, key));
+            self.bytes = self.bytes.saturating_sub(previous.byte_count);
+        }
+        let access = self.record_access();
+        entry.last_used = access;
+        self.bytes = self.bytes.saturating_add(entry.byte_count);
+        self.recency.insert((access, key));
+        self.entries.insert(key, entry);
+        self.evict_over_budget();
+    }
+
+    #[cfg(test)]
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
+    fn evict_over_budget(&mut self) {
+        while self.bytes > self.budget {
+            let Some(&(_, key)) = self.recency.first() else {
+                break;
+            };
+            let last_used = self
+                .entries
+                .get(&key)
+                .expect("recency index references a cache entry")
+                .last_used;
+            self.recency.remove(&(last_used, key));
+            let entry = self
+                .entries
+                .remove(&key)
+                .expect("cache entry selected for eviction");
+            self.bytes = self.bytes.saturating_sub(entry.byte_count);
+        }
+    }
+
+    fn record_access(&mut self) -> u64 {
+        self.next_access = self.next_access.wrapping_add(1);
+        self.next_access
+    }
+}
+
 #[derive(Default)]
 struct ImageBatch {
     vertices: Vec<TextVertex>,
@@ -1493,6 +1601,7 @@ impl PreparedFrame {
         &mut self,
         display_list: &DisplayList,
         damage: Option<Rect>,
+        text_bitmaps: &mut TextBitmapCache,
     ) -> Result<(), GpuRendererError> {
         for command in display_list.commands() {
             // Commands whose conservative bounds miss the damage region cannot
@@ -1561,7 +1670,7 @@ impl PreparedFrame {
                     self.add_shape(*rect, *radius, *width, 0.0, *color)?;
                 }
                 DisplayCommand::DrawText { layout, origin } => {
-                    self.add_text(layout, *origin)?;
+                    self.add_text(layout, *origin, text_bitmaps)?;
                 }
                 DisplayCommand::DrawImage { image, destination } => {
                     self.add_image(Arc::clone(image), *destination)?;
@@ -1662,7 +1771,12 @@ impl PreparedFrame {
         Ok(())
     }
 
-    fn add_text(&mut self, layout: &TextLayout, origin: Point) -> Result<(), GpuRendererError> {
+    fn add_text(
+        &mut self,
+        layout: &Arc<TextLayout>,
+        origin: Point,
+        text_bitmaps: &mut TextBitmapCache,
+    ) -> Result<(), GpuRendererError> {
         if !origin.x.is_finite() || !origin.y.is_finite() {
             return Err(GpuRendererError::NonFiniteGeometry);
         }
@@ -1672,51 +1786,37 @@ impl PreparedFrame {
         if width == 0 || height == 0 || layout.color().alpha <= 0.0 {
             return Ok(());
         }
-        let byte_count = usize::try_from(u64::from(width) * u64::from(height) * 4)
-            .map_err(|_| GpuRendererError::NonFiniteGeometry)?;
-        let mut pixels = vec![0; byte_count];
+        // Unchanged text keeps the same layout identity across frames, so a
+        // composed bitmap keyed by identity, color, and scale is reusable.
         let color = layout.color();
-        let color_alpha = color.alpha.clamp(0.0, 1.0);
-        let color_red = component_to_u8(color.red);
-        let color_green = component_to_u8(color.green);
-        let color_blue = component_to_u8(color.blue);
-        for run in layout.glyph_runs() {
-            let raster_size = run.font_size() * self.scale_factor;
-            if !raster_size.is_finite() || raster_size <= 0.0 {
-                return Err(GpuRendererError::NonFiniteGeometry);
+        let key = (
+            layout.identity(),
+            [
+                color.red.to_bits(),
+                color.green.to_bits(),
+                color.blue.to_bits(),
+                color.alpha.to_bits(),
+            ],
+            self.scale_factor.to_bits(),
+        );
+        let pixels = if let Some(pixels) = text_bitmaps.get(key) {
+            pixels
+        } else {
+            let composed: Arc<[u8]> =
+                compose_text_bitmap(layout, self.scale_factor, width, height)?.into();
+            let byte_count = composed.len();
+            if byte_count <= TEXT_BITMAP_CACHE_BYTES {
+                text_bitmaps.insert(
+                    key,
+                    CachedTextBitmap {
+                        pixels: Arc::clone(&composed),
+                        byte_count,
+                        last_used: 0,
+                    },
+                );
             }
-            for glyph in run.glyphs() {
-                let glyph_origin = glyph.position();
-                let bitmap = run.font().rasterize_cached(glyph.glyph_id(), raster_size);
-                for (index, coverage) in bitmap.coverage().iter().copied().enumerate() {
-                    let x =
-                        glyph_origin.x * self.scale_factor + usize_to_f32(index % bitmap.width());
-                    let y =
-                        glyph_origin.y * self.scale_factor + usize_to_f32(index / bitmap.width());
-                    let Some(x) = coordinate_to_pixel(x, width) else {
-                        continue;
-                    };
-                    let Some(y) = coordinate_to_pixel(y, height) else {
-                        continue;
-                    };
-                    let alpha = f32::from(coverage) / 255.0 * color_alpha;
-                    let offset = (usize::try_from(y)
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(usize::try_from(width).unwrap_or(usize::MAX))
-                        .saturating_add(usize::try_from(x).unwrap_or(usize::MAX)))
-                    .saturating_mul(4);
-                    if offset + 3 >= pixels.len() {
-                        continue;
-                    }
-                    let destination_alpha = f32::from(pixels[offset + 3]) / 255.0;
-                    pixels[offset] = color_red;
-                    pixels[offset + 1] = color_green;
-                    pixels[offset + 2] = color_blue;
-                    pixels[offset + 3] =
-                        component_to_u8(source_over_alpha(alpha, destination_alpha));
-                }
-            }
-        }
+            composed
+        };
         let logical_size = Point::new(
             usize_to_f32(usize::try_from(width).unwrap_or(usize::MAX)) / self.scale_factor,
             usize_to_f32(usize::try_from(height).unwrap_or(usize::MAX)) / self.scale_factor,
@@ -2289,6 +2389,62 @@ fn logical_to_pixel(value: f32, scale_factor: f32) -> Result<u32, GpuRendererErr
     Ok(value as u32)
 }
 
+/// Composes a text layout's glyphs into a straight-RGBA bitmap at `scale_factor`.
+///
+/// This is the expensive CPU step behind every GPU text draw: rasterize each
+/// glyph and source-over its coverage into the run's color. The result depends
+/// only on the layout and scale, so callers cache it by layout identity.
+fn compose_text_bitmap(
+    layout: &TextLayout,
+    scale_factor: f32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, GpuRendererError> {
+    let byte_count = usize::try_from(u64::from(width) * u64::from(height) * 4)
+        .map_err(|_| GpuRendererError::NonFiniteGeometry)?;
+    let mut pixels = vec![0; byte_count];
+    let color = layout.color();
+    let color_alpha = color.alpha.clamp(0.0, 1.0);
+    let color_red = component_to_u8(color.red);
+    let color_green = component_to_u8(color.green);
+    let color_blue = component_to_u8(color.blue);
+    for run in layout.glyph_runs() {
+        let raster_size = run.font_size() * scale_factor;
+        if !raster_size.is_finite() || raster_size <= 0.0 {
+            return Err(GpuRendererError::NonFiniteGeometry);
+        }
+        for glyph in run.glyphs() {
+            let glyph_origin = glyph.position();
+            let bitmap = run.font().rasterize_cached(glyph.glyph_id(), raster_size);
+            for (index, coverage) in bitmap.coverage().iter().copied().enumerate() {
+                let x = glyph_origin.x * scale_factor + usize_to_f32(index % bitmap.width());
+                let y = glyph_origin.y * scale_factor + usize_to_f32(index / bitmap.width());
+                let Some(x) = coordinate_to_pixel(x, width) else {
+                    continue;
+                };
+                let Some(y) = coordinate_to_pixel(y, height) else {
+                    continue;
+                };
+                let alpha = f32::from(coverage) / 255.0 * color_alpha;
+                let offset = (usize::try_from(y)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(usize::try_from(width).unwrap_or(usize::MAX))
+                    .saturating_add(usize::try_from(x).unwrap_or(usize::MAX)))
+                .saturating_mul(4);
+                if offset + 3 >= pixels.len() {
+                    continue;
+                }
+                let destination_alpha = f32::from(pixels[offset + 3]) / 255.0;
+                pixels[offset] = color_red;
+                pixels[offset + 1] = color_green;
+                pixels[offset + 2] = color_blue;
+                pixels[offset + 3] = component_to_u8(source_over_alpha(alpha, destination_alpha));
+            }
+        }
+    }
+    Ok(pixels)
+}
+
 fn coordinate_to_pixel(value: f32, limit: u32) -> Option<u32> {
     (value.is_finite() && value >= 0.0 && value < u32_to_f32(limit)).then(|| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -2338,9 +2494,9 @@ mod tests {
     use drawen_render::{FontdueTextShaper, PaintContext, RasterImage, TextStyle};
 
     use super::{
-        DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation, Scissor,
-        TEXTURE_SHADER, TextBatch, TextureId, raster_image_fits_device, restrict_to_damage,
-        source_over_alpha,
+        CachedTextBitmap, DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation,
+        Scissor, TEXTURE_SHADER, TextBatch, TextBitmapCache, TextureId, raster_image_fits_device,
+        restrict_to_damage, source_over_alpha,
     };
 
     #[test]
@@ -2371,7 +2527,9 @@ mod tests {
         );
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
 
         assert_eq!(frame.textures.len(), 1);
         assert_eq!(frame.texture_vertices.len(), 6);
@@ -2394,7 +2552,9 @@ mod tests {
         );
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
 
         assert_eq!(frame.shape_vertices.len(), 12);
         assert_eq!(frame.operations.len(), 1);
@@ -2427,6 +2587,7 @@ mod tests {
                 Point::new(40.0, 40.0),
                 Size::new(30.0, 30.0).expect("valid size"),
             )),
+            &mut TextBitmapCache::default(),
         )
         .expect("valid display list");
         assert_eq!(far.shape_vertices.len(), 6);
@@ -2439,12 +2600,14 @@ mod tests {
                 Point::ZERO,
                 Size::new(15.0, 15.0).expect("valid size"),
             )),
+            &mut TextBitmapCache::default(),
         )
         .expect("valid display list");
         assert_eq!(near.shape_vertices.len(), 6);
 
         let mut full = PreparedFrame::new(100, 100, 1.0);
-        full.record(&list, None).expect("valid display list");
+        full.record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
         assert_eq!(full.shape_vertices.len(), 12);
     }
 
@@ -2471,6 +2634,7 @@ mod tests {
                     Point::new(50.0, 50.0),
                     Size::new(10.0, 10.0).expect("valid size"),
                 )),
+                &mut TextBitmapCache::default(),
             )
             .expect("state commands stay balanced when draws are culled");
         assert!(frame.operations.is_empty());
@@ -2484,7 +2648,9 @@ mod tests {
             Color::BLACK,
         );
         let mut frame = PreparedFrame::new(100, 100, 1.0);
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
         let damage = Scissor {
             x: 20,
             y: 30,
@@ -2513,7 +2679,9 @@ mod tests {
         paint.fill_rect(rect, Color::WHITE);
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
 
         assert_eq!(frame.operations.len(), 3);
         assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
@@ -2532,7 +2700,9 @@ mod tests {
         paint.fill_rect(rect, Color::WHITE);
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
 
         assert_eq!(frame.operations.len(), 3);
         assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
@@ -2583,12 +2753,86 @@ mod tests {
         paint.draw_text(layout, Point::ZERO);
         let mut frame = PreparedFrame::new(64, 64, 1.0);
 
-        frame.record(&list, None).expect("valid display list");
+        frame
+            .record(&list, None, &mut TextBitmapCache::default())
+            .expect("valid display list");
 
         assert_eq!(frame.texts.len(), 3);
         assert!(!frame.texts[0].merge_with_previous);
         assert!(frame.texts[1].merge_with_previous);
         assert!(!frame.texts[2].merge_with_previous);
+    }
+
+    #[test]
+    fn text_bitmap_cache_reuses_composed_pixels_for_the_same_layout() {
+        let layout = Arc::new(FontdueTextShaper::ubuntu_light().layout(
+            "A",
+            &TextStyle::new(12.0, Color::BLACK),
+            None,
+        ));
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list).draw_text(layout.clone(), Point::ZERO);
+        let mut cache = TextBitmapCache::default();
+
+        let mut first = PreparedFrame::new(64, 64, 1.0);
+        first
+            .record(&list, None, &mut cache)
+            .expect("valid display list");
+        let mut second = PreparedFrame::new(64, 64, 1.0);
+        second
+            .record(&list, None, &mut cache)
+            .expect("valid display list");
+        assert!(Arc::ptr_eq(&first.texts[0].pixels, &second.texts[0].pixels));
+
+        // A fresh Arc wrapping a clone keeps the same identity, so the cache
+        // still hits even though the pointer changed (as widgets do per paint).
+        let mut cloned_list = DisplayList::new();
+        PaintContext::new(&mut cloned_list)
+            .draw_text(Arc::new(layout.as_ref().clone()), Point::ZERO);
+        let mut cloned = PreparedFrame::new(64, 64, 1.0);
+        cloned
+            .record(&cloned_list, None, &mut cache)
+            .expect("valid display list");
+        assert!(Arc::ptr_eq(&first.texts[0].pixels, &cloned.texts[0].pixels));
+
+        // A different scale factor composes a different bitmap.
+        let mut scaled = PreparedFrame::new(64, 64, 2.0);
+        scaled
+            .record(&list, None, &mut cache)
+            .expect("valid display list");
+        assert!(!Arc::ptr_eq(
+            &first.texts[0].pixels,
+            &scaled.texts[0].pixels
+        ));
+
+        // Recoloring the same layout composes a different bitmap.
+        let mut recolored_list = DisplayList::new();
+        PaintContext::new(&mut recolored_list).draw_text(
+            Arc::new(layout.as_ref().clone().with_color(Color::WHITE)),
+            Point::ZERO,
+        );
+        let mut recolored = PreparedFrame::new(64, 64, 1.0);
+        recolored
+            .record(&recolored_list, None, &mut cache)
+            .expect("valid display list");
+        assert!(!Arc::ptr_eq(
+            &first.texts[0].pixels,
+            &recolored.texts[0].pixels
+        ));
+    }
+
+    #[test]
+    fn text_bitmap_cache_evicts_least_recently_used_over_budget() {
+        let mut cache = TextBitmapCache::with_budget(10);
+        let entry = |bytes: usize| CachedTextBitmap {
+            pixels: vec![0u8; bytes].into(),
+            byte_count: bytes,
+            last_used: 0,
+        };
+        cache.insert((1, [0; 4], 0), entry(6));
+        cache.insert((2, [0; 4], 0), entry(6));
+        assert!(cache.get((1, [0; 4], 0)).is_none());
+        assert!(cache.get((2, [0; 4], 0)).is_some());
     }
 
     #[test]
