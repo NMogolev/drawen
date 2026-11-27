@@ -1265,14 +1265,13 @@ impl Video {
             track.size.height()
         };
         let paint_track = Rect::new(
-            Point::new(track.origin.x, track.origin.y + (track.size.height() - height) / 2.0),
+            Point::new(
+                track.origin.x,
+                track.origin.y + (track.size.height() - height) / 2.0,
+            ),
             Size::new(track.size.width(), height).expect("painted seek track is finite"),
         );
-        context.fill_rounded_rect(
-            paint_track,
-            height / 2.0,
-            self.theme.track(foreground),
-        );
+        context.fill_rounded_rect(paint_track, height / 2.0, self.theme.track(foreground));
         let ratio = if self.duration() > Duration::ZERO {
             (self.position().as_secs_f32() / self.duration().as_secs_f32()).clamp(0.0, 1.0)
         } else {
@@ -1562,8 +1561,11 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
     );
     let track_hit = Rect::new(
         Point::new(track.origin.x, track.origin.y - TRACK_HIT_PAD),
-        Size::new(track.size.width(), track.size.height() + TRACK_HIT_PAD * 2.0)
-            .expect("video seek hit area is finite"),
+        Size::new(
+            track.size.width(),
+            track.size.height() + TRACK_HIT_PAD * 2.0,
+        )
+        .expect("video seek hit area is finite"),
     );
     let row_top = track.bottom() + 2.0;
     let row_height = (bar.bottom() - row_top - 4.0).max(button);
@@ -1676,7 +1678,10 @@ fn video_geometry(bounds: Rect, theme: &PlayerTheme, video: &Video) -> VideoGeom
         empty
     };
     let volume_hit = Rect::new(
-        Point::new(volume_slider.origin.x, volume_slider.origin.y - TRACK_HIT_PAD),
+        Point::new(
+            volume_slider.origin.x,
+            volume_slider.origin.y - TRACK_HIT_PAD,
+        ),
         Size::new(
             volume_slider.size.width(),
             volume_slider.size.height() + TRACK_HIT_PAD * 2.0,

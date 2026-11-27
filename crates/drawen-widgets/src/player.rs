@@ -1192,10 +1192,7 @@ pub(crate) fn paint_volume(
         let arm = height * 0.26;
         let thickness = (height * 0.09).max(1.6);
         let cross = Point::new(base_x + height * 0.30, center.y);
-        for angle in [
-            std::f32::consts::FRAC_PI_4,
-            -std::f32::consts::FRAC_PI_4,
-        ] {
+        for angle in [std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4] {
             let transform = Affine::translate(cross.x, cross.y).then(Affine::rotate(angle));
             context.with_transform(transform, |context| {
                 context.fill_rounded_rect(
