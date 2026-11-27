@@ -44,6 +44,23 @@ in the headings because the version itself must stay valid semver; see
   `Widget::paints_floating` hook (kept in a registry) instead of walking every
   node and calling a no-op hook each painted frame. `Tooltip` and `ToastHost`
   opt in.
+- Animation advancement works over an active set instead of the whole arena:
+  interaction transitions track only the nodes whose hover/press/focus target
+  changed, and ancestor visibility is resolved lazily for animating nodes only.
+  A large mostly-static tree no longer pays a clip walk per widget each frame;
+  the new `frame_benchmark` animation section advances 2000 static widgets plus
+  one live loop ~10x faster on the reference machine.
+- The software stroke path rasterizes rounded-rect rings as two scanline spans
+  per row (the outer convex span minus the inner hole) instead of testing every
+  pixel of the expanded bounding box, and builds the outer/inner geometry once
+  per command. A randomized differential test matches the per-pixel reference;
+  the full software repaint of the 2592-command benchmark drops ~2.8x.
+
+### Fixed
+
+- The focus ring is clipped to the focused widget's scrolling ancestors, so a
+  control scrolled under a sticky header no longer draws its ring over that
+  header, and a fully offscreen focused control draws no ring at all.
 
 ### Widgets
 

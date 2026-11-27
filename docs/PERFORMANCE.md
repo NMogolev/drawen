@@ -29,6 +29,11 @@ backend rasterizes only the damage
 - Bounded animations opt into local damage through
   `Widget::local_animation_damage`; floating surfaces (tooltips, toasts,
   menus, modals) keep full-frame damage because they paint above the tree.
+- Animation advancement is O(active): interaction transitions visit only nodes
+  whose hover/press/focus target changed, and ancestor visibility is resolved
+  only for animating nodes. A static widget costs a single `is_animating`
+  check, so a large tree with a few live animations does not pay a clip walk
+  per node each frame.
 - Equal property writes record no damage, and state changes within one event
   turn coalesce into a single repaint.
 
