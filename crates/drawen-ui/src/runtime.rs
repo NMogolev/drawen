@@ -28,6 +28,13 @@ use event::{EventEffects, FocusRequest};
 const MAX_RETAINED_DIAGNOSTICS: usize = 256;
 const FOCUS_RING_WIDTH: f32 = 2.0;
 const FOCUS_RING_GAP: f32 = 2.0;
+/// Conservative margin added to local damage regions.
+///
+/// Covers the standard effect overhang: soft shadows (blur plus the downward
+/// offset, up to ~22 logical pixels for the largest built-in elevation), the
+/// animated focus ring, and stroke widths. Widgets whose effects exceed this
+/// margin must keep full-frame damage instead of opting into local damage.
+const EFFECT_DAMAGE_MARGIN: f32 = 24.0;
 const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSITION_EPSILON: f32 = 0.000_1;
@@ -49,6 +56,32 @@ impl DirtyFlags {
         paint: true,
         hit_test: true,
     };
+}
+
+/// Paint damage accumulated by one animation pass.
+///
+/// `full` wins over `region`: once any change cannot be localized, the whole
+/// frame must be repainted to stay correct.
+#[derive(Default)]
+struct AnimationDamage {
+    changed: bool,
+    full: bool,
+    region: Option<Rect>,
+}
+
+impl AnimationDamage {
+    fn add_region(&mut self, rect: Rect) {
+        self.changed = true;
+        self.region = Some(match self.region {
+            Some(existing) => existing.union(rect),
+            None => rect,
+        });
+    }
+
+    fn add_full(&mut self) {
+        self.changed = true;
+        self.full = true;
+    }
 }
 
 /// Timings, damage, and output counters collected by [`UiRuntime`].
@@ -572,6 +605,28 @@ fn approach(current: &mut f32, target: f32, step: f32) -> bool {
     true
 }
 
+/// Returns `rect` grown by `margin` on every side.
+fn inflate_rect(rect: Rect, margin: f32) -> Rect {
+    Rect::new(
+        Point::new(rect.origin.x - margin, rect.origin.y - margin),
+        Size::new(
+            rect.size.width() + margin * 2.0,
+            rect.size.height() + margin * 2.0,
+        )
+        .expect("damage inflation stays finite"),
+    )
+}
+
+/// Unions two rectangles, ignoring empty ones so a zero-sized node at the
+/// origin never stretches the damage region.
+fn union_non_empty(left: Rect, right: Rect) -> Rect {
+    match (left.is_empty(), right.is_empty()) {
+        (true, _) => right,
+        (_, true) => left,
+        _ => left.union(right),
+    }
+}
+
 /// Why a [`UiRuntime`] operation could not be completed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiRuntimeError {
@@ -673,9 +728,56 @@ impl UiRuntime {
     /// Invalidates retained paint output without recomputing layout.
     ///
     /// Use this when external state read by [`Widget::paint`] changed but it
-    /// cannot affect geometry, such as a clock or performance counter.
+    /// cannot affect geometry, such as a clock or performance counter. The
+    /// whole frame is damaged; prefer [`Self::invalidate_paint_for`] or
+    /// [`Self::invalidate_rect`] when the change is confined to a region.
     pub fn invalidate_paint(&mut self) {
         self.mark_full_damage();
+        self.discard_retained_paint();
+    }
+
+    /// Invalidates retained paint output for one widget's subtree.
+    ///
+    /// The next frame repaints only the subtree's bounds plus the standard
+    /// effect margin (shadows, focus ring, stroke overhang), so backends can
+    /// rasterize a small region instead of the whole window. Use this when a
+    /// widget's appearance changed but its geometry did not; geometry changes
+    /// must go through [`Self::invalidate_layout`] because the old placement
+    /// must be repainted too.
+    ///
+    /// Stale handles are ignored: removing a subtree already invalidates the
+    /// tree. A widget that has not been laid out yet falls back to full-frame
+    /// damage. Widgets that paint through [`Widget::paint_floating`] or draw
+    /// effects larger than the margin must use [`Self::invalidate_paint`]
+    /// instead.
+    pub fn invalidate_paint_for(&mut self, id: WidgetId) {
+        let Some(bounds) = self.subtree_bounds(id) else {
+            return;
+        };
+        if bounds.is_empty() {
+            self.invalidate_paint();
+            return;
+        }
+        self.damage_rect(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
+        self.discard_retained_paint();
+    }
+
+    /// Invalidates retained paint output inside an explicit logical region.
+    ///
+    /// The caller owns the region's correctness: it must cover every pixel the
+    /// change can touch, including shadow and glow overhang, the old placement
+    /// of anything that moved, and translucent content that depends on the
+    /// background. When in doubt, use [`Self::invalidate_paint`], which is
+    /// always correct. Empty rectangles are ignored.
+    pub fn invalidate_rect(&mut self, rect: Rect) {
+        if rect.is_empty() {
+            return;
+        }
+        self.damage_rect(rect);
+        self.discard_retained_paint();
+    }
+
+    fn discard_retained_paint(&mut self) {
         self.cached_display_list = None;
         self.redraw_requested = true;
         for slot in &mut self.nodes {
@@ -683,6 +785,32 @@ impl UiRuntime {
                 node.dirty.paint = true;
             }
         }
+    }
+
+    fn damage_rect(&mut self, rect: Rect) {
+        if rect.is_empty() {
+            return;
+        }
+        self.pending_damage = Some(match self.pending_damage {
+            Some(existing) => existing.union(rect),
+            None => rect,
+        });
+    }
+
+    /// Returns the union of a node's bounds and its visible descendants'.
+    fn subtree_bounds(&self, id: WidgetId) -> Option<Rect> {
+        let node = self.node(id)?;
+        let mut bounds = if node.visible {
+            node.bounds
+        } else {
+            Rect::ZERO
+        };
+        for child in &node.children {
+            if let Some(child_bounds) = self.subtree_bounds(*child) {
+                bounds = union_non_empty(bounds, child_bounds);
+            }
+        }
+        Some(bounds)
     }
 
     /// Watches `property` so each changed value invalidates retained paint.
@@ -904,9 +1032,6 @@ impl UiRuntime {
         } else {
             (delta.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
         };
-        let hovered: Vec<WidgetId> = self.hovered.values().copied().collect();
-        let focused = self.focused;
-        let pressed = self.pressed;
         // Snapshot per-node visibility before the mutable passes so an offscreen
         // or collapsed widget freezes its pixels instead of spinning into the
         // void. `settle` still completes everything for tests and screenshots.
@@ -921,7 +1046,36 @@ impl UiRuntime {
                 self.animation_visible(WidgetId::new(index, slot.generation))
             })
             .collect();
-        let mut transition_changed = false;
+        let transitions = self.advance_transitions(step, settle, &visibility);
+        let (widgets, widgets_animating) =
+            self.advance_widget_animations(delta, settle, &visibility);
+        if transitions.changed || widgets.changed {
+            if transitions.full || widgets.full {
+                self.mark_full_damage();
+            } else {
+                if let Some(rect) = transitions.region {
+                    self.damage_rect(rect);
+                }
+                if let Some(rect) = widgets.region {
+                    self.damage_rect(rect);
+                }
+            }
+            self.cached_display_list = None;
+            self.redraw_requested = true;
+        }
+        self.animating = widgets_animating || (step < 1.0 && transitions.changed);
+    }
+
+    fn advance_transitions(
+        &mut self,
+        step: f32,
+        settle: bool,
+        visibility: &[bool],
+    ) -> AnimationDamage {
+        let hovered: Vec<WidgetId> = self.hovered.values().copied().collect();
+        let focused = self.focused;
+        let pressed = self.pressed;
+        let mut changed_transitions: Vec<WidgetId> = Vec::new();
         if step > 0.0 && (self.presented || settle) {
             for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
                 let Some(node) = &mut slot.node else {
@@ -937,13 +1091,36 @@ impl UiRuntime {
                 let hover = if hovered.contains(&id) { 1.0 } else { 0.0 };
                 let press = if pressed == Some(id) { 1.0 } else { 0.0 };
                 let focus = if focused == Some(id) { 1.0 } else { 0.0 };
-                transition_changed |= approach(&mut node.transition.hover, hover, step);
-                transition_changed |= approach(&mut node.transition.press, press, step);
-                transition_changed |= approach(&mut node.transition.focus, focus, step);
+                let mut changed = approach(&mut node.transition.hover, hover, step);
+                changed |= approach(&mut node.transition.press, press, step);
+                changed |= approach(&mut node.transition.focus, focus, step);
+                if changed {
+                    changed_transitions.push(id);
+                }
             }
         }
+        let mut damage = AnimationDamage::default();
+        for id in changed_transitions {
+            // A transition restyles the node and everything its state cascades
+            // to, so damage the whole subtree plus the effect margin. A node
+            // without bounds cannot be localized safely.
+            match self.subtree_bounds(id) {
+                Some(bounds) if !bounds.is_empty() => {
+                    damage.add_region(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
+                }
+                _ => damage.add_full(),
+            }
+        }
+        damage
+    }
 
-        let mut widgets_changed = false;
+    fn advance_widget_animations(
+        &mut self,
+        delta: Duration,
+        settle: bool,
+        visibility: &[bool],
+    ) -> (AnimationDamage, bool) {
+        let mut damage = AnimationDamage::default();
         let mut widgets_animating = false;
         let presented = self.presented;
         for (slot_index, slot) in self.nodes.iter_mut().enumerate() {
@@ -960,29 +1137,25 @@ impl UiRuntime {
             {
                 continue;
             }
-            widgets_changed |= widget.advance_animation(delta, settle);
+            let bounds = node.bounds;
+            let local = widget.local_animation_damage();
+            if widget.advance_animation(delta, settle) {
+                if local && !bounds.is_empty() {
+                    damage.add_region(inflate_rect(bounds, EFFECT_DAMAGE_MARGIN));
+                } else {
+                    damage.add_full();
+                }
+            }
             widgets_animating |= widget.is_animating();
         }
-
-        if transition_changed || widgets_changed {
-            self.mark_full_damage();
-            self.cached_display_list = None;
-            self.redraw_requested = true;
-        }
-        self.animating = widgets_animating || (step < 1.0 && transition_changed);
+        (damage, widgets_animating)
     }
 
     fn mark_full_damage(&mut self) {
         let Some(bounds) = self.node(self.root).map(|node| node.bounds) else {
             return;
         };
-        if bounds.is_empty() {
-            return;
-        }
-        self.pending_damage = Some(match self.pending_damage {
-            Some(existing) => existing.union(bounds),
-            None => bounds,
-        });
+        self.damage_rect(bounds);
     }
 
     /// Returns the stable handle of the root node.
@@ -2886,11 +3059,12 @@ mod tests {
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
+        time::Duration,
     };
 
     use drawen_core::{
         Color, Constraints, InputEvent, Key, Modifiers, NamedKey, Point, PointerButton,
-        PointerButtons, PointerEvent, PointerId, Rect, Size,
+        PointerButtons, PointerEvent, PointerId, Rect, Size, WidgetId,
     };
     use drawen_render::{DisplayCommand, DisplayList, PaintContext};
 
@@ -4170,6 +4344,208 @@ mod tests {
             .paint(&mut PaintContext::new(&mut DisplayList::new()))
             .expect("invalidated paint succeeds");
         assert_eq!(paints.get(), 2);
+    }
+
+    /// Places one 20x20 child at (30, 40) inside a 200x100 panel.
+    struct PanelHost;
+
+    impl Widget for PanelHost {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let (child, _) = context
+                .layout_child(0, Constraints::loose(constraints.max()))
+                .expect("valid child");
+            LayoutResult::with_children(
+                constraints.constrain(size(200.0, 100.0)),
+                vec![ChildLayout::new(child, Point::new(30.0, 40.0))],
+            )
+        }
+    }
+
+    struct AnimationProbe {
+        local: bool,
+        change_pending: bool,
+    }
+
+    impl Widget for AnimationProbe {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(size(20.0, 20.0)))
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+
+        fn advance_animation(&mut self, _: Duration, _: bool) -> bool {
+            let changed = self.change_pending;
+            self.change_pending = false;
+            changed
+        }
+
+        fn is_animating(&self) -> bool {
+            self.change_pending
+        }
+
+        fn local_animation_damage(&self) -> bool {
+            self.local
+        }
+    }
+
+    fn panel_runtime(child: impl Widget + 'static) -> (UiRuntime, WidgetId) {
+        let mut runtime = UiRuntime::new(PanelHost);
+        let root = runtime.root();
+        let child = runtime
+            .append_child(root, child)
+            .expect("child is appended");
+        runtime
+            .layout(Constraints::tight(size(200.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        (runtime, child)
+    }
+
+    #[test]
+    fn invalidate_paint_for_damages_only_the_subtree_plus_margin() {
+        let paints = Rc::new(Cell::new(0));
+        let (mut runtime, child) = panel_runtime(SizedPaintCounter {
+            size: size(20.0, 20.0),
+            paints: Rc::clone(&paints),
+            handles_moves: false,
+            redraw_on_key: false,
+        });
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+
+        runtime.invalidate_paint_for(child);
+        assert!(runtime.take_redraw_request());
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("localized paint succeeds");
+
+        assert_eq!(paints.get(), 2);
+        // Child bounds (30, 40, 20, 20) grown by the 24px effect margin.
+        assert_eq!(
+            runtime.stats().last_damage(),
+            Some(Rect::new(Point::new(6.0, 16.0), size(68.0, 68.0)))
+        );
+    }
+
+    #[test]
+    fn invalidate_paint_for_falls_back_to_full_damage_before_layout() {
+        let mut runtime = UiRuntime::new(PanelHost);
+        let root = runtime.root();
+        let child = runtime
+            .append_child(
+                root,
+                AnimationProbe {
+                    local: true,
+                    change_pending: false,
+                },
+            )
+            .expect("child is appended");
+        runtime.invalidate_paint_for(child);
+        runtime
+            .layout(Constraints::tight(size(200.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("paint succeeds");
+        // Nothing was laid out when the damage was requested, so the rebuild
+        // falls back to the bounds of everything the display list draws.
+        assert_eq!(
+            runtime.stats().last_damage(),
+            Some(Rect::new(Point::new(30.0, 40.0), size(20.0, 20.0)))
+        );
+    }
+
+    #[test]
+    fn invalidate_rect_limits_damage_to_the_region() {
+        let (mut runtime, _child) = panel_runtime(AnimationProbe {
+            local: true,
+            change_pending: false,
+        });
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+
+        let region = Rect::new(Point::new(10.0, 10.0), size(30.0, 30.0));
+        runtime.invalidate_rect(region);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("localized paint succeeds");
+        assert_eq!(runtime.stats().last_damage(), Some(region));
+        assert!(runtime.take_redraw_request());
+
+        // Empty regions change nothing and must not schedule a frame.
+        runtime.invalidate_rect(Rect::ZERO);
+        assert!(!runtime.take_redraw_request());
+    }
+
+    #[test]
+    fn hover_transitions_damage_only_the_hovered_subtree() {
+        let (mut runtime, _child) = panel_runtime(AnimationProbe {
+            local: true,
+            change_pending: false,
+        });
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+
+        // Entering the child invalidates the whole frame once; consume that
+        // damage so only the transition's own damage remains.
+        let _ = runtime.dispatch_event(&pointer_move(Point::new(35.0, 45.0)));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("hover paint succeeds");
+
+        runtime.advance_animations(Duration::from_millis(16));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("transition paint succeeds");
+
+        assert_eq!(
+            runtime.stats().last_damage(),
+            Some(Rect::new(Point::new(6.0, 16.0), size(68.0, 68.0)))
+        );
+    }
+
+    #[test]
+    fn local_widget_animation_damage_stays_inside_the_bounds() {
+        let (mut runtime, _child) = panel_runtime(AnimationProbe {
+            local: true,
+            change_pending: true,
+        });
+
+        runtime.advance_animations(Duration::from_millis(16));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("animated paint succeeds");
+
+        assert_eq!(
+            runtime.stats().last_damage(),
+            Some(Rect::new(Point::new(6.0, 16.0), size(68.0, 68.0)))
+        );
+    }
+
+    #[test]
+    fn widget_animation_without_opt_in_keeps_full_damage() {
+        let (mut runtime, _child) = panel_runtime(AnimationProbe {
+            local: false,
+            change_pending: true,
+        });
+
+        runtime.advance_animations(Duration::from_millis(16));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("animated paint succeeds");
+
+        assert_eq!(
+            runtime.stats().last_damage(),
+            Some(Rect::new(Point::ZERO, size(200.0, 100.0)))
+        );
     }
 
     #[test]

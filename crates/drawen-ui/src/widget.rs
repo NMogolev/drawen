@@ -90,6 +90,19 @@ pub trait Widget {
         false
     }
 
+    /// Returns whether animation changes stay inside this widget's bounds.
+    ///
+    /// When `true`, the runtime damages only the node's bounds plus the
+    /// standard effect margin after [`Widget::advance_animation`] reports a
+    /// change, so the backend can repaint a small region instead of the whole
+    /// window. Keep the default `false` when the widget paints through
+    /// [`Widget::paint_floating`], draws shadows or glows larger than the
+    /// margin, or otherwise cannot bound its animated output; the runtime then
+    /// falls back to full-frame damage, which is always correct.
+    fn local_animation_damage(&self) -> bool {
+        false
+    }
+
     /// Returns whether this widget must keep advancing while it is not visible.
     ///
     /// The runtime freezes purely visual animations when the window cannot be
@@ -226,6 +239,10 @@ where
 
     fn is_animating(&self) -> bool {
         (**self).is_animating()
+    }
+
+    fn local_animation_damage(&self) -> bool {
+        (**self).local_animation_damage()
     }
 
     fn advances_while_hidden(&self) -> bool {

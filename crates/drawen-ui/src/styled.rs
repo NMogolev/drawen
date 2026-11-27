@@ -125,6 +125,10 @@ where
         self.inner.is_animating()
     }
 
+    fn local_animation_damage(&self) -> bool {
+        self.inner.local_animation_damage()
+    }
+
     fn advances_while_hidden(&self) -> bool {
         self.inner.advances_while_hidden()
     }
@@ -245,6 +249,10 @@ mod tests {
             true
         }
 
+        fn local_animation_damage(&self) -> bool {
+            true
+        }
+
         fn advances_while_hidden(&self) -> bool {
             true
         }
@@ -315,6 +323,7 @@ mod tests {
         assert!(styled.advance_animation(Duration::ZERO, false));
         assert_eq!(counters.advance.get(), 1);
         assert!(styled.is_animating());
+        assert!(styled.local_animation_damage());
         assert!(styled.advances_while_hidden());
         assert!(styled.accepts_focus());
 
