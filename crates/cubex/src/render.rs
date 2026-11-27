@@ -153,7 +153,7 @@ impl Renderer {
         let height_f = height as f32;
 
         let background = scene.background().to_srgb8();
-        for pixel in self.frame.pixels.chunks_exact_mut(4) {
+        for pixel in self.frame.pixels.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&background);
         }
         self.depth.fill(INFINITY);
@@ -489,8 +489,8 @@ mod tests {
         let scene = Scene::new().with_background(background());
         let renderer = render(&scene, &Camera::default(), 4);
         let expected = background().to_srgb8();
-        for pixel in renderer.frame().pixels().chunks_exact(4) {
-            assert_eq!(pixel, expected);
+        for pixel in renderer.frame().pixels().as_chunks::<4>().0 {
+            assert_eq!(*pixel, expected);
         }
     }
 

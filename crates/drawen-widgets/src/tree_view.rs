@@ -257,9 +257,12 @@ impl TreeView {
                 parent,
             });
             if expanded {
-                stack.extend(node.children.iter().rev().map(|child| {
-                    (child, depth + 1, Some(index))
-                }));
+                stack.extend(
+                    node.children
+                        .iter()
+                        .rev()
+                        .map(|child| (child, depth + 1, Some(index))),
+                );
             }
         }
         self.rows = rows;
@@ -271,9 +274,7 @@ impl TreeView {
         if selected.is_some_and(|id| !self.rows.iter().any(|row| row.id == id)) {
             // A selected node hidden inside a collapsed branch keeps its id;
             // the cursor falls back to the nearest visible ancestor row.
-            self.cursor = self
-                .cursor
-                .or_else(|| (!self.rows.is_empty()).then_some(0));
+            self.cursor = self.cursor.or_else(|| (!self.rows.is_empty()).then_some(0));
         }
         self.scroll_y = self.scroll_y.min(self.max_scroll());
     }
@@ -377,10 +378,8 @@ impl Widget for TreeView {
         let font = environment.font_for(&style);
         let font_size = font.pixel_size(environment.logical_dpi());
         self.row_height = font_size + ROW_PADDING * 2.0;
-        let text_style = TextStyle::new_with_font(
-            font,
-            style.foreground_or(environment.theme().foreground()),
-        );
+        let text_style =
+            TextStyle::new_with_font(font, style.foreground_or(environment.theme().foreground()));
         self.layouts = self
             .rows
             .iter()
@@ -682,9 +681,7 @@ fn size(width: f32, height: f32) -> Size {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use drawen_core::{
-        KeyCode, Modifiers, PointerButtons, PointerEvent, WheelDelta, WheelEvent,
-    };
+    use drawen_core::{KeyCode, Modifiers, PointerButtons, PointerEvent, WheelDelta, WheelEvent};
     use drawen_ui::UiRuntime;
 
     use super::*;
@@ -740,13 +737,21 @@ mod tests {
         });
         let mut runtime = UiRuntime::new(tree);
         runtime.layout(viewport(400.0)).expect("layout succeeds");
-        let collapsed = runtime.bounds(runtime.root()).expect("bounds").size.height();
+        let collapsed = runtime
+            .bounds(runtime.root())
+            .expect("bounds")
+            .size
+            .height();
 
         // Row 0 twisty sits at x = 8..24, vertically centered in the first row.
         let _ = runtime.dispatch_event(&pointer(Point::new(12.0, 10.0), false));
         let _ = runtime.dispatch_event(&pointer(Point::new(12.0, 10.0), true));
         runtime.layout(viewport(400.0)).expect("relayout succeeds");
-        let expanded = runtime.bounds(runtime.root()).expect("bounds").size.height();
+        let expanded = runtime
+            .bounds(runtime.root())
+            .expect("bounds")
+            .size
+            .height();
         assert!(expanded > collapsed);
         assert_eq!(*toggled.borrow(), vec![("src".to_owned(), true)]);
 
@@ -754,7 +759,11 @@ mod tests {
         let _ = runtime.dispatch_event(&pointer(Point::new(12.0, 10.0), true));
         runtime.layout(viewport(400.0)).expect("relayout succeeds");
         assert_eq!(
-            runtime.bounds(runtime.root()).expect("bounds").size.height(),
+            runtime
+                .bounds(runtime.root())
+                .expect("bounds")
+                .size
+                .height(),
             collapsed
         );
         assert_eq!(
@@ -832,7 +841,10 @@ mod tests {
         let _ = runtime.dispatch_event(&pointer(Point::new(60.0, 10.0), false));
         let _ = runtime.dispatch_event(&pointer(Point::new(60.0, 10.0), true));
         let _ = runtime.dispatch_event(&key(NamedKey::Enter));
-        assert_eq!(*activated.borrow(), vec!["src".to_owned(), "src".to_owned()]);
+        assert_eq!(
+            *activated.borrow(),
+            vec!["src".to_owned(), "src".to_owned()]
+        );
     }
 
     #[test]

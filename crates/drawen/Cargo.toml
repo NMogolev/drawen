@@ -54,3 +54,7 @@ drawen-workspace = { version = "0.3", path = "../drawen-workspace" }
 [dev-dependencies]
 drawen-platform-winit = { version = "0.3", path = "../drawen-platform-winit" }
 rfd = "0.15"
+
+[[example]]
+name = "cubex_showcase"
+required-features = ["cubex"]

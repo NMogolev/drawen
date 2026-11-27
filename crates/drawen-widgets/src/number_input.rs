@@ -211,7 +211,11 @@ impl NumberInput {
     }
 
     fn ensure_caret_visible(&mut self) {
-        let caret = self.text_layout.caret_rect(self.editor.focus(), 1.0).origin.x;
+        let caret = self
+            .text_layout
+            .caret_rect(self.editor.focus(), 1.0)
+            .origin
+            .x;
         let width = self.text_width();
         if caret < self.scroll_x {
             self.scroll_x = caret;
@@ -353,9 +357,7 @@ impl Widget for NumberInput {
         self.padding = style.padding_or(default_padding());
         self.relayout(environment);
         let font_size = font.pixel_size(environment.logical_dpi());
-        let width = (self.text_layout.size().width()
-            + self.padding.horizontal()
-            + STEPPER_WIDTH)
+        let width = (self.text_layout.size().width() + self.padding.horizontal() + STEPPER_WIDTH)
             .max(DEFAULT_WIDTH);
         let height = (self.text_layout.size().height() + self.padding.vertical())
             .max(font_size + self.padding.vertical());
@@ -394,7 +396,10 @@ impl Widget for NumberInput {
         context.stroke_rounded_rect(bounds, radius, border_width, border);
 
         let text_area = Rect::new(
-            Point::new(bounds.origin.x + self.padding.left, bounds.origin.y + self.padding.top),
+            Point::new(
+                bounds.origin.x + self.padding.left,
+                bounds.origin.y + self.padding.top,
+            ),
             size(
                 self.text_width(),
                 (self.viewport.height() - self.padding.vertical()).max(1.0),
@@ -443,17 +448,11 @@ impl Widget for NumberInput {
         );
         let up = Rect::new(
             Point::new(stepper_x + BORDER_WIDTH, bounds.origin.y),
-            size(
-                STEPPER_WIDTH - BORDER_WIDTH,
-                self.viewport.height() / 2.0,
-            ),
+            size(STEPPER_WIDTH - BORDER_WIDTH, self.viewport.height() / 2.0),
         );
         let down = Rect::new(
             Point::new(stepper_x + BORDER_WIDTH, mid_y),
-            size(
-                STEPPER_WIDTH - BORDER_WIDTH,
-                self.viewport.height() / 2.0,
-            ),
+            size(STEPPER_WIDTH - BORDER_WIDTH, self.viewport.height() / 2.0),
         );
         if self.pressed_stepper == Some(Stepper::Up) {
             context.fill_rect(up, theme.control_pressed_background());
@@ -462,7 +461,10 @@ impl Widget for NumberInput {
             context.fill_rect(down, theme.control_pressed_background());
         }
         context.fill_rect(
-            Rect::new(Point::new(stepper_x, mid_y), size(STEPPER_WIDTH, BORDER_WIDTH)),
+            Rect::new(
+                Point::new(stepper_x, mid_y),
+                size(STEPPER_WIDTH, BORDER_WIDTH),
+            ),
             border,
         );
         paint_arrow(
@@ -537,10 +539,7 @@ impl Widget for NumberInput {
                     if let Some(stepper) = pressed
                         && self.stepper_at(pointer.position) == Some(stepper)
                     {
-                        self.step_by(
-                            if stepper == Stepper::Up { 1.0 } else { -1.0 },
-                            context,
-                        );
+                        self.step_by(if stepper == Stepper::Up { 1.0 } else { -1.0 }, context);
                     }
                     context.request_redraw();
                     return EventStatus::Handled;
@@ -742,9 +741,7 @@ fn format_number(value: f64) -> String {
 fn filter_numeric(input: &str) -> String {
     input
         .chars()
-        .filter(|character| {
-            character.is_ascii_digit() || matches!(character, '-' | '.' | '+')
-        })
+        .filter(|character| character.is_ascii_digit() || matches!(character, '-' | '.' | '+'))
         .collect()
 }
 

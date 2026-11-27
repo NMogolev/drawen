@@ -502,7 +502,11 @@ mod tests {
         });
         assert!(view.scene().is_empty());
         assert_eq!(view.camera().position(), Vec3::new(0.0, 1.0, 3.0));
-        assert!(!view.image().pixels().is_empty());
+        let (width, height) = view.resolution();
+        assert_eq!(
+            view.image().pixels().len(),
+            width as usize * height as usize * 4
+        );
     }
 
     #[test]

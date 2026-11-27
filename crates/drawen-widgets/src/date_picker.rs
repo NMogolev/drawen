@@ -97,9 +97,7 @@ impl Date {
         // Sakamoto's algorithm, shifted so Monday is zero.
         let table = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
         let year = self.year - (self.month < 3) as i32;
-        let sunday_zero = (year
-            + year.div_euclid(4)
-            - year.div_euclid(100)
+        let sunday_zero = (year + year.div_euclid(4) - year.div_euclid(100)
             + year.div_euclid(400)
             + table[(self.month - 1) as usize]
             + self.day as i32)
@@ -121,10 +119,8 @@ impl Date {
         let era = if year >= 0 { year } else { year - 399 } / 400;
         let year_of_era = year - era * 400;
         let month_shift = if self.month > 2 { -3 } else { 9 };
-        let day_of_year =
-            (153 * (self.month as i32 + month_shift) + 2) / 5 + self.day as i32 - 1;
-        let day_of_era =
-            year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let day_of_year = (153 * (self.month as i32 + month_shift) + 2) / 5 + self.day as i32 - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
         era * 146_097 + day_of_era - 719_468
     }
 
@@ -133,13 +129,16 @@ impl Date {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub const fn from_days(days: i32) -> Option<Self> {
         let shifted = days + 719_468;
-        let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+        let era = if shifted >= 0 {
+            shifted
+        } else {
+            shifted - 146_096
+        } / 146_097;
         let day_of_era = shifted - era * 146_097;
         let year_of_era =
             (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
         let year = year_of_era + era * 400;
-        let day_of_year =
-            day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
         let mp = (5 * day_of_year + 2) / 153;
         let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u8;
         let month = (mp + if mp < 10 { 3 } else { -9 }) as u8;
@@ -208,9 +207,7 @@ impl DatePicker {
     pub fn with_month(year: i32, month: u8) -> Self {
         assert!((1..=12).contains(&month), "month must be 1 through 12");
         Self {
-            month: Property::normalized((year, month), |(year, month)| {
-                (year, month.clamp(1, 12))
-            }),
+            month: Property::normalized((year, month), |(year, month)| (year, month.clamp(1, 12))),
             selected: Property::new(None),
             changed: Signal::new(),
             cursor: Date::new(year, month, 1).expect("first day of a valid month exists"),
@@ -292,10 +289,7 @@ impl DatePicker {
 
     fn sync_cursor(&mut self) {
         let (year, month) = self.month.get();
-        let day = self
-            .cursor
-            .day()
-            .min(Date::days_in_month(year, month));
+        let day = self.cursor.day().min(Date::days_in_month(year, month));
         self.cursor = Date::new(year, month, day).expect("clamped day exists");
     }
 
@@ -361,11 +355,7 @@ impl DatePicker {
         }
         let column = (position.x / self.cell_width()).floor();
         let row = ((position.y - HEADER_HEIGHT - WEEKDAY_HEIGHT) / self.cell_height()).floor();
-        if column < 0.0
-            || column >= GRID_COLUMNS as f32
-            || row < 0.0
-            || row >= GRID_ROWS as f32
-        {
+        if column < 0.0 || column >= GRID_COLUMNS as f32 || row < 0.0 || row >= GRID_ROWS as f32 {
             return None;
         }
         let index = row as usize * GRID_COLUMNS + column as usize;
@@ -512,19 +502,18 @@ impl Widget for DatePicker {
             context.draw_text(
                 layout.clone(),
                 Point::new(
-                    bounds.origin.x + column as f32 * cell_width
+                    bounds.origin.x
+                        + column as f32 * cell_width
                         + (cell_width - layout.size().width()) / 2.0,
-                    bounds.origin.y + HEADER_HEIGHT
+                    bounds.origin.y
+                        + HEADER_HEIGHT
                         + (WEEKDAY_HEIGHT - layout.size().height()) / 2.0,
                 ),
             );
         }
         let grid_top = bounds.origin.y + HEADER_HEIGHT + WEEKDAY_HEIGHT;
         let offset = usize::from(self.month_start().weekday());
-        let days = usize::from(Date::days_in_month(
-            self.month.get().0,
-            self.month.get().1,
-        ));
+        let days = usize::from(Date::days_in_month(self.month.get().0, self.month.get().1));
         let selected = self.selected.get();
         for (index, layout) in self.days.iter().enumerate() {
             let row = index / GRID_COLUMNS;
@@ -671,9 +660,8 @@ impl DatePicker {
             }
             Key::Named(NamedKey::End) => {
                 let (year, month) = self.month.get();
-                self.cursor =
-                    Date::new(year, month, Date::days_in_month(year, month))
-                        .expect("last day of a valid month exists");
+                self.cursor = Date::new(year, month, Date::days_in_month(year, month))
+                    .expect("last day of a valid month exists");
             }
             Key::Named(NamedKey::Enter | NamedKey::Space) => {
                 self.select_cursor(context);
@@ -725,8 +713,7 @@ mod tests {
     use super::*;
 
     fn viewport() -> Constraints {
-        Constraints::tight(Size::new(280.0, 248.0).expect("valid size"))
-            .expect("valid constraints")
+        Constraints::tight(Size::new(280.0, 248.0).expect("valid size")).expect("valid constraints")
     }
 
     fn key(key: NamedKey) -> InputEvent {
@@ -804,8 +791,8 @@ mod tests {
 
     #[test]
     fn header_arrows_page_months_and_clamp_the_cursor() {
-        let picker = DatePicker::with_month(2026, 1)
-            .with_value(Date::new(2026, 1, 31).expect("valid date"));
+        let picker =
+            DatePicker::with_month(2026, 1).with_value(Date::new(2026, 1, 31).expect("valid date"));
         let month = picker.month();
         let mut runtime = UiRuntime::new(picker);
         runtime.layout(viewport()).expect("layout succeeds");
@@ -823,13 +810,15 @@ mod tests {
 
     #[test]
     fn arrow_keys_cross_month_boundaries_and_enter_selects() {
-        let picker = DatePicker::with_month(2026, 1)
-            .with_value(Date::new(2026, 1, 31).expect("valid date"));
+        let picker =
+            DatePicker::with_month(2026, 1).with_value(Date::new(2026, 1, 31).expect("valid date"));
         let selected = picker.selected();
         let month = picker.month();
         let mut runtime = UiRuntime::new(picker);
         runtime.layout(viewport()).expect("layout succeeds");
-        runtime.focus_widget(runtime.root()).expect("picker focuses");
+        runtime
+            .focus_widget(runtime.root())
+            .expect("picker focuses");
 
         let _ = runtime.dispatch_event(&key(NamedKey::ArrowRight));
         assert_eq!(month.get(), (2026, 2));

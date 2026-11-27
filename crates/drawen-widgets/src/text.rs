@@ -258,7 +258,10 @@ impl Widget for Text {
             for rect in layout.selection_rects(self.selection.clone()) {
                 context.fill_rect(
                     Rect::new(
-                        Point::new(rect.origin.x + bounds.origin.x, rect.origin.y + bounds.origin.y),
+                        Point::new(
+                            rect.origin.x + bounds.origin.x,
+                            rect.origin.y + bounds.origin.y,
+                        ),
                         rect.size,
                     ),
                     selection_color,
@@ -562,10 +565,7 @@ mod selection_tests {
         let y = middle_y(&layout);
         let _ = runtime.dispatch_event(&pointer(Point::new(0.0, y), false));
         let _ = runtime.dispatch_event(&drag(Point::new(layout.size().width() + 50.0, y)));
-        let _ = runtime.dispatch_event(&pointer(
-            Point::new(layout.size().width() + 50.0, y),
-            true,
-        ));
+        let _ = runtime.dispatch_event(&pointer(Point::new(layout.size().width() + 50.0, y), true));
         let _ = runtime.dispatch_event(&command("c"));
         assert_eq!(*clipboard.0.borrow(), "hello world");
     }

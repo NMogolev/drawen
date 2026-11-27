@@ -93,7 +93,10 @@ impl WorkspaceDemo {
         let picker = DatePicker::with_month(2026, 11)
             .with_value(Date::new(2026, 11, 27).expect("demo date is valid"));
         subscriptions.push(picker.changed().subscribe(move |date| {
-            println!("Deadline: {}", date.map_or_else(|| "<none>".to_owned(), |d| d.to_string()));
+            println!(
+                "Deadline: {}",
+                date.map_or_else(|| "<none>".to_owned(), |d| d.to_string())
+            );
         }));
         runtime
             .append_child(inspector, picker)
@@ -255,7 +258,11 @@ struct Panel {
 }
 
 impl Widget for Panel {
-    fn layout(&mut self, context: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+    fn layout(
+        &mut self,
+        context: &mut LayoutContext<'_>,
+        constraints: Constraints,
+    ) -> LayoutResult {
         let size = available_size(constraints);
         let mut children = Vec::new();
         for index in 0..context.child_count() {
