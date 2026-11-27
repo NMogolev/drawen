@@ -15,7 +15,7 @@ use std::{
 
 use bytemuck::{Pod, Zeroable};
 use drawen_core::{Affine, Color, Point, Rect};
-use drawen_render::{DisplayCommand, DisplayList, RasterImage, TextLayout, TextureId};
+use drawen_render::{DisplayCommand, DisplayList, FrameDamage, RasterImage, TextLayout, TextureId};
 
 /// The `wgpu` version Drawen is built against.
 ///
@@ -232,6 +232,33 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
+// Copies the retained offscreen frame to the swapchain image verbatim. The
+// offscreen already holds premultiplied linear values, so no conversion or
+// blending happens here; one fullscreen triangle covers the surface.
+const BLIT_SHADER: &str = r"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
+    var output: VertexOutput;
+    let uv = vec2(f32((index << 1u) & 2u), f32(index & 2u));
+    output.position = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    output.uv = uv;
+    return output;
+}
+
+@group(0) @binding(0) var source_texture: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+@fragment
+fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(source_texture, source_sampler, input.uv);
+}
+";
+
 /// GPU presentation or initialization failure.
 #[derive(Debug)]
 pub enum GpuError {
@@ -334,6 +361,19 @@ pub struct GpuRenderer {
     // would otherwise be re-uploaded over PCIe on every single frame.
     oversized_image: Option<OversizedRasterImage>,
     max_texture_dimension_2d: u32,
+    // Swapchain images rotate, so partial damage cannot load the previous
+    // surface contents. The frame is rasterized into this retained offscreen
+    // texture instead and blitted to the current surface image every frame.
+    retained_frame: Option<RetainedFrame>,
+    blit_pipeline: wgpu::RenderPipeline,
+    clear_pipeline: wgpu::RenderPipeline,
+}
+
+/// The offscreen texture holding the last fully rasterized frame.
+struct RetainedFrame {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
 }
 
 impl GpuRenderer {
@@ -392,7 +432,20 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
         });
         let texture_bind_group_layout = create_texture_bind_group_layout(&device);
-        let shape_pipeline = create_shape_pipeline(&device, &shape_shader, config.format);
+        let shape_pipeline = create_shape_pipeline(
+            &device,
+            &shape_shader,
+            config.format,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "Drawen shape pipeline",
+        );
+        let clear_pipeline = create_shape_pipeline(
+            &device,
+            &shape_shader,
+            config.format,
+            None,
+            "Drawen damage clear pipeline",
+        );
         let text_pipeline = create_text_pipeline(
             &device,
             &text_shader,
@@ -408,6 +461,16 @@ impl GpuRenderer {
         let texture_pipeline = create_texture_pipeline(
             &device,
             &texture_shader,
+            config.format,
+            &texture_bind_group_layout,
+        );
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Drawen frame blit shader"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
+        });
+        let blit_pipeline = create_blit_pipeline(
+            &device,
+            &blit_shader,
             config.format,
             &texture_bind_group_layout,
         );
@@ -463,6 +526,9 @@ impl GpuRenderer {
             raster_images: RasterImageCache::default(),
             oversized_image: None,
             max_texture_dimension_2d,
+            retained_frame: None,
+            blit_pipeline,
+            clear_pipeline,
         })
     }
 
@@ -540,6 +606,9 @@ impl GpuRenderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        // The retained frame no longer matches the surface; the next frame
+        // must be rasterized in full.
+        self.retained_frame = None;
         Ok(())
     }
 
@@ -557,13 +626,33 @@ impl GpuRenderer {
         display_list: &DisplayList,
         scale_factor: f32,
     ) -> Result<RenderStatus, GpuRendererError> {
+        self.render_with_damage(display_list, scale_factor, FrameDamage::Full)
+    }
+
+    /// Renders `display_list`, rasterizing only the region reported by `damage`.
+    ///
+    /// [`FrameDamage::Region`] repaints the supplied logical rectangle over the
+    /// retained previous frame; [`FrameDamage::Unchanged`] skips rasterization
+    /// entirely and presents the retained frame. The first frame after creation
+    /// or [`Self::resize`] is always rasterized in full regardless of `damage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuRendererError`] when the display list has invalid geometry
+    /// or unbalanced paint state.
+    pub fn render_with_damage(
+        &mut self,
+        display_list: &DisplayList,
+        scale_factor: f32,
+        damage: FrameDamage,
+    ) -> Result<RenderStatus, GpuRendererError> {
         if !scale_factor.is_finite() || scale_factor <= 0.0 {
             return Err(GpuRendererError::InvalidScaleFactor);
         }
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.render_frame(display_list, scale_factor, frame)?;
+                self.render_frame(display_list, scale_factor, frame, damage)?;
                 return Ok(RenderStatus::Suboptimal);
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -574,7 +663,7 @@ impl GpuRenderer {
             }
             wgpu::CurrentSurfaceTexture::Validation => return Ok(RenderStatus::Skipped),
         };
-        self.render_frame(display_list, scale_factor, frame)?;
+        self.render_frame(display_list, scale_factor, frame, damage)?;
         Ok(RenderStatus::Presented)
     }
 
@@ -584,12 +673,44 @@ impl GpuRenderer {
         display_list: &DisplayList,
         scale_factor: f32,
         frame: wgpu::SurfaceTexture,
+        damage: FrameDamage,
     ) -> Result<(), GpuRendererError> {
-        let mut prepared = PreparedFrame::new(self.config.width, self.config.height, scale_factor);
-        prepared.record(display_list)?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let width = self.config.width;
+        let height = self.config.height;
+        // Partial damage is only meaningful once a complete frame is retained.
+        let mut region = None;
+        let mut skip_raster = false;
+        if self.retained_frame.is_some() {
+            match damage {
+                FrameDamage::Unchanged => skip_raster = true,
+                FrameDamage::Region(rect) => {
+                    let scissor =
+                        Scissor::from_rect(rect, Affine::IDENTITY, scale_factor, width, height);
+                    if scissor.is_empty() {
+                        skip_raster = true;
+                    } else {
+                        region = Some((rect, scissor));
+                    }
+                }
+                FrameDamage::Full => {}
+            }
+        }
+        if skip_raster {
+            self.present_retained(frame);
+            return Ok(());
+        }
+        if self.retained_frame.is_none() {
+            self.retained_frame = Some(self.create_retained_frame());
+        }
+        let (retained_view, retained_bind_group) = {
+            let retained = self
+                .retained_frame
+                .as_ref()
+                .expect("retained frame was just ensured");
+            (retained.view.clone(), retained.bind_group.clone())
+        };
+        let mut prepared = PreparedFrame::new(width, height, scale_factor);
+        prepared.record(display_list, region.map(|(rect, _)| rect))?;
         let shape_buffer = (!prepared.shape_vertices.is_empty()).then(|| {
             create_buffer(
                 &self.device,
@@ -597,10 +718,10 @@ impl GpuRenderer {
                 &prepared.shape_vertices,
             )
         });
-        let text_batch = self.create_text_batch(&prepared.texts)?;
+        let mut text_batch = self.create_text_batch(&prepared.texts)?;
         let text_buffer = (!text_batch.vertices.is_empty())
             .then(|| create_buffer(&self.device, "Drawen text vertices", &text_batch.vertices));
-        let image_batch = self.prepare_image_batch(&prepared.images);
+        let mut image_batch = self.prepare_image_batch(&prepared.images);
         let image_buffer = (!image_batch.vertices.is_empty())
             .then(|| create_buffer(&self.device, "Drawen image vertices", &image_batch.vertices));
         let texture_buffer = (!prepared.texture_vertices.is_empty()).then(|| {
@@ -610,6 +731,14 @@ impl GpuRenderer {
                 &prepared.texture_vertices,
             )
         });
+        if let Some((_, damage_scissor)) = region {
+            restrict_to_damage(
+                &mut prepared,
+                &mut text_batch,
+                &mut image_batch,
+                damage_scissor,
+            );
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -619,16 +748,37 @@ impl GpuRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Drawen GPU paint pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &retained_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: if region.is_some() {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
+            if let Some((_, damage_scissor)) = region {
+                // Reset the damaged region to transparency before repainting
+                // it, so translucent content composites over a clean background
+                // instead of accumulating over the retained pixels.
+                let clear_vertices = clear_quad_vertices(damage_scissor, width, height);
+                let clear_buffer =
+                    create_buffer(&self.device, "Drawen damage clear", &clear_vertices);
+                pass.set_pipeline(&self.clear_pipeline);
+                pass.set_vertex_buffer(0, clear_buffer.slice(..));
+                pass.set_scissor_rect(
+                    damage_scissor.x,
+                    damage_scissor.y,
+                    damage_scissor.width,
+                    damage_scissor.height,
+                );
+                pass.draw(0..6, 0..1);
+            }
             let mut current_pipeline = None;
             let mut current_vertex_buffer = None;
             let mut current_bind_group = None;
@@ -737,9 +887,100 @@ impl GpuRenderer {
                 }
             }
         }
+        self.blit_retained(&mut encoder, &frame, &retained_bind_group);
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
         Ok(())
+    }
+
+    /// Presents the retained frame without rasterizing anything.
+    fn present_retained(&mut self, frame: wgpu::SurfaceTexture) {
+        let bind_group = self
+            .retained_frame
+            .as_ref()
+            .expect("retained frame exists when rasterization is skipped")
+            .bind_group
+            .clone();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Drawen GPU retained frame"),
+            });
+        self.blit_retained(&mut encoder, &frame, &bind_group);
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+    }
+
+    /// Copies the retained offscreen frame onto the current swapchain image.
+    fn blit_retained(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &wgpu::SurfaceTexture,
+        bind_group: &wgpu::BindGroup,
+    ) {
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Drawen GPU present pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.blit_pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Allocates the offscreen texture that retains the last complete frame.
+    fn create_retained_frame(&self) -> RetainedFrame {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Drawen retained frame"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Drawen retained frame sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Drawen retained frame bind group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        RetainedFrame {
+            _texture: texture,
+            view,
+            bind_group,
+        }
     }
 
     fn prepare_image_batch(&mut self, images: &[PreparedImage]) -> ImageBatch {
@@ -1248,8 +1489,21 @@ impl PreparedFrame {
         }
     }
 
-    fn record(&mut self, display_list: &DisplayList) -> Result<(), GpuRendererError> {
+    fn record(
+        &mut self,
+        display_list: &DisplayList,
+        damage: Option<Rect>,
+    ) -> Result<(), GpuRendererError> {
         for command in display_list.commands() {
+            // Commands whose conservative bounds miss the damage region cannot
+            // change any repainted pixel, so skip their vertex generation and
+            // CPU text composition entirely. State commands always run.
+            if let Some(damage) = damage
+                && let Some(bounds) = command.conservative_bounds(self.state.transform)
+                && bounds.intersection(damage).is_empty()
+            {
+                continue;
+            }
             match command {
                 DisplayCommand::Save => self.saved_states.push(self.state.clone()),
                 DisplayCommand::Restore => {
@@ -1624,7 +1878,7 @@ impl PreparedFrame {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Scissor {
     x: u32,
     y: u32,
@@ -1706,15 +1960,82 @@ impl Scissor {
             height: bottom.saturating_sub(top),
         }
     }
+
+    const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
+
+/// Intersects every prepared draw's scissor with the damage region so no
+/// rasterization touches pixels outside it.
+fn restrict_to_damage(
+    prepared: &mut PreparedFrame,
+    text_batch: &mut TextBatch,
+    image_batch: &mut ImageBatch,
+    damage: Scissor,
+) {
+    for operation in &mut prepared.operations {
+        match operation {
+            PreparedOperation::Shape(draw) => draw.scissor = draw.scissor.intersect(damage),
+            PreparedOperation::Text(index) => {
+                let draw = &mut text_batch.draws[text_batch.text_draws[*index]];
+                draw.scissor = draw.scissor.intersect(damage);
+            }
+            PreparedOperation::Image(index) => {
+                let draw = &mut image_batch.draws[*index];
+                draw.scissor = draw.scissor.intersect(damage);
+            }
+            PreparedOperation::Texture(index) => {
+                let draw = &mut prepared.textures[*index];
+                draw.scissor = draw.scissor.intersect(damage);
+            }
+        }
+    }
+}
+
+/// Builds a transparent solid quad covering `scissor` for the unblended clear
+/// pipeline, which resets the damaged region before it is repainted.
+fn clear_quad_vertices(scissor: Scissor, width: u32, height: u32) -> [ShapeVertex; 6] {
+    let width = u32_to_f32(width);
+    let height = u32_to_f32(height);
+    let left = u32_to_f32(scissor.x);
+    let top = u32_to_f32(scissor.y);
+    let right = u32_to_f32(scissor.x.saturating_add(scissor.width));
+    let bottom = u32_to_f32(scissor.y.saturating_add(scissor.height));
+    let size = [right - left, bottom - top];
+    let ndc = |x: f32, y: f32| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
+    let mut vertices = [ShapeVertex {
+        position: [0.0; 2],
+        local_position: [0.0; 2],
+        size,
+        radius: 0.0,
+        stroke_width: 0.0,
+        color: [0.0; 4],
+        blur: 0.0,
+    }; 6];
+    for (vertex, (x, y, local)) in vertices.iter_mut().zip([
+        (left, top, [0.0, 0.0]),
+        (right, top, [size[0], 0.0]),
+        (left, bottom, [0.0, size[1]]),
+        (left, bottom, [0.0, size[1]]),
+        (right, top, [size[0], 0.0]),
+        (right, bottom, size),
+    ]) {
+        vertex.position = ndc(x, y);
+        vertex.local_position = local;
+    }
+    vertices
 }
 
 fn create_shape_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    label: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Drawen shape pipeline"),
+        label: Some(label),
         layout: None,
         vertex: wgpu::VertexState {
             module: shader,
@@ -1743,7 +2064,48 @@ fn create_shape_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The blit pipeline copies the retained frame verbatim: no blending and no
+/// color conversion, because the offscreen already holds premultiplied linear
+/// values in the surface format.
+fn create_blit_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Drawen blit pipeline layout"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Drawen blit pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vertex"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fragment"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -1976,8 +2338,9 @@ mod tests {
     use drawen_render::{FontdueTextShaper, PaintContext, RasterImage, TextStyle};
 
     use super::{
-        DisplayList, IMAGE_SHADER, PreparedFrame, PreparedOperation, Scissor, TEXTURE_SHADER,
-        TextBatch, TextureId, raster_image_fits_device, source_over_alpha,
+        DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation, Scissor,
+        TEXTURE_SHADER, TextBatch, TextureId, raster_image_fits_device, restrict_to_damage,
+        source_over_alpha,
     };
 
     #[test]
@@ -2008,7 +2371,7 @@ mod tests {
         );
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list).expect("valid display list");
+        frame.record(&list, None).expect("valid display list");
 
         assert_eq!(frame.textures.len(), 1);
         assert_eq!(frame.texture_vertices.len(), 6);
@@ -2031,7 +2394,7 @@ mod tests {
         );
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list).expect("valid display list");
+        frame.record(&list, None).expect("valid display list");
 
         assert_eq!(frame.shape_vertices.len(), 12);
         assert_eq!(frame.operations.len(), 1);
@@ -2039,6 +2402,105 @@ mod tests {
             panic!("consecutive shapes should remain one shape operation");
         };
         assert_eq!(draw.vertices, 0..12);
+    }
+
+    #[test]
+    fn culls_commands_outside_the_damage_region() {
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.fill_rect(
+            Rect::new(Point::ZERO, Size::new(10.0, 10.0).expect("valid size")),
+            Color::BLACK,
+        );
+        paint.fill_rect(
+            Rect::new(
+                Point::new(50.0, 50.0),
+                Size::new(10.0, 10.0).expect("valid size"),
+            ),
+            Color::WHITE,
+        );
+
+        let mut far = PreparedFrame::new(100, 100, 1.0);
+        far.record(
+            &list,
+            Some(Rect::new(
+                Point::new(40.0, 40.0),
+                Size::new(30.0, 30.0).expect("valid size"),
+            )),
+        )
+        .expect("valid display list");
+        assert_eq!(far.shape_vertices.len(), 6);
+        assert_eq!(far.operations.len(), 1);
+
+        let mut near = PreparedFrame::new(100, 100, 1.0);
+        near.record(
+            &list,
+            Some(Rect::new(
+                Point::ZERO,
+                Size::new(15.0, 15.0).expect("valid size"),
+            )),
+        )
+        .expect("valid display list");
+        assert_eq!(near.shape_vertices.len(), 6);
+
+        let mut full = PreparedFrame::new(100, 100, 1.0);
+        full.record(&list, None).expect("valid display list");
+        assert_eq!(full.shape_vertices.len(), 12);
+    }
+
+    #[test]
+    fn culling_keeps_state_commands_balanced() {
+        let mut list = DisplayList::new();
+        let mut paint = PaintContext::new(&mut list);
+        paint.save();
+        paint.with_clip(
+            Rect::new(Point::ZERO, Size::new(10.0, 10.0).expect("valid size")),
+            |paint| {
+                paint.fill_rect(
+                    Rect::new(Point::ZERO, Size::new(10.0, 10.0).expect("valid size")),
+                    Color::BLACK,
+                );
+            },
+        );
+        paint.restore();
+        let mut frame = PreparedFrame::new(100, 100, 1.0);
+        frame
+            .record(
+                &list,
+                Some(Rect::new(
+                    Point::new(50.0, 50.0),
+                    Size::new(10.0, 10.0).expect("valid size"),
+                )),
+            )
+            .expect("state commands stay balanced when draws are culled");
+        assert!(frame.operations.is_empty());
+    }
+
+    #[test]
+    fn restricts_every_draw_scissor_to_the_damage_region() {
+        let mut list = DisplayList::new();
+        PaintContext::new(&mut list).fill_rect(
+            Rect::new(Point::ZERO, Size::new(100.0, 100.0).expect("valid size")),
+            Color::BLACK,
+        );
+        let mut frame = PreparedFrame::new(100, 100, 1.0);
+        frame.record(&list, None).expect("valid display list");
+        let damage = Scissor {
+            x: 20,
+            y: 30,
+            width: 10,
+            height: 10,
+        };
+        restrict_to_damage(
+            &mut frame,
+            &mut TextBatch::default(),
+            &mut ImageBatch::default(),
+            damage,
+        );
+        let PreparedOperation::Shape(draw) = &frame.operations[0] else {
+            panic!("expected one shape operation");
+        };
+        assert_eq!(draw.scissor, damage);
     }
 
     #[test]
@@ -2051,7 +2513,7 @@ mod tests {
         paint.fill_rect(rect, Color::WHITE);
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list).expect("valid display list");
+        frame.record(&list, None).expect("valid display list");
 
         assert_eq!(frame.operations.len(), 3);
         assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
@@ -2070,7 +2532,7 @@ mod tests {
         paint.fill_rect(rect, Color::WHITE);
         let mut frame = PreparedFrame::new(100, 100, 1.0);
 
-        frame.record(&list).expect("valid display list");
+        frame.record(&list, None).expect("valid display list");
 
         assert_eq!(frame.operations.len(), 3);
         assert!(matches!(frame.operations[0], PreparedOperation::Shape(_)));
@@ -2121,7 +2583,7 @@ mod tests {
         paint.draw_text(layout, Point::ZERO);
         let mut frame = PreparedFrame::new(64, 64, 1.0);
 
-        frame.record(&list).expect("valid display list");
+        frame.record(&list, None).expect("valid display list");
 
         assert_eq!(frame.texts.len(), 3);
         assert!(!frame.texts[0].merge_with_previous);
