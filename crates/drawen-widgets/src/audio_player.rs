@@ -1066,6 +1066,11 @@ impl Widget for AudioPlayer {
         self.core.is_animating()
     }
 
+    fn local_animation_damage(&self) -> bool {
+        // Player chrome and progress stay inside the widget bounds.
+        true
+    }
+
     fn advances_while_hidden(&self) -> bool {
         self.core.is_animating()
     }

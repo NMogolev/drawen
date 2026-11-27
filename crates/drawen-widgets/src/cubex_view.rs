@@ -364,6 +364,11 @@ impl Widget for CubeXView {
                 .is_some_and(|speed| speed.abs() > f32::EPSILON)
     }
 
+    fn local_animation_damage(&self) -> bool {
+        // The rasterized scene never leaves the widget bounds.
+        true
+    }
+
     fn accessibility(&self) -> Accessibility {
         Accessibility::new(AccessibilityRole::Image)
             .with_label(self.label.clone().unwrap_or_else(|| "3D scene".to_owned()))

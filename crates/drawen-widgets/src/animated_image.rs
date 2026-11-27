@@ -415,6 +415,11 @@ impl Widget for AnimatedImage {
         self.playing && !self.finished && self.frames.len() > 1
     }
 
+    fn local_animation_damage(&self) -> bool {
+        // Frames are clipped to the widget bounds.
+        true
+    }
+
     fn participates_in_hit_test(&self) -> bool {
         false
     }

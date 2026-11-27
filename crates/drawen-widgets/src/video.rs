@@ -996,6 +996,12 @@ impl Widget for Video {
         self.core.is_animating() || self.hide_in.is_some()
     }
 
+    fn local_animation_damage(&self) -> bool {
+        // Frames, controls, and the buffering badge stay inside the bounds;
+        // the badge shadow (elevation 10) fits the standard effect margin.
+        true
+    }
+
     fn advances_while_hidden(&self) -> bool {
         self.core.is_animating()
     }
