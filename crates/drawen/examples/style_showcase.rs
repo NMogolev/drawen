@@ -24,7 +24,7 @@ use drawen::{
     Image, ImageViewer, Insets, LayoutContext, LayoutNode, LayoutResult, ListView, Menu, MenuBar,
     MenuEntry, Modal, NumberInput, Padding, PaletteCommand, PanelId, Point, Popover,
     PopoverTrigger, ProgressBar, Property, RadioButton, RadioGroup, RangeSlider, Rect, Row,
-    ScrollView, SegmentedControl, SelectionMode, SizedBox, Size, Skeleton, Slider, Spinner,
+    ScrollView, SegmentedControl, SelectionMode, Size, SizedBox, Skeleton, Slider, Spinner,
     SplitAxis, SplitButton, Splitter, Stack, Styled, Subscription, SurfaceStyle, Switch, TabBar,
     Text, TextEdit, TextField, Theme, TitleBar, TitleBarStyle, Toast, ToastHandle, ToastHost,
     ToastTone, Toolbar, Tooltip, TreeNode, TreeView, UiEnvironment, UiRuntime, VirtualDataSource,
@@ -504,9 +504,7 @@ impl TaskDemo {
             sender: RefCell::new(None),
             handle: RefCell::new(None),
             progress: Property::new(0.0),
-            status: Rc::new(RefCell::new(
-                "Idle — run the checksum job.".to_owned(),
-            )),
+            status: Rc::new(RefCell::new("Idle — run the checksum job.".to_owned())),
             busy: Cell::new(false),
         }
     }
@@ -744,13 +742,8 @@ impl StyleShowcase {
         let _ = append_cubex_page(&mut runtime, &mut subscriptions, tabs);
         append_appearance_page(&mut runtime, &mut subscriptions, &appearance, &dirty, tabs);
         append_dss_page(&mut runtime, tabs);
-        let toast_handle = append_overlay_page(
-            &mut runtime,
-            &mut subscriptions,
-            &dirty,
-            &toast_queue,
-            tabs,
-        );
+        let toast_handle =
+            append_overlay_page(&mut runtime, &mut subscriptions, &dirty, &toast_queue, tabs);
         let (task_status_id, diagnostics_id) = append_runtime_page(
             &mut runtime,
             &mut subscriptions,
@@ -857,8 +850,7 @@ impl StyleShowcase {
                 }
                 TaskMessage::Finished(checksum) => {
                     self.task_demo.busy.set(false);
-                    *self.task_demo.status.borrow_mut() =
-                        format!("Done · checksum {checksum}");
+                    *self.task_demo.status.borrow_mut() = format!("Done · checksum {checksum}");
                 }
                 TaskMessage::Cancelled => {
                     self.task_demo.busy.set(false);
@@ -889,10 +881,18 @@ impl StyleShowcase {
             stats.layout_passes(),
             stats.paint_passes(),
             stats.last_layout_time().as_micros(),
-            if stats.last_layout_reused() { " (reused)" } else { "" },
+            if stats.last_layout_reused() {
+                " (reused)"
+            } else {
+                ""
+            },
             stats.last_paint_time().as_micros(),
             stats.last_paint_command_count(),
-            if stats.last_paint_reused() { " (reused)" } else { "" },
+            if stats.last_paint_reused() {
+                " (reused)"
+            } else {
+                ""
+            },
             damage,
         );
         if text != self.diagnostics_cache {
@@ -1012,9 +1012,7 @@ impl WindowApplication for StyleShowcase {
                             ToastTone::Warning => "Queued · warning",
                             ToastTone::Danger => "Queued · danger",
                         };
-                        let _ = self
-                            .toast_handle
-                            .show(Toast::new(message).with_tone(tone));
+                        let _ = self.toast_handle.show(Toast::new(message).with_tone(tone));
                     }
                     self.runtime.invalidate_paint();
                 }
@@ -1041,17 +1039,16 @@ impl WindowApplication for StyleShowcase {
                     action = action_for(command);
                 }
                 if action == WindowAction::None
-                    && (self.runtime.take_redraw_request()
-                        || {
-                            #[cfg(feature = "cubex")]
-                            {
-                                cubex_started
-                            }
-                            #[cfg(not(feature = "cubex"))]
-                            {
-                                false
-                            }
-                        })
+                    && (self.runtime.take_redraw_request() || {
+                        #[cfg(feature = "cubex")]
+                        {
+                            cubex_started
+                        }
+                        #[cfg(not(feature = "cubex"))]
+                        {
+                            false
+                        }
+                    })
                 {
                     WindowAction::RequestRedraw
                 } else {
@@ -1459,10 +1456,7 @@ impl Widget for MaxWidth {
         let mut children = Vec::new();
         let child_size = if context.child_count() == 1 {
             let (id, layout) = context
-                .layout_child(
-                    0,
-                    Constraints::loose(valid_size(width, max.height())),
-                )
+                .layout_child(0, Constraints::loose(valid_size(width, max.height())))
                 .expect("max-width child exists");
             children.push(ChildLayout::new(id, Point::ZERO));
             layout.size()
@@ -2619,8 +2613,9 @@ fn append_entry_page(
     let cities = append_form(
         runtime,
         autocomplete_card,
-        FormRow::new("City")
-            .with_description("ArrowUp/ArrowDown move the highlight; Enter or a click commits; Escape closes."),
+        FormRow::new("City").with_description(
+            "ArrowUp/ArrowDown move the highlight; Enter or a click commits; Escape closes.",
+        ),
         cities,
     );
     runtime
@@ -2675,7 +2670,8 @@ fn append_entry_page(
     append_form(
         runtime,
         binding_card,
-        FormRow::new("Follower").with_description("ProgressBar.progress() bound to the slider's value."),
+        FormRow::new("Follower")
+            .with_description("ProgressBar.progress() bound to the slider's value."),
         follower,
     );
 
@@ -2798,10 +2794,7 @@ fn append_data_page(
     );
     let tree = TreeView::new().with_roots(vec![
         TreeNode::new("assets", "assets")
-            .child(
-                TreeNode::new("textures", "textures")
-                    .child(TreeNode::new("logo", "logo.png")),
-            )
+            .child(TreeNode::new("textures", "textures").child(TreeNode::new("logo", "logo.png")))
             .child(TreeNode::new("audio", "audio")),
         TreeNode::new("scenes", "scenes").child(TreeNode::new("main", "main.graph")),
         TreeNode::new("src", "src")
@@ -3162,7 +3155,13 @@ fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
             .append_child(cell, SizedBox::new(Some(width), Some(44.0)))
             .expect("colored box exists");
     }
-    append_label(runtime, row_demo, "Row · sums child widths", 0.8, TextTone::Muted);
+    append_label(
+        runtime,
+        row_demo,
+        "Row · sums child widths",
+        0.8,
+        TextTone::Muted,
+    );
 
     let column_demo = runtime
         .append_child(demos, VStack::new(8.0))
@@ -3243,10 +3242,7 @@ fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
         .append_child(align_width, FixedHeight::new(88.0))
         .expect("max width exists");
     let align = runtime
-        .append_child(
-            align_frame,
-            Align::new(Alignment::End, Alignment::Center),
-        )
+        .append_child(align_frame, Align::new(Alignment::End, Alignment::Center))
         .expect("fixed frame exists");
     let aligned = runtime
         .append_child(
@@ -4108,8 +4104,9 @@ fn append_runtime_page(
     append_form(
         runtime,
         task_card,
-        FormRow::new("Progress")
-            .with_description("Bound to the task's progress Property — no callbacks in the widget."),
+        FormRow::new("Progress").with_description(
+            "Bound to the task's progress Property — no callbacks in the widget.",
+        ),
         bar,
     );
     let status_frame = runtime
@@ -4665,7 +4662,11 @@ fn procedural_texture(phase: f32) -> RasterImage {
             let u = usize_to_f32(x) / 127.0;
             let v = usize_to_f32(y) / 127.0;
             let diagonal = f32::midpoint(u, v);
-            let grid = if x % 16 == 0 || y % 16 == 0 { 0.16 } else { 0.0 };
+            let grid = if x % 16 == 0 || y % 16 == 0 {
+                0.16
+            } else {
+                0.0
+            };
             let wave = (diagonal + phase).rem_euclid(1.0);
             let color = Color::rgb(
                 0.10 + 0.27 * wave + grid,
