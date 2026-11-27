@@ -149,6 +149,27 @@ local machine.
    cargo publish -p drawen
    ```
 
+   `drawen-agent` is the one exception to plain verification: its examples
+   dev-depend on the `drawen` facade, which optionally depends back on
+   `drawen-agent`, so neither crate can resolve the other from the index
+   first, and even `--no-verify` still resolves dependencies while packaging.
+   Publish `drawen-agent` just before the facade with the facade
+   dev-dependency temporarily reduced to a path-only requirement (cargo
+   strips path-only dev-dependencies from the packaged manifest):
+
+   ```text
+   # temporarily: drawen = { path = "../drawen", default-features = false, features = ["agent-serve"] }
+   cargo publish -p drawen-agent --no-verify --allow-dirty
+   git checkout -- crates/drawen-agent/Cargo.toml
+   cargo publish -p drawen
+   ```
+
+   The packaged `drawen-agent` examples do not build standalone because the
+   stripped dev-dependency is absent; the repository examples are unaffected,
+   and the library itself is complete. The facade's verification build then
+   compiles the whole published 0.4 graph from the registry, which is the
+   final end-to-end check.
+
 Do not publish a crate whose semver check reports an error. If the error is
 unexpected, fix the API or bump the minor version; do not silence the check.
 
