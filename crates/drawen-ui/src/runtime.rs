@@ -1518,8 +1518,12 @@ impl UiRuntime {
     }
 
     /// Delivers an input event through capture, target, and bubble phases.
+    ///
+    /// Paint output is invalidated only when the event actually changes
+    /// something: a widget handles it, requests a redraw or layout, or the
+    /// runtime's own hover, press, focus, or overlay state moves. An ignored
+    /// pointer move over unchanged content reuses the retained display list.
     pub fn dispatch_event(&mut self, event: &InputEvent) -> EventStatus {
-        self.invalidate_paint();
         if matches!(event, InputEvent::WindowFocusChanged(false)) {
             self.cancel_interactions();
             return EventStatus::Handled;
@@ -1536,7 +1540,11 @@ impl UiRuntime {
             return EventStatus::Handled;
         }
         if let InputEvent::PointerLeave(pointer) = event {
-            return self.clear_hover(pointer);
+            let handled = self.clear_hover(pointer);
+            if handled.is_handled() {
+                self.invalidate_paint();
+            }
+            return handled;
         }
         if let InputEvent::KeyDown(key) = event
             && (self.dispatch_tab_navigation(key) || self.dispatch_command(key))
@@ -1586,6 +1594,11 @@ impl UiRuntime {
             }
         }
         self.finish_event(event, effects);
+        if handled.is_handled() {
+            // A handler that acted on the event may have changed pixels without
+            // an explicit redraw request; `Ignored` means it did not act.
+            self.invalidate_paint();
+        }
         handled
     }
 
@@ -1622,6 +1635,9 @@ impl UiRuntime {
         }
         self.set_focus(None);
         self.dismiss_all_overlays();
+        // Focus loss cancels presses and hovers even when no widget requests a
+        // redraw, so the settled interaction states must reach the next frame.
+        self.invalidate_paint();
     }
 
     fn dismiss_all_overlays(&mut self) {
@@ -1802,6 +1818,7 @@ impl UiRuntime {
             return EventStatus::Ignored;
         };
         self.begin_animation();
+        self.invalidate_paint();
         self.dispatch_synthetic_pointer(target, &InputEvent::PointerLeave(pointer.clone()))
     }
 
@@ -2151,8 +2168,9 @@ impl UiRuntime {
         }
         self.begin_animation();
         // Hover is a style state even for widgets that do not request a redraw
-        // themselves, so the runtime always schedules the next frame.
-        self.redraw_requested = true;
+        // themselves, so the runtime always invalidates paint and schedules the
+        // next frame.
+        self.invalidate_paint();
         if let Some(previous) = previous.filter(|id| self.is_visible(*id)) {
             self.dispatch_synthetic_pointer(previous, &InputEvent::PointerLeave(pointer.clone()));
         }
@@ -2215,7 +2233,9 @@ impl UiRuntime {
             return false;
         };
         command.activate();
-        self.redraw_requested = true;
+        // The callback may mutate application state without touching the event
+        // effects, so a triggered command always invalidates paint.
+        self.invalidate_paint();
         true
     }
 
@@ -2656,7 +2676,9 @@ impl UiRuntime {
         if self.pressed != previous_pressed {
             self.begin_animation();
         }
-        self.redraw_requested |= effects.redraw_requested;
+        if effects.redraw_requested {
+            self.invalidate_paint();
+        }
         self.window_commands.append(&mut effects.window_commands);
         if effects.layout_requested {
             self.invalidate_layout();
@@ -2708,7 +2730,9 @@ impl UiRuntime {
                 &mut focus_effects,
             );
             self.pointer_capture = focus_effects.pointer_capture;
-            self.redraw_requested |= focus_effects.redraw_requested;
+            if focus_effects.redraw_requested {
+                self.invalidate_paint();
+            }
         }
     }
 
@@ -4014,6 +4038,138 @@ mod tests {
 
         assert_eq!(paints.get(), 2);
         assert!(runtime.take_redraw_request());
+    }
+
+    struct SizedPaintCounter {
+        size: Size,
+        paints: Rc<Cell<usize>>,
+        handles_moves: bool,
+        redraw_on_key: bool,
+    }
+
+    impl Widget for SizedPaintCounter {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, constraints: Constraints) -> LayoutResult {
+            LayoutResult::new(constraints.constrain(self.size))
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            self.paints.set(self.paints.get() + 1);
+            context.fill_rect(bounds, Color::BLACK);
+        }
+
+        fn handle_event(
+            &mut self,
+            context: &mut EventContext<'_>,
+            event: &InputEvent,
+        ) -> EventStatus {
+            if context.phase() != EventPhase::Target {
+                return EventStatus::Ignored;
+            }
+            if self.handles_moves && matches!(event, InputEvent::PointerMove(_)) {
+                return EventStatus::Handled;
+            }
+            if self.redraw_on_key && matches!(event, InputEvent::KeyDown(_)) {
+                context.request_redraw();
+            }
+            EventStatus::Ignored
+        }
+
+        fn accepts_focus(&self) -> bool {
+            self.redraw_on_key
+        }
+    }
+
+    fn counted_runtime(paints: &Rc<Cell<usize>>, handles_moves: bool) -> UiRuntime {
+        let mut runtime = UiRuntime::new(SizedPaintCounter {
+            size: size(100.0, 100.0),
+            paints: Rc::clone(paints),
+            handles_moves,
+            redraw_on_key: false,
+        });
+        runtime.environment_mut().set_animations_enabled(false);
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        runtime
+    }
+
+    #[test]
+    fn ignored_pointer_moves_reuse_the_retained_display_list() {
+        let paints = Rc::new(Cell::new(0));
+        let mut runtime = counted_runtime(&paints, false);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+        assert_eq!(paints.get(), 1);
+
+        // Entering the panel changes hover, which is a runtime-owned state.
+        let _ = runtime.dispatch_event(&pointer_move(Point::new(5.0, 5.0)));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("hover paint succeeds");
+        assert_eq!(paints.get(), 2);
+
+        // Further moves inside the same hover target change nothing.
+        for x in [6.0, 7.0, 8.0] {
+            let _ = runtime.dispatch_event(&pointer_move(Point::new(x, 5.0)));
+            runtime
+                .paint(&mut PaintContext::new(&mut DisplayList::new()))
+                .expect("cached paint succeeds");
+        }
+        assert_eq!(paints.get(), 2);
+        let stats = runtime.stats();
+        assert_eq!(stats.paint_passes(), 2);
+        assert!(stats.last_paint_reused());
+    }
+
+    #[test]
+    fn handled_events_invalidate_paint() {
+        let paints = Rc::new(Cell::new(0));
+        let mut runtime = counted_runtime(&paints, true);
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+
+        for x in [5.0, 6.0, 7.0] {
+            let _ = runtime.dispatch_event(&pointer_move(Point::new(x, 5.0)));
+            runtime
+                .paint(&mut PaintContext::new(&mut DisplayList::new()))
+                .expect("invalidated paint succeeds");
+        }
+        assert_eq!(paints.get(), 4);
+    }
+
+    #[test]
+    fn request_redraw_invalidates_even_when_the_event_is_ignored() {
+        let paints = Rc::new(Cell::new(0));
+        let mut runtime = UiRuntime::new(SizedPaintCounter {
+            size: size(100.0, 100.0),
+            paints: Rc::clone(&paints),
+            handles_moves: false,
+            redraw_on_key: true,
+        });
+        runtime.environment_mut().set_animations_enabled(false);
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        runtime
+            .focus_widget(runtime.root())
+            .expect("root accepts focus");
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("initial paint succeeds");
+        assert_eq!(paints.get(), 1);
+
+        let _ = runtime.dispatch_event(&InputEvent::KeyDown(drawen_core::KeyEvent {
+            key: Key::Character("a".to_owned()),
+            code: drawen_core::KeyCode::Unidentified,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }));
+        runtime
+            .paint(&mut PaintContext::new(&mut DisplayList::new()))
+            .expect("invalidated paint succeeds");
+        assert_eq!(paints.get(), 2);
     }
 
     #[test]
