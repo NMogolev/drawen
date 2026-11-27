@@ -2309,6 +2309,15 @@ impl UiRuntime {
             return;
         }
         let bounds = node.bounds;
+        // The ring is painted above the whole tree, so it must re-apply the
+        // ancestor clips the tree paint used; otherwise a control scrolled
+        // under a sticky header draws its ring over that header.
+        let clip = self.visible_clip(id);
+        if let Some(region) = clip
+            && bounds.intersection(region).is_empty()
+        {
+            return;
+        }
         let gap = FOCUS_RING_GAP + (1.0 - progress) * 3.0;
         let ring = Rect::new(
             Point::new(bounds.origin.x - gap, bounds.origin.y - gap),
@@ -2323,12 +2332,16 @@ impl UiRuntime {
             .corner_radius
             .unwrap_or_else(|| self.environment.theme().corner_radius());
         let color = self.environment.theme().focus_ring();
-        context.stroke_rounded_rect(
-            ring,
-            radius + gap,
-            FOCUS_RING_WIDTH * (0.5 + progress * 0.5),
-            color.with_alpha(color.alpha * progress),
-        );
+        let width = FOCUS_RING_WIDTH * (0.5 + progress * 0.5);
+        let alpha = color.alpha * progress;
+        let paint_ring = |context: &mut PaintContext<'_>| {
+            context.stroke_rounded_rect(ring, radius + gap, width, color.with_alpha(alpha));
+        };
+        if let Some(region) = clip {
+            context.with_clip(region, paint_ring);
+        } else {
+            paint_ring(context);
+        }
     }
 
     fn select_target(&self, event: &InputEvent) -> Option<WidgetId> {
@@ -2576,12 +2589,26 @@ impl UiRuntime {
         if self.under_scrim(id) {
             return false;
         }
+        match self.visible_clip(id) {
+            Some(region) => !bounds.intersection(region).is_empty(),
+            None => true,
+        }
+    }
+
+    /// Returns the region a node's pixels are confined to: the viewport
+    /// intersected with every clipping ancestor, or `None` when nothing clips.
+    ///
+    /// Overlay roots escape the normal-tree clips above their owner, matching
+    /// the paint order. A missing ancestor yields an empty region so callers
+    /// treat the node as hidden rather than unclipped.
+    fn visible_clip(&self, id: WidgetId) -> Option<Rect> {
+        let node = self.node(id)?;
         let mut clip = self.viewport;
         let mut floating = self.is_overlay_root(id);
         let mut current = node.parent;
         while let Some(ancestor_id) = current {
             let Some(ancestor) = self.node(ancestor_id) else {
-                return false;
+                return Some(Rect::ZERO);
             };
             if !floating
                 && ancestor
@@ -2601,10 +2628,7 @@ impl UiRuntime {
             }
             current = ancestor.parent;
         }
-        match clip {
-            Some(region) => !bounds.intersection(region).is_empty(),
-            None => true,
-        }
+        clip
     }
 
     /// Returns whether the topmost visible modal's scrim covers the node.
@@ -5487,6 +5511,102 @@ mod tests {
             .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
             .expect("relayout succeeds");
         assert_eq!(last_fill(&mut runtime), Some(Color::rgba8(255, 0, 0, 255)));
+    }
+
+    struct ClipBox {
+        child_origin: Point,
+    }
+
+    impl Widget for ClipBox {
+        fn layout(
+            &mut self,
+            context: &mut LayoutContext<'_>,
+            constraints: Constraints,
+        ) -> LayoutResult {
+            let (child, _) = context
+                .layout_child(
+                    0,
+                    Constraints::tight(size(80.0, 80.0)).expect("valid tight size"),
+                )
+                .expect("clip child");
+            LayoutResult::with_children(
+                constraints.constrain(size(100.0, 100.0)),
+                vec![ChildLayout::new(child, self.child_origin)],
+            )
+        }
+
+        fn clips_children(&self) -> bool {
+            true
+        }
+    }
+
+    struct FocusLeaf;
+
+    impl Widget for FocusLeaf {
+        fn layout(&mut self, _: &mut LayoutContext<'_>, _: Constraints) -> LayoutResult {
+            LayoutResult::new(size(80.0, 80.0))
+        }
+
+        fn accepts_focus(&self) -> bool {
+            true
+        }
+
+        fn paint(&self, context: &mut PaintContext<'_>, _: &UiEnvironment, bounds: Rect) {
+            context.fill_rect(bounds, Color::BLACK);
+        }
+    }
+
+    #[test]
+    fn focus_ring_is_clipped_to_scrolled_ancestors_and_hidden_when_offscreen() {
+        let count = |list: &DisplayList, push_clip: bool| {
+            list.commands()
+                .iter()
+                .filter(|command| {
+                    if push_clip {
+                        matches!(command, DisplayCommand::PushClip { .. })
+                    } else {
+                        matches!(command, DisplayCommand::StrokeRoundedRect { .. })
+                    }
+                })
+                .count()
+        };
+
+        // Partially scrolled above the clipping container: the ring must be
+        // wrapped in the ancestor clip instead of drawing over the header.
+        let mut runtime = UiRuntime::new(ClipBox {
+            child_origin: Point::new(0.0, -50.0),
+        });
+        let root = runtime.root();
+        let leaf = runtime.append_child(root, FocusLeaf).expect("leaf");
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        runtime.focus_widget(leaf).expect("focus");
+        runtime.settle_animations();
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint succeeds");
+        assert_eq!(count(&list, false), 1, "ring is drawn");
+        assert_eq!(count(&list, true), 2, "tree clip plus ring clip");
+
+        // Fully scrolled out: no ring at all, only the tree's own clip.
+        let mut runtime = UiRuntime::new(ClipBox {
+            child_origin: Point::new(0.0, -200.0),
+        });
+        let root = runtime.root();
+        let leaf = runtime.append_child(root, FocusLeaf).expect("leaf");
+        runtime
+            .layout(Constraints::tight(size(100.0, 100.0)).expect("valid constraints"))
+            .expect("layout succeeds");
+        runtime.focus_widget(leaf).expect("focus");
+        runtime.settle_animations();
+        let mut list = DisplayList::new();
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("paint succeeds");
+        assert_eq!(count(&list, false), 0, "offscreen ring is skipped");
+        assert_eq!(count(&list, true), 1, "only the tree clip remains");
     }
 
     struct ModalProbe {
