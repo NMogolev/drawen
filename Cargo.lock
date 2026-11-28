@@ -922,6 +922,7 @@ dependencies = [
  "fontdb",
  "fontdue",
  "harfrust",
+ "ttf-parser",
  "unicode-bidi",
  "unicode-segmentation",
 ]

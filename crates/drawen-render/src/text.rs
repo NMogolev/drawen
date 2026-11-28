@@ -15,7 +15,8 @@ use unicode_bidi::{Level, ParagraphBidiInfo};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::font::{
-    DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, is_ignorable_for_coverage,
+    DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, SystemFallbackStats,
+    is_ignorable_for_coverage,
 };
 
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 256;
@@ -513,6 +514,13 @@ pub trait TextShaper {
     fn cache_stats(&self) -> TextLayoutCacheStats {
         TextLayoutCacheStats::default()
     }
+
+    /// Returns a snapshot of the shaper's lazy system font fallback caches.
+    ///
+    /// Shapers without system fallback return zeroed counters.
+    fn system_fallback_stats(&self) -> SystemFallbackStats {
+        SystemFallbackStats::default()
+    }
 }
 
 /// A deterministic shaper backed by `HarfRust` and a [`FontDatabase`].
@@ -679,6 +687,12 @@ impl FontdueTextShaper {
             evictions: cache.evictions,
             entries: cache.entries.len(),
         }
+    }
+
+    /// Returns a snapshot of the font database's lazy system fallback caches.
+    #[must_use]
+    pub fn system_fallback_stats(&self) -> SystemFallbackStats {
+        self.database.system_fallback_stats()
     }
 
     /// Creates a shaper using Drawen's bundled Ubuntu Light font.
@@ -895,6 +909,10 @@ impl TextShaper for FontdueTextShaper {
 
     fn cache_stats(&self) -> TextLayoutCacheStats {
         self.cache_stats()
+    }
+
+    fn system_fallback_stats(&self) -> SystemFallbackStats {
+        self.system_fallback_stats()
     }
 }
 

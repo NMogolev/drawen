@@ -586,6 +586,15 @@ impl FontFace {
         self.index
     }
 
+    /// Returns the number of font file bytes this face retains.
+    ///
+    /// Fallback faces keep their complete source bytes so they can be
+    /// re-rasterized at any size; this exposes that cost for diagnostics.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Returns whether this face contains a glyph for `character`.
     #[must_use]
     pub fn has_glyph(&self, character: char) -> bool {
@@ -787,14 +796,40 @@ impl GlyphBitmap {
 /// fallback.
 ///
 /// A database can additionally keep a lazy index of the operating system's
-/// installed faces. Those faces are parsed only when a character needs them,
-/// which makes multilingual fallback practical without paying the cost of
-/// loading every installed font up front. See [`Self::discover_system_fallbacks`].
+/// installed faces. Even the index is built on demand: the system scan runs
+/// only when a character actually needs fallback, and individual faces are
+/// parsed only when a character needs them. See
+/// [`Self::discover_system_fallbacks`].
 #[derive(Clone, Debug, Default)]
 pub struct FontDatabase {
     faces: Vec<FontFace>,
     default_face: Option<usize>,
-    system: Option<Arc<SystemFontSet>>,
+    system: Option<Arc<SystemFallback>>,
+}
+
+/// The fallback switch whose system scan is deferred until the first
+/// character the registered faces do not cover. Enabling fallback must not
+/// pay for enumerating every installed font up front.
+#[derive(Debug, Default)]
+struct SystemFallback {
+    discovered: OnceLock<Option<SystemFontSet>>,
+}
+
+/// A snapshot of the lazy system fallback caches, exposed for diagnostics.
+///
+/// Every counter is zero until the deferred system scan has run. The loaded
+/// face count and byte total describe the bounded face cache; the coverage
+/// count describes the per-character answer memo.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SystemFallbackStats {
+    /// Number of installed faces indexed by the system scan.
+    pub discovered_faces: usize,
+    /// Number of parsed system faces currently retained.
+    pub loaded_faces: usize,
+    /// Total font file bytes retained by the loaded system faces.
+    pub loaded_bytes: usize,
+    /// Number of characters with a cached coverage answer.
+    pub coverage_entries: usize,
 }
 
 impl PartialEq for FontDatabase {
@@ -910,6 +945,19 @@ impl SystemFontSet {
                 }
                 continue;
             }
+            // Probe coverage on the borrowed font data first. Copying and
+            // parsing a multi-megabyte face only pays off when it actually
+            // covers the character, so misses stay allocation-free.
+            let covers = self
+                .database
+                .with_face_data(face.id, |data, face_index| {
+                    ttf_parser::Face::parse(data, face_index)
+                        .is_ok_and(|probe| probe.glyph_index(character).is_some())
+                })
+                .unwrap_or(false);
+            if !covers {
+                continue;
+            }
             let Some((bytes, face_index)) = self
                 .database
                 .with_face_data(face.id, |data, index| (data.to_vec(), index))
@@ -922,12 +970,9 @@ impl SystemFontSet {
             else {
                 continue;
             };
-            let covers = loaded.has_glyph(character);
             self.store_loaded(face.id, loaded.clone());
-            if covers {
-                found = Some((face.id, loaded));
-                break;
-            }
+            found = Some((face.id, loaded));
+            break;
         }
 
         let mut cache = self.lock_cache();
@@ -1028,16 +1073,17 @@ impl FontDatabase {
     /// Enables lazy per-character fallback through the operating system's
     /// installed fonts.
     ///
-    /// Discovery records family, weight, style, and collection index only;
-    /// font files are opened and parsed on demand when a character is not
-    /// covered by the registered faces. Candidates are ranked by script, then
-    /// by style and weight proximity, so common scripts resolve without
-    /// touching unrelated fonts.
+    /// This call itself is cheap: the system scan is deferred until the first
+    /// character the registered faces do not cover. Discovery then records
+    /// family, weight, style, and collection index only; font files are opened
+    /// and parsed on demand. Candidates are ranked by script, then by style
+    /// and weight proximity, so common scripts resolve without touching
+    /// unrelated fonts.
     ///
     /// Unlike [`Self::discover_system_fonts`], this does not change the
     /// registered faces or the default face.
     pub fn discover_system_fallbacks(&mut self) {
-        self.system = SystemFontSet::discover().map(Arc::new);
+        self.system = Some(Arc::new(SystemFallback::default()));
     }
 
     /// Returns whether lazy system fallback is enabled.
@@ -1048,9 +1094,10 @@ impl FontDatabase {
 
     /// Returns a lazily loaded system face that covers `character`.
     ///
-    /// The face is cached for later calls. Returns `None` when system fallback
-    /// is disabled, no installed face covers the character, or the system font
-    /// cannot be parsed by Drawen's rasterizer.
+    /// The first call runs the deferred system scan; the face is then cached
+    /// for later calls. Returns `None` when system fallback is disabled, no
+    /// installed face covers the character, or the system font cannot be
+    /// parsed by Drawen's rasterizer.
     #[must_use]
     pub fn fallback_face(
         &self,
@@ -1060,7 +1107,32 @@ impl FontDatabase {
     ) -> Option<FontFace> {
         self.system
             .as_ref()?
+            .discovered
+            .get_or_init(SystemFontSet::discover)
+            .as_ref()?
             .face_for_char(character, weight, style)
+    }
+
+    /// Returns a snapshot of the system fallback caches.
+    ///
+    /// Every counter is zero while fallback is disabled or the deferred system
+    /// scan has not run yet. Use it to watch how many installed faces were
+    /// indexed and how many font bytes the loaded faces retain.
+    #[must_use]
+    pub fn system_fallback_stats(&self) -> SystemFallbackStats {
+        let Some(system) = &self.system else {
+            return SystemFallbackStats::default();
+        };
+        let Some(Some(set)) = system.discovered.get() else {
+            return SystemFallbackStats::default();
+        };
+        let cache = set.lock_cache();
+        SystemFallbackStats {
+            discovered_faces: set.faces.len(),
+            loaded_faces: cache.loaded.len(),
+            loaded_bytes: cache.loaded.values().map(FontFace::byte_len).sum(),
+            coverage_entries: cache.coverage.len(),
+        }
     }
 
     /// Creates a database whose default face is `face`.
@@ -1528,7 +1600,8 @@ mod tests {
 
     use super::{
         Font, FontDatabase, FontDescriptor, FontFace, FontFamily, FontSize, FontStyle, FontWeight,
-        ScriptGroup, family_script_score, is_ignorable_for_coverage, script_group,
+        ScriptGroup, SystemFallbackStats, family_script_score, is_ignorable_for_coverage,
+        script_group,
     };
 
     fn database() -> FontDatabase {
@@ -1701,5 +1774,34 @@ mod tests {
             database.resolve(&font),
             database.resolve_for_text(&font, text)
         );
+    }
+
+    #[test]
+    fn system_fallback_scan_is_deferred_until_first_fallback() {
+        let mut database = FontDatabase::bundled();
+        database.discover_system_fallbacks();
+
+        // Enabling fallback must not enumerate installed fonts up front.
+        assert!(database.has_system_fallbacks());
+        assert_eq!(
+            database.system_fallback_stats(),
+            SystemFallbackStats::default()
+        );
+
+        // The first fallback request runs the scan and memoizes an answer for
+        // the character, whether or not an installed face covers it.
+        let _ = database.fallback_face('a', FontWeight::NORMAL, FontStyle::Normal);
+        let stats = database.system_fallback_stats();
+        if stats.discovered_faces > 0 {
+            assert!(stats.coverage_entries >= 1);
+            assert!(stats.loaded_bytes >= stats.loaded_faces);
+        }
+    }
+
+    #[test]
+    fn font_face_byte_len_reports_retained_bytes() {
+        let bytes = include_bytes!("../assets/Ubuntu-Light.ttf");
+        let face = FontFace::from_bytes(bytes.as_slice()).expect("bundled font is valid");
+        assert_eq!(face.byte_len(), bytes.len());
     }
 }

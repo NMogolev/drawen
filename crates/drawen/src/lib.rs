@@ -194,8 +194,8 @@ pub mod render {
     pub use drawen_render::{
         DisplayCommand, DisplayList, DisplayListStats, FontError, FontFace, FontdueTextShaper,
         FrameDamage, GlyphBitmap, GlyphRun, LineMetrics, PaintContext, PaintTransition,
-        PositionedGlyph, RasterImage, RasterImageError, TextLayout, TextLayoutCacheStats,
-        TextShaper, TextStyle, TextureId,
+        PositionedGlyph, RasterImage, RasterImageError, SystemFallbackStats, TextLayout,
+        TextLayoutCacheStats, TextShaper, TextStyle, TextureId,
     };
 }
 
