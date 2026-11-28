@@ -14,6 +14,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -980,8 +981,13 @@ impl StyleShowcase {
             ),
             FrameDamage::Unchanged => "unchanged (retained frame)".to_owned(),
         };
+        let fallback = self
+            .runtime
+            .environment()
+            .text_shaper()
+            .system_fallback_stats();
         let text = format!(
-            "layout passes: {} · paint passes: {}\nlast layout: {} µs{}\nlast paint: {} µs · {} commands{}\nframe damage: {}",
+            "layout passes: {} · paint passes: {}\nlast layout: {} µs{}\nlast paint: {} µs · {} commands{}\nframe damage: {}\nsystem fallback: {} faces indexed · {} loaded ({} KiB) · {} chars memoized",
             stats.layout_passes(),
             stats.paint_passes(),
             stats.last_layout_time().as_micros(),
@@ -998,6 +1004,10 @@ impl StyleShowcase {
                 ""
             },
             damage,
+            fallback.discovered_faces,
+            fallback.loaded_faces,
+            fallback.loaded_bytes / 1024,
+            fallback.coverage_entries,
         );
         if text != self.diagnostics_cache {
             self.diagnostics_cache.clone_from(&text);
@@ -3029,7 +3039,7 @@ fn append_data_page(
         "ImageViewer",
         "Drag to pan, wheel to zoom. The zoom is a Property, so application state can drive or follow it.",
     );
-    let viewer = ImageViewer::new(showcase_texture())
+    let viewer = ImageViewer::new(shared_showcase_texture())
         .with_label("Procedural 128×128 texture · drag to pan · wheel to zoom");
     subscriptions.push(
         viewer
@@ -3448,7 +3458,10 @@ fn append_layout_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) {
             .append_child(tile, VStack::new(6.0))
             .expect("tile exists");
         runtime
-            .append_child(column, Image::with_size(showcase_texture(), 88.0, 88.0))
+            .append_child(
+                column,
+                Image::with_size(shared_showcase_texture(), 88.0, 88.0),
+            )
             .expect("tile column exists");
         append_label(
             runtime,
@@ -4781,6 +4794,14 @@ fn drawen_logo() -> RasterImage {
 /// A procedural 128×128 texture for the image viewer and scroll tiles.
 fn showcase_texture() -> RasterImage {
     procedural_texture(0.0)
+}
+
+/// One shared allocation of the showcase texture. Every tile and the image
+/// viewer reference the same `Arc`, so the pixels exist once in CPU memory and
+/// the GPU backend uploads a single texture for all of them.
+fn shared_showcase_texture() -> Arc<RasterImage> {
+    static TEXTURE: OnceLock<Arc<RasterImage>> = OnceLock::new();
+    Arc::clone(TEXTURE.get_or_init(|| Arc::new(showcase_texture())))
 }
 
 /// A procedural texture whose palette rotates with `phase` (0..1), so media
