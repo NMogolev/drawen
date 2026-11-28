@@ -371,6 +371,20 @@ pub struct GpuRenderer {
     retained_frame: Option<RetainedFrame>,
     blit_pipeline: wgpu::RenderPipeline,
     clear_pipeline: wgpu::RenderPipeline,
+    // Persistent vertex buffers reused across frames. A fresh buffer per batch
+    // per frame allocates GPU memory and driver staging resources continuously
+    // while the UI animates; these grow on demand and are then written in place.
+    shape_vertex_buffer: Option<VertexUpload>,
+    text_vertex_buffer: Option<VertexUpload>,
+    image_vertex_buffer: Option<VertexUpload>,
+    texture_vertex_buffer: Option<VertexUpload>,
+    damage_clear_buffer: Option<VertexUpload>,
+}
+
+/// A GPU vertex buffer kept alive across frames and grown on demand.
+struct VertexUpload {
+    buffer: wgpu::Buffer,
+    capacity: usize,
 }
 
 /// The offscreen texture holding the last fully rasterized frame.
@@ -534,6 +548,11 @@ impl GpuRenderer {
             retained_frame: None,
             blit_pipeline,
             clear_pipeline,
+            shape_vertex_buffer: None,
+            text_vertex_buffer: None,
+            image_vertex_buffer: None,
+            texture_vertex_buffer: None,
+            damage_clear_buffer: None,
         })
     }
 
@@ -720,26 +739,8 @@ impl GpuRenderer {
             region.map(|(rect, _)| rect),
             &mut self.text_bitmaps,
         )?;
-        let shape_buffer = (!prepared.shape_vertices.is_empty()).then(|| {
-            create_buffer(
-                &self.device,
-                "Drawen shape vertices",
-                &prepared.shape_vertices,
-            )
-        });
         let mut text_batch = self.create_text_batch(&prepared.texts)?;
-        let text_buffer = (!text_batch.vertices.is_empty())
-            .then(|| create_buffer(&self.device, "Drawen text vertices", &text_batch.vertices));
         let mut image_batch = self.prepare_image_batch(&prepared.images);
-        let image_buffer = (!image_batch.vertices.is_empty())
-            .then(|| create_buffer(&self.device, "Drawen image vertices", &image_batch.vertices));
-        let texture_buffer = (!prepared.texture_vertices.is_empty()).then(|| {
-            create_buffer(
-                &self.device,
-                "Drawen external texture vertices",
-                &prepared.texture_vertices,
-            )
-        });
         if let Some((_, damage_scissor)) = region {
             restrict_to_damage(
                 &mut prepared,
@@ -748,6 +749,72 @@ impl GpuRenderer {
                 damage_scissor,
             );
         }
+        let clear_vertices =
+            region.map(|(_, damage_scissor)| clear_quad_vertices(damage_scissor, width, height));
+        // Upload into persistent buffers instead of allocating a fresh GPU
+        // buffer per batch per frame; the buffers grow only when a frame needs
+        // more vertices than any previous one.
+        if !prepared.shape_vertices.is_empty() {
+            upload_vertices(
+                &self.device,
+                &self.queue,
+                &mut self.shape_vertex_buffer,
+                "Drawen shape vertices",
+                &prepared.shape_vertices,
+            );
+        }
+        if !text_batch.vertices.is_empty() {
+            upload_vertices(
+                &self.device,
+                &self.queue,
+                &mut self.text_vertex_buffer,
+                "Drawen text vertices",
+                &text_batch.vertices,
+            );
+        }
+        if !image_batch.vertices.is_empty() {
+            upload_vertices(
+                &self.device,
+                &self.queue,
+                &mut self.image_vertex_buffer,
+                "Drawen image vertices",
+                &image_batch.vertices,
+            );
+        }
+        if !prepared.texture_vertices.is_empty() {
+            upload_vertices(
+                &self.device,
+                &self.queue,
+                &mut self.texture_vertex_buffer,
+                "Drawen external texture vertices",
+                &prepared.texture_vertices,
+            );
+        }
+        if let Some(clear_vertices) = &clear_vertices {
+            upload_vertices(
+                &self.device,
+                &self.queue,
+                &mut self.damage_clear_buffer,
+                "Drawen damage clear",
+                clear_vertices,
+            );
+        }
+        let shape_buffer = self
+            .shape_vertex_buffer
+            .as_ref()
+            .map(|upload| &upload.buffer);
+        let text_buffer = self
+            .text_vertex_buffer
+            .as_ref()
+            .map(|upload| &upload.buffer);
+        let image_buffer = self
+            .image_vertex_buffer
+            .as_ref()
+            .map(|upload| &upload.buffer);
+        let texture_buffer = self
+            .texture_vertex_buffer
+            .as_ref()
+            .map(|upload| &upload.buffer);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -775,11 +842,12 @@ impl GpuRenderer {
                 // Reset the damaged region to transparency before repainting
                 // it, so translucent content composites over a clean background
                 // instead of accumulating over the retained pixels.
-                let clear_vertices = clear_quad_vertices(damage_scissor, width, height);
-                let clear_buffer =
-                    create_buffer(&self.device, "Drawen damage clear", &clear_vertices);
+                let clear_buffer = self
+                    .damage_clear_buffer
+                    .as_ref()
+                    .expect("damage clear vertices were uploaded");
                 pass.set_pipeline(&self.clear_pipeline);
-                pass.set_vertex_buffer(0, clear_buffer.slice(..));
+                pass.set_vertex_buffer(0, clear_buffer.buffer.slice(..));
                 pass.set_scissor_rect(
                     damage_scissor.x,
                     damage_scissor.y,
@@ -796,9 +864,8 @@ impl GpuRenderer {
             for operation in &prepared.operations {
                 match operation {
                     PreparedOperation::Shape(draw) => {
-                        let buffer = shape_buffer
-                            .as_ref()
-                            .expect("shape operation has a shape vertex buffer");
+                        let buffer =
+                            shape_buffer.expect("shape operation has a shape vertex buffer");
                         if current_pipeline != Some(PaintPipeline::Shape) {
                             pass.set_pipeline(&self.shape_pipeline);
                             current_pipeline = Some(PaintPipeline::Shape);
@@ -822,9 +889,7 @@ impl GpuRenderer {
                             continue;
                         }
                         last_text_draw = Some(draw_index);
-                        let buffer = text_buffer
-                            .as_ref()
-                            .expect("text operation has a text vertex buffer");
+                        let buffer = text_buffer.expect("text operation has a text vertex buffer");
                         let draw = &text_batch.draws[draw_index];
                         if current_pipeline != Some(PaintPipeline::Text) {
                             pass.set_pipeline(&self.text_pipeline);
@@ -848,9 +913,8 @@ impl GpuRenderer {
                         let Some(bind_group) = &image_batch.bind_groups[*index] else {
                             continue;
                         };
-                        let buffer = image_buffer
-                            .as_ref()
-                            .expect("image operation has an image vertex buffer");
+                        let buffer =
+                            image_buffer.expect("image operation has an image vertex buffer");
                         let draw = &image_batch.draws[*index];
                         if current_pipeline != Some(PaintPipeline::Image) {
                             pass.set_pipeline(&self.image_pipeline);
@@ -869,9 +933,8 @@ impl GpuRenderer {
                         pass.draw(draw.vertices.clone(), 0..1);
                     }
                     PreparedOperation::Texture(index) => {
-                        let buffer = texture_buffer
-                            .as_ref()
-                            .expect("texture operation has a texture vertex buffer");
+                        let buffer =
+                            texture_buffer.expect("texture operation has a texture vertex buffer");
                         let draw = &prepared.textures[*index];
                         let texture = self
                             .external_textures
@@ -2320,14 +2383,40 @@ fn raster_image_fits_device(image: &RasterImage, limit: u32) -> bool {
     image.width() <= limit && image.height() <= limit
 }
 
-fn create_buffer<T: Pod>(device: &wgpu::Device, label: &str, values: &[T]) -> wgpu::Buffer {
-    use wgpu::util::DeviceExt;
+/// Uploads `values` into a persistent vertex buffer, growing it when needed.
+///
+/// Allocating a fresh buffer per batch per frame churns GPU memory and driver
+/// staging allocations for as long as the UI animates. Reusing one buffer per
+/// batch keeps the allocation count flat: a steady frame only writes bytes.
+fn upload_vertices<T: Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    slot: &mut Option<VertexUpload>,
+    label: &str,
+    values: &[T],
+) {
+    let bytes = bytemuck::cast_slice(values);
+    let needs_growth = slot
+        .as_ref()
+        .is_none_or(|upload| upload.capacity < bytes.len());
+    if needs_growth {
+        let capacity = vertex_buffer_capacity(bytes.len());
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: capacity as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *slot = Some(VertexUpload { buffer, capacity });
+    }
+    let upload = slot.as_mut().expect("vertex buffer was just ensured");
+    queue.write_buffer(&upload.buffer, 0, bytes);
+}
 
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: bytemuck::cast_slice(values),
-        usage: wgpu::BufferUsages::VERTEX,
-    })
+/// Rounds a vertex byte count up to a power-of-two capacity with a small
+/// floor, so a slowly growing batch does not reallocate on every frame.
+fn vertex_buffer_capacity(needed: usize) -> usize {
+    needed.max(1024).next_power_of_two()
 }
 
 fn set_scissor(pass: &mut wgpu::RenderPass<'_>, current: &mut Option<Scissor>, scissor: Scissor) {
@@ -2496,8 +2585,19 @@ mod tests {
     use super::{
         CachedTextBitmap, DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation,
         Scissor, TEXTURE_SHADER, TextBatch, TextBitmapCache, TextureId, raster_image_fits_device,
-        restrict_to_damage, source_over_alpha,
+        restrict_to_damage, source_over_alpha, vertex_buffer_capacity,
     };
+
+    #[test]
+    fn vertex_buffer_capacity_grows_with_headroom() {
+        // A steady batch keeps its capacity; growth rounds up so the next
+        // slightly larger frame does not reallocate again.
+        assert_eq!(vertex_buffer_capacity(0), 1024);
+        assert_eq!(vertex_buffer_capacity(6 * 52), 1024);
+        assert_eq!(vertex_buffer_capacity(1024), 1024);
+        assert_eq!(vertex_buffer_capacity(1025), 2048);
+        assert_eq!(vertex_buffer_capacity(100_000), 131_072);
+    }
 
     #[test]
     fn raster_image_shader_treats_pixels_as_straight_rgba() {
