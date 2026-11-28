@@ -50,7 +50,7 @@ latest frame's counters:
 | `last_paint_command_count` | Commands emitted by the last paint. |
 | `last_display_stats` | Per-command counters (fills, text runs, images, …). |
 | `last_damage` | `Some(rect)` for a rebuilt frame, `None` for a reused one. |
-| `last_text_cache` | Text-layout cache hit/miss counters. |
+| `last_text_cache` | Text-layout cache hit/miss counters and retained bytes. |
 
 `runtime.frame_damage()` turns the same snapshot into the backend-ready
 `FrameDamage` value: `Unchanged` for a reused list, `Region(rect)` for a

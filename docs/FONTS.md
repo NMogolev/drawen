@@ -112,10 +112,12 @@ assert!(!database.faces().is_empty());
 ### Lazy multilingual fallback
 
 Loading every installed font is wasteful when most text uses one family.
-`discover_system_fallbacks()` records the installed faces but defers opening
-and parsing their files. When the shaper encounters a character that no
-registered face covers, the database ranks the installed candidates and parses
-only until it finds one with that character.
+`discover_system_fallbacks()` only flips a switch: even the scan of installed
+faces is deferred until the first character no registered face covers. The
+scan then records family, weight, style, and collection index without opening
+any font file. When the shaper encounters an uncovered character, the database
+ranks the installed candidates, probes their coverage on the borrowed file
+data, and copies and parses a face only once it actually covers the character.
 
 Candidates are ranked by script group first — Han, Japanese kana, Hangul,
 Arabic, Hebrew, Indic scripts, Thai, emoji, or the generic Latin stack — and then
@@ -123,7 +125,9 @@ by style and weight distance. A Japanese character therefore reaches
 `Microsoft YaHei`, `PingFang SC`, or `Noto Sans CJK` without parsing unrelated
 Latin faces. The database caches at most 24 lazily parsed faces and one
 coverage answer per character. Registered faces and the default face are never
-changed.
+changed. `FontdueTextShaper::system_fallback_stats()` reports how many faces
+were indexed, how many are loaded, and how many font bytes they retain, so the
+fallback cost stays visible in diagnostics.
 
 ```rust
 use drawen::render::{FontdueTextShaper, TextStyle};
@@ -204,8 +208,13 @@ appropriate direction, applies per-grapheme fallback across registered and
 lazily discovered system faces, wraps at grapheme boundaries, and exposes caret,
 hit-testing, line, and selection geometry through `TextLayout` (`caret_x`,
 `caret_rect`, `byte_at_point`, `line_at`, `line_at_y`, `line_ranges`, and
-`selection_rects`). The bounded layout cache reports hits, misses, and
-evictions through `TextShaper::cache_stats()` for frame diagnostics.
+`selection_rects`). Cloning a layout shares the shaped geometry behind `Arc`,
+so cache hits and recoloring copy reference counts, not glyphs. The layout
+cache is bounded by both 256 entries and a 4 MiB byte budget, whichever is
+reached first; it reports hits, misses, evictions, and retained bytes through
+`TextShaper::cache_stats()` for frame diagnostics. Each font face likewise
+bounds its shared glyph raster cache to 512 glyph-size pairs within a 2 MiB
+coverage budget, observable through `FontFace::raster_cache_stats()`.
 
 Fallback selects a face for the whole grapheme cluster rather than for its first
 character, so combining marks and emoji sequences are not split across fonts.

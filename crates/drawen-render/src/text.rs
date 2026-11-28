@@ -20,6 +20,7 @@ use crate::font::{
 };
 
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 256;
+const TEXT_LAYOUT_CACHE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const SHAPING_FRACTION_BITS: f32 = 64.0;
 
 /// Assigns each shaped layout a process-unique identity that survives cloning
@@ -243,16 +244,20 @@ impl TextCluster {
 }
 
 /// Precomputed text content, metrics, glyph placement, and caret geometry.
+///
+/// The heavy shaping results are shared behind `Arc`, so cloning a layout
+/// (for example on a cache hit or to recolor it) copies only a handful of
+/// reference counts instead of every glyph and cluster.
 #[derive(Clone, Debug)]
 pub struct TextLayout {
     identity: u64,
-    text: String,
+    text: Arc<str>,
     size: Size,
     color: Color,
-    glyph_runs: Vec<GlyphRun>,
-    lines: Vec<LineMetrics>,
-    clusters: Vec<TextCluster>,
-    line_ranges: Vec<Range<usize>>,
+    glyph_runs: Arc<Vec<GlyphRun>>,
+    lines: Arc<Vec<LineMetrics>>,
+    clusters: Arc<Vec<TextCluster>>,
+    line_ranges: Arc<Vec<Range<usize>>>,
 }
 
 impl PartialEq for TextLayout {
@@ -287,13 +292,13 @@ impl TextLayout {
     pub fn empty(text: &str, color: Color) -> Self {
         Self {
             identity: next_layout_identity(),
-            text: text.to_owned(),
+            text: Arc::from(text),
             size: Size::ZERO,
             color,
-            glyph_runs: Vec::new(),
-            lines: Vec::new(),
-            clusters: Vec::new(),
-            line_ranges: Vec::new(),
+            glyph_runs: Arc::new(Vec::new()),
+            lines: Arc::new(Vec::new()),
+            clusters: Arc::new(Vec::new()),
+            line_ranges: Arc::new(Vec::new()),
         }
     }
 
@@ -323,6 +328,24 @@ impl TextLayout {
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = color;
         self
+    }
+
+    /// Estimates the heap bytes this layout retains for cache budgeting.
+    ///
+    /// Font files referenced by glyph runs are shared with the font database
+    /// and deliberately excluded: the layout does not own them.
+    fn retained_bytes(&self) -> usize {
+        let glyphs: usize = self
+            .glyph_runs
+            .iter()
+            .map(|run| run.glyphs.capacity() * size_of::<PositionedGlyph>())
+            .sum();
+        self.text.len()
+            + self.glyph_runs.capacity() * size_of::<GlyphRun>()
+            + glyphs
+            + self.lines.capacity() * size_of::<LineMetrics>()
+            + self.clusters.capacity() * size_of::<TextCluster>()
+            + self.line_ranges.capacity() * size_of::<Range<usize>>()
     }
 
     /// Returns positioned glyph runs in drawing order.
@@ -467,7 +490,7 @@ impl TextLayout {
             return Vec::new();
         }
         let mut rects: Vec<Rect> = Vec::new();
-        for cluster in &self.clusters {
+        for cluster in self.clusters.iter() {
             if cluster.source.end <= selection.start || cluster.source.start >= selection.end {
                 continue;
             }
@@ -549,9 +572,28 @@ struct TextLayoutKey {
 #[derive(Debug, Default)]
 struct TextLayoutCache {
     entries: VecDeque<(TextLayoutKey, Arc<TextLayout>)>,
+    bytes: usize,
     hits: u64,
     misses: u64,
     evictions: u64,
+}
+
+impl TextLayoutCache {
+    /// Evicts oldest entries until both the entry count and the retained byte
+    /// budget can accept `incoming_bytes` more.
+    fn make_room(&mut self, incoming_bytes: usize) {
+        while !self.entries.is_empty()
+            && (self.entries.len() >= TEXT_LAYOUT_CACHE_CAPACITY
+                || self.bytes.saturating_add(incoming_bytes) > TEXT_LAYOUT_CACHE_BYTE_BUDGET)
+        {
+            if let Some((key, layout)) = self.entries.pop_front() {
+                self.bytes = self
+                    .bytes
+                    .saturating_sub(key.text.capacity() + layout.retained_bytes());
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+    }
 }
 
 /// Cumulative text-layout cache counters exposed for frame diagnostics.
@@ -561,10 +603,12 @@ pub struct TextLayoutCacheStats {
     pub hits: u64,
     /// Number of layouts shaped because no matching entry was cached.
     pub misses: u64,
-    /// Number of entries evicted by the bounded FIFO cache.
+    /// Number of entries evicted by the bounded cache.
     pub evictions: u64,
     /// Number of entries currently retained.
     pub entries: usize,
+    /// Estimated heap bytes retained by the cached layouts and their keys.
+    pub retained_bytes: usize,
 }
 
 impl PartialEq for FontdueTextShaper {
@@ -686,6 +730,7 @@ impl FontdueTextShaper {
             misses: cache.misses,
             evictions: cache.evictions,
             entries: cache.entries.len(),
+            retained_bytes: cache.bytes,
         }
     }
 
@@ -741,24 +786,21 @@ impl FontdueTextShaper {
             dpi: self.dpi.to_bits(),
             generation: self.layout_generation,
         };
-        let hit = {
-            let cache = self
-                .layouts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cache
-                .entries
-                .iter()
-                .find(|(entry, _)| entry == &key)
-                .map(|(_, layout)| Arc::clone(layout))
-        };
-        if let Some(layout) = hit {
+        {
             let mut cache = self
                 .layouts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cache.hits = cache.hits.saturating_add(1);
-            return layout.as_ref().clone().with_color(style.color());
+            let hit = cache
+                .entries
+                .iter()
+                .find(|(entry, _)| entry == &key)
+                .map(|(_, layout)| Arc::clone(layout));
+            if let Some(layout) = hit {
+                cache.hits = cache.hits.saturating_add(1);
+                // Cloning shares the shaped geometry; only the color differs.
+                return layout.as_ref().clone().with_color(style.color());
+            }
         }
         let layout = Arc::new(self.shape(text, style, width));
         let mut cache = self
@@ -771,10 +813,9 @@ impl FontdueTextShaper {
             cache.hits = cache.hits.saturating_add(1);
             return existing.as_ref().clone().with_color(style.color());
         }
-        if cache.entries.len() == TEXT_LAYOUT_CACHE_CAPACITY {
-            cache.entries.pop_front();
-            cache.evictions = cache.evictions.saturating_add(1);
-        }
+        let bytes = key.text.capacity() + layout.retained_bytes();
+        cache.make_room(bytes);
+        cache.bytes = cache.bytes.saturating_add(bytes);
         cache.entries.push_back((key, Arc::clone(&layout)));
         layout.as_ref().clone().with_color(style.color())
     }
@@ -891,13 +932,13 @@ impl FontdueTextShaper {
 
         TextLayout {
             identity: next_layout_identity(),
-            text: text.to_owned(),
+            text: Arc::from(text),
             size,
             color: style.color,
-            glyph_runs,
-            lines,
-            clusters,
-            line_ranges,
+            glyph_runs: Arc::new(glyph_runs),
+            lines: Arc::new(lines),
+            clusters: Arc::new(clusters),
+            line_ranges: Arc::new(line_ranges),
         }
     }
 }
@@ -1344,9 +1385,11 @@ fn size(width: f32, height: f32) -> Size {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use drawen_core::Color;
 
-    use super::{FontdueTextShaper, GlyphRun, TextStyle};
+    use super::{FontdueTextShaper, GlyphRun, TEXT_LAYOUT_CACHE_BYTE_BUDGET, TextStyle};
     use crate::font::{Font, FontFace, FontStyle, FontWeight};
 
     #[test]
@@ -1440,6 +1483,31 @@ mod tests {
         assert_eq!(white.color(), Color::WHITE);
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.hits, 1);
+        // A cache hit shares the shaped geometry instead of deep-copying it.
+        assert!(Arc::ptr_eq(&black.glyph_runs, &white.glyph_runs));
+        assert!(Arc::ptr_eq(&black.clusters, &white.clusters));
+        assert!(stats.retained_bytes > 0);
+    }
+
+    #[test]
+    fn layout_cache_evicts_by_bytes_before_the_entry_cap() {
+        let shaper = FontdueTextShaper::new(FontFace::ubuntu_light());
+        let style = TextStyle::new(16.0, Color::BLACK);
+        // One long wrapped paragraph costs more than the whole byte budget, so
+        // the next small label must evict it while the count cap is far away.
+        let paragraph = "drawen memory budget probe ".repeat(4096);
+        let _ = shaper.layout(&paragraph, &style, Some(240.0));
+        let big = shaper.cache_stats();
+        assert_eq!(big.entries, 1);
+        assert!(big.retained_bytes > TEXT_LAYOUT_CACHE_BYTE_BUDGET / 2);
+
+        for index in 0..64 {
+            let _ = shaper.layout(&format!("label {index}"), &style, None);
+        }
+        let stats = shaper.cache_stats();
+        assert!(stats.evictions >= 1);
+        assert!(stats.entries < 65);
+        assert!(stats.retained_bytes <= TEXT_LAYOUT_CACHE_BYTE_BUDGET);
     }
 
     #[test]

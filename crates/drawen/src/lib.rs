@@ -193,9 +193,9 @@ pub mod tasks {
 pub mod render {
     pub use drawen_render::{
         DisplayCommand, DisplayList, DisplayListStats, FontError, FontFace, FontdueTextShaper,
-        FrameDamage, GlyphBitmap, GlyphRun, LineMetrics, PaintContext, PaintTransition,
-        PositionedGlyph, RasterImage, RasterImageError, SystemFallbackStats, TextLayout,
-        TextLayoutCacheStats, TextShaper, TextStyle, TextureId,
+        FrameDamage, GlyphBitmap, GlyphRasterCacheStats, GlyphRun, LineMetrics, PaintContext,
+        PaintTransition, PositionedGlyph, RasterImage, RasterImageError, SystemFallbackStats,
+        TextLayout, TextLayoutCacheStats, TextShaper, TextStyle, TextureId,
     };
 }
 

@@ -19,6 +19,7 @@ use fontdue::{Font as FontdueFont, FontSettings};
 pub const DEFAULT_DPI: f32 = 96.0;
 
 const GLYPH_RASTER_CACHE_CAPACITY: usize = 512;
+const GLYPH_RASTER_CACHE_BYTE_BUDGET: usize = 2 * 1024 * 1024;
 const SYSTEM_FACE_CACHE_CAPACITY: usize = 24;
 
 /// A font family name.
@@ -450,6 +451,7 @@ struct GlyphRasterKey {
 struct GlyphRasterCache {
     entries: HashMap<GlyphRasterKey, Arc<GlyphBitmap>>,
     insertion_order: VecDeque<GlyphRasterKey>,
+    bytes: usize,
 }
 
 impl FontFace {
@@ -611,8 +613,9 @@ impl FontFace {
     /// repeated draws at the same physical pixel size.
     ///
     /// The cache is shared by cloned handles for this font face and retains up
-    /// to 512 glyph-size pairs. Its bounded FIFO eviction prevents arbitrary
-    /// text or scale changes from growing renderer memory without limit.
+    /// to 512 glyph-size pairs within a 2 MiB coverage budget, whichever limit
+    /// is reached first. Oldest entries are evicted so arbitrary text or scale
+    /// changes cannot grow renderer memory without limit.
     #[must_use]
     pub fn rasterize_cached(&self, glyph_id: u16, font_size: f32) -> Arc<GlyphBitmap> {
         let key = GlyphRasterKey {
@@ -632,14 +635,37 @@ impl FontFace {
             height: metrics.height,
             coverage,
         });
-        if cache.entries.len() == GLYPH_RASTER_CACHE_CAPACITY
-            && let Some(oldest) = cache.insertion_order.pop_front()
+        let bytes = bitmap.coverage.len();
+        while !cache.insertion_order.is_empty()
+            && (cache.entries.len() >= GLYPH_RASTER_CACHE_CAPACITY
+                || cache.bytes.saturating_add(bytes) > GLYPH_RASTER_CACHE_BYTE_BUDGET)
         {
-            cache.entries.remove(&oldest);
+            if let Some(oldest) = cache.insertion_order.pop_front()
+                && let Some(evicted) = cache.entries.remove(&oldest)
+            {
+                cache.bytes = cache.bytes.saturating_sub(evicted.coverage.len());
+            }
         }
+        cache.bytes = cache.bytes.saturating_add(bytes);
         cache.insertion_order.push_back(key);
         cache.entries.insert(key, Arc::clone(&bitmap));
         bitmap
+    }
+
+    /// Returns a snapshot of this face's shared glyph raster cache.
+    ///
+    /// Use it to watch how many glyph-size pairs are retained and how many
+    /// coverage bytes they cost before tuning text sizes or scale factors.
+    #[must_use]
+    pub fn raster_cache_stats(&self) -> GlyphRasterCacheStats {
+        let cache = self
+            .glyph_rasters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        GlyphRasterCacheStats {
+            entries: cache.entries.len(),
+            retained_bytes: cache.bytes,
+        }
     }
 
     /// Returns the horizontal line metrics for `font_size` logical pixels.
@@ -786,6 +812,15 @@ impl GlyphBitmap {
     pub fn coverage(&self) -> &[u8] {
         &self.coverage
     }
+}
+
+/// A snapshot of one font face's shared glyph raster cache.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GlyphRasterCacheStats {
+    /// Number of glyph-size pairs currently retained.
+    pub entries: usize,
+    /// Total coverage bytes retained by the cached bitmaps.
+    pub retained_bytes: usize,
 }
 
 /// A registry of font faces with Qt-style family and style matching.
@@ -1600,8 +1635,8 @@ mod tests {
 
     use super::{
         Font, FontDatabase, FontDescriptor, FontFace, FontFamily, FontSize, FontStyle, FontWeight,
-        ScriptGroup, SystemFallbackStats, family_script_score, is_ignorable_for_coverage,
-        script_group,
+        GLYPH_RASTER_CACHE_BYTE_BUDGET, ScriptGroup, SystemFallbackStats, family_script_score,
+        is_ignorable_for_coverage, script_group,
     };
 
     fn database() -> FontDatabase {
@@ -1690,6 +1725,22 @@ mod tests {
         let second = clone.rasterize_cached(glyph_id, 16.0);
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn glyph_raster_cache_evicts_by_bytes_before_the_entry_cap() {
+        let face = FontFace::ubuntu_light();
+        let glyph_id = face.font().lookup_glyph_index('W');
+        // Large sizes make each coverage bitmap cost tens of kilobytes, so the
+        // byte budget must evict long before the 512-entry count cap.
+        for step in 0..256u16 {
+            let size = 96.0 + f32::from(step);
+            let _ = face.rasterize_cached(glyph_id, size);
+        }
+        let stats = face.raster_cache_stats();
+        assert!(stats.entries > 0);
+        assert!(stats.entries < 256);
+        assert!(stats.retained_bytes <= GLYPH_RASTER_CACHE_BYTE_BUDGET);
     }
 
     #[test]
