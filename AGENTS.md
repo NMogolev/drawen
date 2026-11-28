@@ -43,6 +43,11 @@ Non-negotiables:
 - Off-thread work goes through `drawen::tasks` (`TaskPool` + `UiDispatcher`).
   Workers own plain data and never capture widgets, signals, or subscriptions;
   the UI thread drains delivered values in `window_event`.
+- Mechanisms are frugal by default: allocate lazily and size to demand, give
+  every cache a byte budget, eviction, and a stats accessor, share heavy
+  immutable data behind `Arc`, keep GPU buffers persistent or recycled, and
+  schedule no frames while idle. Defaults must work untuned — frugality never
+  costs API convenience. See `docs/PERFORMANCE.md` ("Frugal by default").
 
 Canonical files:
 

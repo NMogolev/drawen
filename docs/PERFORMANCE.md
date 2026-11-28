@@ -154,10 +154,38 @@ frames that invalidate everything.
   bounded animations finish; do not force frames for purely visual effects
   while the window is hidden or offscreen.
 
-## Next direction: memory
+## Frugal by default
 
-The damage pipeline removed most redundant CPU work; the next optimization
-milestone targets memory instead. The retained footprint of the widget tree,
-display lists, and renderer caches is the thing to shrink, and the same rule
-applies as for CPU caches: measure first, and do not add a cache that is rarely
-hit — it only adds memory and invalidation bugs.
+The 0.5 memory audit found the same failure pattern behind every weakness: a
+mechanism allocated for the worst case up front, grew without a budget, or
+copied data it could have shared. Treat that as the standing lesson. New
+mechanisms — in the library and in applications — must be frugal out of the
+box, without asking the user to configure anything:
+
+- **Lazy until first use.** Do not scan, decode, shape, or allocate until an
+  event actually needs it: the system font scan waits for the first uncovered
+  character, showcase pages mount on first activation. Laziness must not
+  become visible lag — do the work at the moment the user asks for the
+  content, never on a speculative timer.
+- **Size to demand, not to the worst case.** Start small and grow on need:
+  the glyph atlas starts at 512×512, vertex buffers grow with headroom.
+  Growth may be one-way when shrinking would only churn allocations.
+- **Every cache has a budget and a receipt.** A byte budget plus an entry cap
+  plus eviction, and a stats accessor reporting retained bytes
+  (`TextLayoutCacheStats`, `GlyphRasterCacheStats`, `SystemFallbackStats`,
+  `GpuCacheStats`). An unbounded map keyed by user-controlled data is a leak.
+- **Share, do not copy.** Immutable heavy data lives behind `Arc` with a
+  stable identity (`RasterImage`, `TextLayout`); constructors accept
+  `impl Into<Arc<_>>` so sharing is available without being mandatory.
+- **GPU resources are persistent or recycled.** Never allocate a buffer or
+  texture per frame; reuse a retired allocation only after a frame boundary,
+  so earlier draws in the same frame keep their pixels.
+- **Idle means zero.** Nothing schedules frames when nothing changes; the
+  showcase idle test guards this. A regression that wakes an idle window is
+  a bug, not a tuning issue.
+
+Frugality never costs convenience: defaults must work untuned, budgets are an
+optimization knob rather than a requirement, and public APIs keep their
+ergonomic shapes — `TextShaper::layout` still returns `TextLayout` by value;
+the sharing happens inside. Measure first, and do not add a cache that is
+rarely hit — it only adds memory and invalidation bugs.
