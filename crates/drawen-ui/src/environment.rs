@@ -4,6 +4,13 @@ use drawen_render::{DEFAULT_DPI, Font, FontdueTextShaper, TextShaper};
 
 use crate::{DssError, DssStyle, LightTheme, StyleSheet, StyleTarget, Theme};
 
+/// Maximum number of resolved node styles retained by the environment.
+///
+/// Style targets include per-widget ids and ancestor chains, so a long-lived
+/// application that creates and removes widgets would otherwise grow this
+/// memo forever. Resolution is cheap, so the cache simply restarts when full.
+const STYLE_CACHE_CAPACITY: usize = 1024;
+
 /// Runtime-wide services and semantic settings available to widgets.
 ///
 /// The environment is owned by [`crate::UiRuntime`], so a widget observes the
@@ -82,9 +89,11 @@ impl UiEnvironment {
     /// Resolves the cascade for `target`.
     ///
     /// Results are cached because the runtime asks for the same control style
-    /// repeatedly while laying out and painting. Custom widgets and tooling can
-    /// use this method to resolve styles with exactly the same contract as
-    /// standard widgets.
+    /// repeatedly while laying out and painting. The memo is bounded: once it
+    /// holds 1024 targets it restarts, keeping memory flat for applications
+    /// that churn through widget ids. Custom widgets and tooling can use this
+    /// method to resolve styles with exactly the same contract as standard
+    /// widgets.
     #[must_use]
     pub fn style_for(&self, target: &StyleTarget) -> DssStyle {
         if let Some(style) = self.style_cache.borrow().get(target) {
@@ -94,9 +103,11 @@ impl UiEnvironment {
             .stylesheet
             .as_ref()
             .map_or_else(DssStyle::default, |stylesheet| stylesheet.resolve(target));
-        self.style_cache
-            .borrow_mut()
-            .insert(target.clone(), style.clone());
+        let mut cache = self.style_cache.borrow_mut();
+        if cache.len() >= STYLE_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(target.clone(), style.clone());
         style
     }
 
@@ -286,8 +297,18 @@ mod tests {
     use drawen_core::Color;
     use drawen_render::{Font, FontFamily, FontSize, FontStyle, FontWeight};
 
-    use super::UiEnvironment;
+    use super::{STYLE_CACHE_CAPACITY, UiEnvironment};
     use crate::{DssStyle, LightTheme, StyleTarget, Theme};
+
+    #[test]
+    fn style_cache_restarts_instead_of_growing_without_limit() {
+        let environment = UiEnvironment::new(LightTheme);
+        for index in 0..=(STYLE_CACHE_CAPACITY * 2) {
+            let target = StyleTarget::new("button").with_id(format!("widget-{index}"));
+            let _ = environment.style_for(&target);
+        }
+        assert!(environment.style_cache.borrow().len() <= STYLE_CACHE_CAPACITY);
+    }
 
     #[test]
     fn constructs_a_theme_from_dss_source() {
