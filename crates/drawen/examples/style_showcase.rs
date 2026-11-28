@@ -92,6 +92,42 @@ const SHOWCASE_DSS: &str = r"
     .dss-sample text { color: white; font-size: calc(12px + 2px); }
 ";
 
+#[cfg(test)]
+mod idle_probe {
+    use super::*;
+
+    #[test]
+    fn idle_showcase_schedules_no_frames() {
+        let mut app = StyleShowcase::new(0);
+        app.runtime.settle_animations();
+        assert_eq!(app.runtime.next_frame_in(), None);
+    }
+
+    #[test]
+    fn probe_every_page() {
+        for page in 0..PAGE_COUNT {
+            let mut app = StyleShowcase::new(page);
+            // Simulate the native loop: paint advances animations by wall time.
+            for _ in 0..8 {
+                let mut list = DisplayList::new();
+                app.runtime
+                    .paint(&mut PaintContext::new(&mut list))
+                    .expect("paint");
+                let _ = app.runtime.take_redraw_request();
+                if app.runtime.next_frame_in().is_none() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            println!(
+                "page {page}: next_frame_in={:?} damage={:?}",
+                app.runtime.next_frame_in(),
+                app.runtime.frame_damage()
+            );
+        }
+    }
+}
+
 fn main() -> Result<(), drawen_platform_winit::RunError> {
     if std::env::args().any(|argument| argument == "--snapshot") {
         write_snapshots();
@@ -559,6 +595,13 @@ impl TaskDemo {
 // Application shell
 // ---------------------------------------------------------------------------
 
+/// Subscriptions and bindings owned by one mounted page. Dropping the value
+/// disconnects the page's callbacks when its content is torn down.
+struct MountedPage {
+    _subscriptions: Vec<Subscription>,
+    _bindings: Vec<Binding>,
+}
+
 struct StyleShowcase {
     runtime: UiRuntime,
     size: Size,
@@ -570,25 +613,30 @@ struct StyleShowcase {
     #[cfg(feature = "agent")]
     agent_report: Rc<RefCell<String>>,
     toast_queue: Rc<RefCell<Vec<ToastTone>>>,
-    toast_handle: ToastHandle,
+    toast_handle: Option<ToastHandle>,
     task_demo: Rc<TaskDemo>,
     task_dispatcher: Option<UiDispatcher<TaskMessage>>,
-    task_status_id: drawen::WidgetId,
+    task_status_id: Option<drawen::WidgetId>,
     diagnostics: Rc<RefCell<String>>,
-    diagnostics_id: drawen::WidgetId,
+    diagnostics_id: Option<drawen::WidgetId>,
     diagnostics_cache: String,
+    // One lightweight empty host per tab; heavy content mounts on first
+    // activation, so hidden pages cost no widgets, shaping, or image memory.
+    page_hosts: Vec<drawen::WidgetId>,
+    pages: Vec<Option<MountedPage>>,
+    page_request: Rc<Cell<Option<usize>>>,
     #[cfg(feature = "media")]
     media_import_requested: Rc<Cell<Option<MediaImport>>>,
     #[cfg(feature = "audio")]
-    media_preview_frame: drawen::WidgetId,
+    media_preview_frame: Option<drawen::WidgetId>,
     #[cfg(feature = "audio")]
-    media_preview: drawen::WidgetId,
+    media_preview: Option<drawen::WidgetId>,
     #[cfg(feature = "audio")]
-    audio_preview_parent: drawen::WidgetId,
+    audio_preview_parent: Option<drawen::WidgetId>,
     #[cfg(feature = "audio")]
-    audio_preview: drawen::WidgetId,
+    audio_preview: Option<drawen::WidgetId>,
     #[cfg(feature = "cubex")]
-    cubex_mount: drawen::WidgetId,
+    cubex_mount: Option<drawen::WidgetId>,
     #[cfg(feature = "cubex")]
     cubex_view: Option<drawen::WidgetId>,
     #[cfg(feature = "cubex")]
@@ -662,7 +710,7 @@ impl StyleShowcase {
             .append_child(root, ShowcaseShell)
             .expect("window frame exists");
         let mut subscriptions = Vec::new();
-        let mut bindings = Vec::new();
+        let bindings = Vec::new();
 
         let menu = MenuBar::new(["File", "Edit", "View", "Help"]);
         subscriptions.push(menu.activated().subscribe(|index| {
@@ -705,63 +753,25 @@ impl StyleShowcase {
             "Servo",
         ]);
         tabs.set_selected(Some(selected_tab.min(PAGE_COUNT - 1)));
-        subscriptions.push(
-            tabs.changed()
-                .subscribe(|index| println!("TabBar: opened page {}.", index + 1)),
-        );
+        let page_request = Rc::new(Cell::new(None));
+        subscriptions.push(tabs.changed().subscribe({
+            let page_request = Rc::clone(&page_request);
+            move |index| {
+                println!("TabBar: opened page {}.", index + 1);
+                page_request.set(Some(*index));
+            }
+        }));
         let tabs = runtime
             .append_child(root, tabs)
             .expect("showcase root exists");
 
-        append_overview_page(&mut runtime, tabs);
-        append_components_page(&mut runtime, &mut subscriptions, tabs);
-        append_entry_page(&mut runtime, &mut subscriptions, &mut bindings, tabs);
-        append_data_page(&mut runtime, &mut subscriptions, tabs);
-        append_layout_page(&mut runtime, tabs);
-        append_workspace_page(&mut runtime, tabs);
-        let media_previews = append_media_page(
-            &mut runtime,
-            &mut subscriptions,
-            #[cfg(feature = "media")]
-            &media_import_requested,
-            tabs,
-        );
-        #[cfg(feature = "audio")]
-        let (media_preview_frame, media_preview, audio_preview_parent, audio_preview) =
-            media_previews;
-        #[cfg(not(feature = "audio"))]
-        let _ = media_previews;
-        #[cfg(feature = "cubex")]
-        let cubex_mount = append_cubex_page(
-            &mut runtime,
-            &mut subscriptions,
-            &cubex_start_requested,
-            tabs,
-        );
-        #[cfg(not(feature = "cubex"))]
-        let _ = append_cubex_page(&mut runtime, &mut subscriptions, tabs);
-        append_appearance_page(&mut runtime, &mut subscriptions, &appearance, &dirty, tabs);
-        append_dss_page(&mut runtime, tabs);
-        let toast_handle =
-            append_overlay_page(&mut runtime, &mut subscriptions, &dirty, &toast_queue, tabs);
-        let (task_status_id, diagnostics_id) = append_runtime_page(
-            &mut runtime,
-            &mut subscriptions,
-            &task_demo,
-            &diagnostics,
-            &mut bindings,
-            tabs,
-        );
-        append_agent_page(
-            &mut runtime,
-            &mut subscriptions,
-            #[cfg(feature = "agent")]
-            &agent_observation_requested,
-            #[cfg(feature = "agent")]
-            &agent_report,
-            tabs,
-        );
-        append_servo_page(&mut runtime, tabs);
+        // Pages mount lazily: every tab keeps an empty host so tab indices stay
+        // stable, and the page's content is built only when it is first opened.
+        // Snapshot mode therefore builds just the requested page.
+        let mut page_hosts = Vec::with_capacity(PAGE_COUNT);
+        for _ in 0..PAGE_COUNT {
+            page_hosts.push(runtime.append_child(tabs, Page).expect("tab bar exists"));
+        }
 
         runtime
             .append_child(root, StatusBar::new(Rc::clone(&appearance)))
@@ -778,25 +788,28 @@ impl StyleShowcase {
             #[cfg(feature = "agent")]
             agent_report,
             toast_queue,
-            toast_handle,
+            toast_handle: None,
             task_demo,
             task_dispatcher: None,
-            task_status_id,
+            task_status_id: None,
             diagnostics,
-            diagnostics_id,
+            diagnostics_id: None,
             diagnostics_cache: String::new(),
+            page_hosts,
+            pages: (0..PAGE_COUNT).map(|_| None).collect(),
+            page_request,
             #[cfg(feature = "media")]
             media_import_requested,
             #[cfg(feature = "audio")]
-            media_preview_frame,
+            media_preview_frame: None,
             #[cfg(feature = "audio")]
-            media_preview,
+            media_preview: None,
             #[cfg(feature = "audio")]
-            audio_preview_parent,
+            audio_preview_parent: None,
             #[cfg(feature = "audio")]
-            audio_preview,
+            audio_preview: None,
             #[cfg(feature = "cubex")]
-            cubex_mount,
+            cubex_mount: None,
             #[cfg(feature = "cubex")]
             cubex_view: None,
             #[cfg(feature = "cubex")]
@@ -804,6 +817,7 @@ impl StyleShowcase {
             _bindings: bindings,
             _subscriptions: subscriptions,
         };
+        app.mount_page(selected_tab.min(PAGE_COUNT - 1));
         app.layout(size);
         app
     }
@@ -815,14 +829,117 @@ impl StyleShowcase {
         }
     }
 
+    /// Builds a page's content into its empty host on first activation.
+    ///
+    /// Hidden tabs keep only the lightweight host, so unopened pages cost no
+    /// widgets, text shaping, or procedural images. Per-page subscriptions and
+    /// bindings stay alive exactly as long as the page content does.
+    #[allow(clippy::too_many_lines)]
+    fn mount_page(&mut self, index: usize) {
+        if self.pages[index].is_some() {
+            return;
+        }
+        let host = self.page_hosts[index];
+        let mut subscriptions = Vec::new();
+        let mut bindings = Vec::new();
+        match index {
+            0 => append_overview_page(&mut self.runtime, host),
+            1 => append_components_page(&mut self.runtime, &mut subscriptions, host),
+            2 => append_entry_page(&mut self.runtime, &mut subscriptions, &mut bindings, host),
+            3 => append_data_page(&mut self.runtime, &mut subscriptions, host),
+            4 => append_layout_page(&mut self.runtime, host),
+            5 => append_workspace_page(&mut self.runtime, host),
+            6 => {
+                let previews = append_media_page(
+                    &mut self.runtime,
+                    &mut subscriptions,
+                    #[cfg(feature = "media")]
+                    &self.media_import_requested,
+                    host,
+                );
+                #[cfg(feature = "audio")]
+                {
+                    let (frame, preview, audio_parent, audio) = previews;
+                    self.media_preview_frame = Some(frame);
+                    self.media_preview = Some(preview);
+                    self.audio_preview_parent = Some(audio_parent);
+                    self.audio_preview = Some(audio);
+                }
+                #[cfg(not(feature = "audio"))]
+                let _ = previews;
+            }
+            7 => {
+                #[cfg(feature = "cubex")]
+                {
+                    self.cubex_mount = Some(append_cubex_page(
+                        &mut self.runtime,
+                        &mut subscriptions,
+                        &self.cubex_start_requested,
+                        host,
+                    ));
+                }
+                #[cfg(not(feature = "cubex"))]
+                let _ = append_cubex_page(&mut self.runtime, &mut subscriptions, host);
+            }
+            8 => append_appearance_page(
+                &mut self.runtime,
+                &mut subscriptions,
+                &self.appearance,
+                &self.dirty,
+                host,
+            ),
+            9 => append_dss_page(&mut self.runtime, host),
+            10 => {
+                self.toast_handle = Some(append_overlay_page(
+                    &mut self.runtime,
+                    &mut subscriptions,
+                    &self.dirty,
+                    &self.toast_queue,
+                    host,
+                ));
+            }
+            11 => {
+                let (task_status, diagnostics) = append_runtime_page(
+                    &mut self.runtime,
+                    &mut subscriptions,
+                    &self.task_demo,
+                    &self.diagnostics,
+                    &mut bindings,
+                    host,
+                );
+                self.task_status_id = Some(task_status);
+                self.diagnostics_id = Some(diagnostics);
+            }
+            12 => append_agent_page(
+                &mut self.runtime,
+                &mut subscriptions,
+                #[cfg(feature = "agent")]
+                &self.agent_observation_requested,
+                #[cfg(feature = "agent")]
+                &self.agent_report,
+                host,
+            ),
+            13 => append_servo_page(&mut self.runtime, host),
+            _ => unreachable!("page index is bounded by PAGE_COUNT"),
+        }
+        self.pages[index] = Some(MountedPage {
+            _subscriptions: subscriptions,
+            _bindings: bindings,
+        });
+        self.runtime.invalidate_layout();
+    }
+
     #[cfg(feature = "cubex")]
     fn start_cubex_demo(&mut self) -> bool {
         if !self.cubex_start_requested.replace(false) || self.cubex_view.is_some() {
             return false;
         }
+        let Some(mount) = self.cubex_mount else {
+            return false;
+        };
         let frame = self
             .runtime
-            .append_child(self.cubex_mount, FixedHeight::new(470.0))
+            .append_child(mount, FixedHeight::new(470.0))
             .expect("CubeX mount remains in the showcase tree");
         let view = self
             .runtime
@@ -898,7 +1015,9 @@ impl StyleShowcase {
         if text != self.diagnostics_cache {
             self.diagnostics_cache.clone_from(&text);
             *self.diagnostics.borrow_mut() = text;
-            self.runtime.invalidate_paint_for(self.diagnostics_id);
+            if let Some(id) = self.diagnostics_id {
+                self.runtime.invalidate_paint_for(id);
+            }
         }
     }
 
@@ -927,26 +1046,40 @@ impl StyleShowcase {
         match import {
             MediaImport::Video => match Video::open_paleo_audio(&path) {
                 Ok(video) => {
+                    let frame = self
+                        .media_preview_frame
+                        .expect("import is requested from the mounted media page");
+                    let preview = self
+                        .media_preview
+                        .expect("import is requested from the mounted media page");
                     self.runtime
-                        .remove_subtree(self.media_preview)
+                        .remove_subtree(preview)
                         .expect("media preview remains in the showcase tree");
-                    self.media_preview = self
-                        .runtime
-                        .append_child(self.media_preview_frame, video)
-                        .expect("media preview frame remains in the showcase tree");
+                    self.media_preview = Some(
+                        self.runtime
+                            .append_child(frame, video)
+                            .expect("media preview frame remains in the showcase tree"),
+                    );
                     self.runtime.invalidate_layout();
                 }
                 Err(error) => eprintln!("Could not open {}: {error}", path.display()),
             },
             MediaImport::Audio => match AudioPlayer::open(&path) {
                 Ok(player) => {
+                    let parent = self
+                        .audio_preview_parent
+                        .expect("import is requested from the mounted media page");
+                    let preview = self
+                        .audio_preview
+                        .expect("import is requested from the mounted media page");
                     self.runtime
-                        .remove_subtree(self.audio_preview)
+                        .remove_subtree(preview)
                         .expect("audio preview remains in the showcase tree");
-                    self.audio_preview = self
-                        .runtime
-                        .append_child(self.audio_preview_parent, player)
-                        .expect("media card remains in the showcase tree");
+                    self.audio_preview = Some(
+                        self.runtime
+                            .append_child(parent, player)
+                            .expect("media card remains in the showcase tree"),
+                    );
                     self.runtime.invalidate_layout();
                 }
                 Err(error) => eprintln!("Could not open {}: {error}", path.display()),
@@ -998,10 +1131,15 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::Input(event) => {
                 let _ = self.runtime.dispatch_event(&event);
+                if let Some(index) = self.page_request.replace(None) {
+                    self.mount_page(index);
+                }
                 #[cfg(feature = "cubex")]
                 let cubex_started = self.start_cubex_demo();
-                if self.drain_tasks() {
-                    self.runtime.invalidate_paint_for(self.task_status_id);
+                if self.drain_tasks()
+                    && let Some(id) = self.task_status_id
+                {
+                    self.runtime.invalidate_paint_for(id);
                 }
                 let toasts: Vec<ToastTone> = self.toast_queue.borrow_mut().drain(..).collect();
                 if !toasts.is_empty() {
@@ -1012,7 +1150,9 @@ impl WindowApplication for StyleShowcase {
                             ToastTone::Warning => "Queued · warning",
                             ToastTone::Danger => "Queued · danger",
                         };
-                        let _ = self.toast_handle.show(Toast::new(message).with_tone(tone));
+                        if let Some(handle) = &self.toast_handle {
+                            let _ = handle.show(Toast::new(message).with_tone(tone));
+                        }
                     }
                     self.runtime.invalidate_paint();
                 }
@@ -1062,7 +1202,9 @@ impl WindowApplication for StyleShowcase {
             }
             WindowEvent::RedrawRequested => {
                 if self.drain_tasks() {
-                    self.runtime.invalidate_paint_for(self.task_status_id);
+                    if let Some(id) = self.task_status_id {
+                        self.runtime.invalidate_paint_for(id);
+                    }
                     WindowAction::RequestRedraw
                 } else {
                     WindowAction::None
@@ -4492,11 +4634,12 @@ impl Widget for StatusBar {
 // Builders
 // ---------------------------------------------------------------------------
 
-fn append_scroll_page(runtime: &mut UiRuntime, tabs: drawen::WidgetId) -> drawen::WidgetId {
-    let page = runtime.append_child(tabs, Page).expect("tab bar exists");
+/// Fills a page host with a scrollable stack. The host itself is created up
+/// front so tab indices stay stable while content mounts lazily.
+fn append_scroll_page(runtime: &mut UiRuntime, page: drawen::WidgetId) -> drawen::WidgetId {
     let scroll = runtime
         .append_child(page, ScrollView::vertical())
-        .expect("page exists");
+        .expect("page host exists");
     runtime
         .append_child(
             scroll,
