@@ -1,5 +1,6 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     sync::{
         Arc, Mutex, OnceLock,
@@ -15,8 +16,8 @@ use unicode_bidi::{Level, ParagraphBidiInfo};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::font::{
-    DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, SystemFallbackStats,
-    is_ignorable_for_coverage,
+    DEFAULT_DPI, Font, FontDatabase, FontDescriptor, FontError, FontFace, FontSize,
+    SystemFallbackStats, is_ignorable_for_coverage,
 };
 
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 256;
@@ -560,7 +561,7 @@ pub struct FontdueTextShaper {
     layouts: Arc<Mutex<TextLayoutCache>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 struct TextLayoutKey {
     text: String,
     font: Font,
@@ -569,9 +570,84 @@ struct TextLayoutKey {
     generation: u64,
 }
 
+impl TextLayoutKey {
+    fn matches(&self, query: &TextLayoutQuery<'_>) -> bool {
+        self.text == query.text
+            && self.font == *query.font
+            && self.width == query.width
+            && self.dpi == query.dpi
+            && self.generation == query.generation
+    }
+}
+
+/// A borrowed layout request. Hashing and comparison never copy the text, so
+/// cache hits on large documents stay allocation-free.
+struct TextLayoutQuery<'a> {
+    text: &'a str,
+    font: &'a Font,
+    width: Option<u32>,
+    dpi: u32,
+    generation: u64,
+}
+
+fn hash_layout_request<H: Hasher>(
+    text: &str,
+    font: &Font,
+    width: Option<u32>,
+    dpi: u32,
+    generation: u64,
+    state: &mut H,
+) {
+    text.hash(state);
+    font.families().hash(state);
+    match font.size() {
+        FontSize::Pixels(value) => {
+            0u8.hash(state);
+            hash_size_bits(value, state);
+        }
+        FontSize::Points(value) => {
+            1u8.hash(state);
+            hash_size_bits(value, state);
+        }
+    }
+    font.weight().hash(state);
+    font.style().hash(state);
+    width.hash(state);
+    dpi.hash(state);
+    generation.hash(state);
+}
+
+/// Hashes a size consistently with `f32` equality, which treats `-0.0 == 0.0`.
+fn hash_size_bits<H: Hasher>(value: f32, state: &mut H) {
+    let bits = if value == 0.0 {
+        0.0f32.to_bits()
+    } else {
+        value.to_bits()
+    };
+    bits.hash(state);
+}
+
+fn layout_request_hash(query: &TextLayoutQuery<'_>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_layout_request(
+        query.text,
+        query.font,
+        query.width,
+        query.dpi,
+        query.generation,
+        &mut hasher,
+    );
+    hasher.finish()
+}
+
+/// Bounded layout cache: hash buckets resolve borrowed queries in O(1), and a
+/// FIFO queue of bucket hashes drives eviction under the entry cap and byte
+/// budget. Collisions share a bucket and are resolved by full key comparison.
 #[derive(Debug, Default)]
 struct TextLayoutCache {
-    entries: VecDeque<(TextLayoutKey, Arc<TextLayout>)>,
+    buckets: HashMap<u64, Vec<(TextLayoutKey, Arc<TextLayout>)>>,
+    order: VecDeque<u64>,
+    entries: usize,
     bytes: usize,
     hits: u64,
     misses: u64,
@@ -579,20 +655,48 @@ struct TextLayoutCache {
 }
 
 impl TextLayoutCache {
+    fn get(&self, hash: u64, query: &TextLayoutQuery<'_>) -> Option<&Arc<TextLayout>> {
+        self.buckets
+            .get(&hash)?
+            .iter()
+            .find(|(key, _)| key.matches(query))
+            .map(|(_, layout)| layout)
+    }
+
     /// Evicts oldest entries until both the entry count and the retained byte
     /// budget can accept `incoming_bytes` more.
     fn make_room(&mut self, incoming_bytes: usize) {
-        while !self.entries.is_empty()
-            && (self.entries.len() >= TEXT_LAYOUT_CACHE_CAPACITY
+        while !self.order.is_empty()
+            && (self.entries >= TEXT_LAYOUT_CACHE_CAPACITY
                 || self.bytes.saturating_add(incoming_bytes) > TEXT_LAYOUT_CACHE_BYTE_BUDGET)
         {
-            if let Some((key, layout)) = self.entries.pop_front() {
-                self.bytes = self
-                    .bytes
-                    .saturating_sub(key.text.capacity() + layout.retained_bytes());
-                self.evictions = self.evictions.saturating_add(1);
+            let hash = self
+                .order
+                .pop_front()
+                .expect("a non-empty order yields a hash");
+            let bucket = self
+                .buckets
+                .get_mut(&hash)
+                .expect("a queued hash retains a bucket");
+            let (key, layout) = bucket.remove(0);
+            self.bytes = self
+                .bytes
+                .saturating_sub(key.text.capacity() + layout.retained_bytes());
+            self.entries -= 1;
+            self.evictions = self.evictions.saturating_add(1);
+            if bucket.is_empty() {
+                self.buckets.remove(&hash);
             }
         }
+    }
+
+    fn insert(&mut self, hash: u64, key: TextLayoutKey, layout: Arc<TextLayout>) {
+        let bytes = key.text.capacity() + layout.retained_bytes();
+        self.make_room(bytes);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.entries += 1;
+        self.buckets.entry(hash).or_default().push((key, layout));
+        self.order.push_back(hash);
     }
 }
 
@@ -729,7 +833,7 @@ impl FontdueTextShaper {
             hits: cache.hits,
             misses: cache.misses,
             evictions: cache.evictions,
-            entries: cache.entries.len(),
+            entries: cache.entries,
             retained_bytes: cache.bytes,
         }
     }
@@ -779,24 +883,20 @@ impl FontdueTextShaper {
 
 impl FontdueTextShaper {
     fn cached_layout(&self, text: &str, style: &TextStyle, width: Option<f32>) -> TextLayout {
-        let key = TextLayoutKey {
-            text: text.to_owned(),
-            font: style.font().clone(),
+        let query = TextLayoutQuery {
+            text,
+            font: style.font(),
             width: width.map(f32::to_bits),
             dpi: self.dpi.to_bits(),
             generation: self.layout_generation,
         };
+        let hash = layout_request_hash(&query);
         {
             let mut cache = self
                 .layouts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let hit = cache
-                .entries
-                .iter()
-                .find(|(entry, _)| entry == &key)
-                .map(|(_, layout)| Arc::clone(layout));
-            if let Some(layout) = hit {
+            if let Some(layout) = cache.get(hash, &query).map(Arc::clone) {
                 cache.hits = cache.hits.saturating_add(1);
                 // Cloning shares the shaped geometry; only the color differs.
                 return layout.as_ref().clone().with_color(style.color());
@@ -808,15 +908,19 @@ impl FontdueTextShaper {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.misses = cache.misses.saturating_add(1);
-        if let Some((_, existing)) = cache.entries.iter().find(|(entry, _)| entry == &key) {
-            let existing = Arc::clone(existing);
+        if let Some(existing) = cache.get(hash, &query).map(Arc::clone) {
             cache.hits = cache.hits.saturating_add(1);
             return existing.as_ref().clone().with_color(style.color());
         }
-        let bytes = key.text.capacity() + layout.retained_bytes();
-        cache.make_room(bytes);
-        cache.bytes = cache.bytes.saturating_add(bytes);
-        cache.entries.push_back((key, Arc::clone(&layout)));
+        // Only a miss owns the query text; hits compare against the stored key.
+        let key = TextLayoutKey {
+            text: text.to_owned(),
+            font: style.font().clone(),
+            width: query.width,
+            dpi: query.dpi,
+            generation: query.generation,
+        };
+        cache.insert(hash, key, Arc::clone(&layout));
         layout.as_ref().clone().with_color(style.color())
     }
 
@@ -1487,6 +1591,29 @@ mod tests {
         assert!(Arc::ptr_eq(&black.glyph_runs, &white.glyph_runs));
         assert!(Arc::ptr_eq(&black.clusters, &white.clusters));
         assert!(stats.retained_bytes > 0);
+    }
+
+    #[test]
+    fn layout_cache_resolves_long_documents_by_hash() {
+        let shaper = FontdueTextShaper::new(FontFace::ubuntu_light());
+        let style = TextStyle::new(16.0, Color::BLACK);
+        // A large editor buffer must hit the cache without copying the query
+        // text and without scanning every retained entry. The document stays
+        // under the byte budget so the warm-cache checks below keep it.
+        let document = "the quick brown fox jumps over the lazy dog. ".repeat(1024);
+        let first = shaper.layout(&document, &style, Some(240.0));
+        let second = shaper.layout(&document, &style, Some(240.0));
+        let stats = shaper.cache_stats();
+
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(first.size(), second.size());
+        assert!(Arc::ptr_eq(&first.glyph_runs, &second.glyph_runs));
+
+        // Distinct texts keep distinct entries even when the cache is warm.
+        let _ = shaper.layout("a different label", &style, None);
+        assert_eq!(shaper.cache_stats().entries, 2);
     }
 
     #[test]
