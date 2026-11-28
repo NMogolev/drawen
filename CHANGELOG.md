@@ -4,6 +4,39 @@ Drawen follows [Semantic Versioning](https://semver.org/). Calendar dates appear
 in the headings because the version itself must stay valid semver; see
 [`docs/RELEASING.md`](docs/RELEASING.md) for the full policy.
 
+## Unreleased
+
+### Performance
+
+- The GPU renderer reuses persistent vertex buffers across frames instead of
+  allocating a fresh buffer per batch, and its glyph atlas starts at 512×512
+  (1 MiB) and doubles on demand up to 2048×2048 rather than allocating 16 MiB
+  up front.
+- Evicted GPU image textures are recycled through a bounded 32 MiB pool, so
+  dynamic content such as `CubeXView` and video re-uploads into the same
+  allocation instead of creating and destroying a texture every frame.
+  Textures retired mid-frame are only reused after the next frame boundary.
+- `GpuRenderer::set_cache_budgets` makes the raster image, text bitmap, and
+  texture pool byte budgets configurable; `GpuRenderer::cache_stats` reports
+  cache occupancy and the current atlas size.
+- `Image` and `ImageViewer` accept `impl Into<Arc<RasterImage>>`, so many
+  widgets can display one shared pixel allocation and the GPU backend uploads
+  a single texture for all of them.
+- Cloning a `TextLayout` shares the shaped geometry behind `Arc`, making cache
+  hits and recoloring allocation-free. The layout cache is bounded by 256
+  entries and a 4 MiB byte budget; each font face's glyph raster cache by 512
+  glyph-size pairs and a 2 MiB budget. `TextLayoutCacheStats::retained_bytes`
+  and `FontFace::raster_cache_stats` expose the cost.
+- System font fallback is fully lazy: `discover_system_fallbacks` defers even
+  the installed-font scan until the first uncovered character, and coverage
+  probes borrow font data instead of copying multi-megabyte faces.
+  `SystemFallbackStats` reports indexed and loaded faces and retained bytes.
+- The environment's resolved-style memo is capped at 1024 targets, so churning
+  widget ids cannot grow it without limit.
+- `style_showcase` mounts pages lazily on first activation and its media
+  animation plays once, so an idle showcase schedules no frames; a regression
+  test asserts every page goes idle without input.
+
 ## 0.4.0 - 2026-11-28
 
 ### Performance

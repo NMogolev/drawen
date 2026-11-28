@@ -69,6 +69,18 @@ can pass it to the backend.
   texture, forcing one full frame. Composed text bitmaps are cached in a
   16 MiB LRU keyed by `TextLayout::identity`, color, and scale, so unchanged
   labels skip CPU glyph compositing on every rasterized frame.
+
+  GPU allocations are persistent or recycled, never per-frame: vertex buffers
+  grow on demand and are rewritten in place; the glyph atlas starts at 512×512
+  and doubles only when a frame's text no longer fits (up to 2048×2048);
+  raster images live in a 64 MiB LRU, and evicted textures wait in a 32 MiB
+  reuse pool so dynamic content (3D views, video) re-uploads into the same
+  allocation instead of recreating a texture every frame. A texture retired
+  during a frame is only reused after the next frame boundary, so earlier
+  draws in the same frame keep sampling the old pixels.
+  `GpuRenderer::set_cache_budgets` tunes the three byte budgets, and
+  `GpuRenderer::cache_stats` reports entries, retained bytes, pool occupancy,
+  and the current atlas size for profiling.
 - **Software (`drawen-software`)**: `render_with_damage` resets the reported
   pixels and repaints them under a clip aligned to the cleared pixel span.
   Commands outside the region are skipped entirely. This is the backend the

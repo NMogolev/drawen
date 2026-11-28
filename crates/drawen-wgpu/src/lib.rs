@@ -29,6 +29,10 @@ pub use wgpu;
 const TEXT_ATLAS_INITIAL_SIZE: u32 = 512;
 const TEXT_ATLAS_MAX_SIZE: u32 = 2048;
 const RASTER_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+// Evicted image textures wait here for reuse instead of being destroyed and
+// reallocated, which keeps dynamic content (3D views, video) from churning
+// GPU memory every frame.
+const IMAGE_TEXTURE_POOL_BYTES: usize = 32 * 1024 * 1024;
 // Composed text bitmaps are small but numerous; 16 MiB holds a full window of
 // labels several times over while staying far below the raster image budget.
 const TEXT_BITMAP_CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -351,6 +355,49 @@ impl fmt::Display for GpuRendererError {
 
 impl std::error::Error for GpuRendererError {}
 
+/// Byte budgets for the renderer's GPU-backed caches.
+///
+/// Each budget caps the pixels retained by one cache. The defaults balance a
+/// typical desktop window; see [`GpuRenderer::set_cache_budgets`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuCacheBudgets {
+    /// Pixels retained by the raster image LRU before eviction.
+    pub raster_image_bytes: usize,
+    /// Pixels retained by the composed text bitmap LRU before eviction.
+    pub text_bitmap_bytes: usize,
+    /// Pixels held by the recycled image texture pool.
+    pub texture_pool_bytes: usize,
+}
+
+impl Default for GpuCacheBudgets {
+    fn default() -> Self {
+        Self {
+            raster_image_bytes: RASTER_IMAGE_CACHE_BYTES,
+            text_bitmap_bytes: TEXT_BITMAP_CACHE_BYTES,
+            texture_pool_bytes: IMAGE_TEXTURE_POOL_BYTES,
+        }
+    }
+}
+
+/// A snapshot of the renderer's GPU cache occupancy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuCacheStats {
+    /// Number of raster images currently cached.
+    pub raster_image_entries: usize,
+    /// Pixel bytes retained by the raster image cache.
+    pub raster_image_bytes: usize,
+    /// Number of composed text bitmaps currently cached.
+    pub text_bitmap_entries: usize,
+    /// Pixel bytes retained by the text bitmap cache.
+    pub text_bitmap_bytes: usize,
+    /// Pixel bytes held by the recycled texture pool, ready for reuse.
+    pub texture_pool_bytes: usize,
+    /// Pixel bytes of the single oversized image kept outside the LRU.
+    pub oversized_image_bytes: usize,
+    /// Current edge length of the square glyph atlas in pixels.
+    pub text_atlas_size: u32,
+}
+
 /// A `wgpu` display-list renderer attached to one native surface.
 pub struct GpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -370,6 +417,7 @@ pub struct GpuRenderer {
     // Larger than the LRU budget but still worth retaining: a 4K video frame
     // would otherwise be re-uploaded over PCIe on every single frame.
     oversized_image: Option<OversizedRasterImage>,
+    image_textures: TexturePool<ExternalTexture>,
     max_texture_dimension_2d: u32,
     text_bitmaps: TextBitmapCache,
     // Swapchain images rotate, so partial damage cannot load the previous
@@ -518,6 +566,7 @@ impl GpuRenderer {
             external_textures: HashMap::new(),
             raster_images: RasterImageCache::default(),
             oversized_image: None,
+            image_textures: TexturePool::new(IMAGE_TEXTURE_POOL_BYTES),
             max_texture_dimension_2d,
             text_bitmaps: TextBitmapCache::default(),
             retained_frame: None,
@@ -578,7 +627,7 @@ impl GpuRenderer {
         self.external_textures.insert(
             id,
             ExternalTexture {
-                _texture: texture.clone(),
+                texture: texture.clone(),
                 _view: view,
                 _sampler: sampler,
                 bind_group,
@@ -609,6 +658,42 @@ impl GpuRenderer {
         // must be rasterized in full.
         self.retained_frame = None;
         Ok(())
+    }
+
+    /// Overrides the GPU cache budgets and trims any cache now over its limit.
+    ///
+    /// The defaults suit a desktop window; memory-constrained targets can lower
+    /// them, and image-heavy applications can raise the raster budget to keep
+    /// more pictures resident. Lowering a budget evicts immediately, retiring
+    /// the freed textures to the reuse pool.
+    pub fn set_cache_budgets(&mut self, budgets: GpuCacheBudgets) {
+        self.raster_images.budget = budgets.raster_image_bytes;
+        self.text_bitmaps.budget = budgets.text_bitmap_bytes;
+        self.image_textures.budget = budgets.texture_pool_bytes;
+        self.raster_images.evict_for(0, &mut self.image_textures);
+        self.text_bitmaps.evict_over_budget();
+        self.image_textures.trim();
+    }
+
+    /// Returns a snapshot of GPU cache occupancy for profiling.
+    ///
+    /// Byte counts describe retained CPU-side pixels and pooled GPU textures;
+    /// they let an application watch cache pressure the same way
+    /// `UiRuntime::stats` exposes layout and paint work.
+    #[must_use]
+    pub fn cache_stats(&self) -> GpuCacheStats {
+        GpuCacheStats {
+            raster_image_entries: self.raster_images.entries.len(),
+            raster_image_bytes: self.raster_images.bytes,
+            text_bitmap_entries: self.text_bitmaps.entries.len(),
+            text_bitmap_bytes: self.text_bitmaps.bytes,
+            texture_pool_bytes: self.image_textures.bytes(),
+            oversized_image_bytes: self
+                .oversized_image
+                .as_ref()
+                .map_or(0, |cached| cached.image.pixels().len()),
+            text_atlas_size: self.text_atlas_size,
+        }
     }
 
     /// Renders `display_list` at `scale_factor` logical-to-physical scaling.
@@ -701,6 +786,9 @@ impl GpuRenderer {
         if self.retained_frame.is_none() {
             self.retained_frame = Some(self.create_retained_frame());
         }
+        // The previous frame has been submitted, so textures it retired can
+        // now be re-uploaded in place instead of reallocating GPU memory.
+        self.image_textures.recycle();
         let (retained_view, retained_bind_group) = {
             let retained = self
                 .retained_frame
@@ -1049,48 +1137,49 @@ impl GpuRenderer {
                 batch.bind_groups.push(None);
                 continue;
             }
-            let bind_group =
-                self.raster_image_bind_group(key, &image.image, &mut batch.transient_textures);
+            let bind_group = self.raster_image_bind_group(key, &image.image);
             batch.bind_groups.push(Some(bind_group));
         }
         batch
     }
 
-    fn raster_image_bind_group(
-        &mut self,
-        key: usize,
-        image: &Arc<RasterImage>,
-        transient: &mut Vec<ExternalTexture>,
-    ) -> wgpu::BindGroup {
+    fn raster_image_bind_group(&mut self, key: usize, image: &Arc<RasterImage>) -> wgpu::BindGroup {
         if let Some(bind_group) = self.raster_images.get(key) {
             return bind_group;
         }
         let byte_count = image.pixels().len();
-        if byte_count > RASTER_IMAGE_CACHE_BYTES {
+        if byte_count > self.raster_images.budget {
             if let Some(cached) = &self.oversized_image
                 && Arc::ptr_eq(&cached.image, image)
             {
                 return cached.texture.bind_group.clone();
             }
-            let texture = self.create_raster_image_texture(image);
+            let texture = self.image_texture(image);
             let bind_group = texture.bind_group.clone();
-            // The replaced texture may still be referenced by an operation
-            // earlier in this frame, so keep it alive until submission.
+            // The replaced texture may still be sampled by an operation earlier
+            // in this frame, so retire it to the pool instead of reusing it now;
+            // it becomes reusable at the next frame boundary.
             if let Some(previous) = self.oversized_image.replace(OversizedRasterImage {
                 image: Arc::clone(image),
                 texture,
             }) {
-                transient.push(previous.texture);
+                self.image_textures.give(
+                    previous.image.width(),
+                    previous.image.height(),
+                    previous.image.pixels().len(),
+                    previous.texture,
+                );
             }
             return bind_group;
         }
-        let texture = self.create_raster_image_texture(image);
+        let texture = self.image_texture(image);
         let bind_group = texture.bind_group.clone();
-        self.raster_images.evict_for(byte_count);
+        self.raster_images
+            .evict_for(byte_count, &mut self.image_textures);
         self.raster_images.insert(
             key,
             CachedRasterImage {
-                _image: Arc::clone(image),
+                image: Arc::clone(image),
                 texture,
                 byte_count,
                 last_used: 0,
@@ -1122,9 +1211,15 @@ impl GpuRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        self.upload_raster_image(&texture, image);
+        self.create_external_texture(texture, "Drawen raster image sampler")
+    }
+
+    /// Uploads pixels into an existing texture of matching dimensions.
+    fn upload_raster_image(&self, texture: &wgpu::Texture, image: &RasterImage) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -1141,7 +1236,16 @@ impl GpuRenderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.create_external_texture(texture, "Drawen raster image sampler")
+    }
+
+    /// Returns a texture holding `image`, reusing a pooled allocation when one
+    /// of the same dimensions was retired by an earlier frame.
+    fn image_texture(&mut self, image: &RasterImage) -> ExternalTexture {
+        if let Some(pooled) = self.image_textures.take(image.width(), image.height()) {
+            self.upload_raster_image(&pooled.texture, image);
+            return pooled;
+        }
+        self.create_raster_image_texture(image)
     }
 
     fn create_external_texture(
@@ -1171,7 +1275,7 @@ impl GpuRenderer {
             ],
         });
         ExternalTexture {
-            _texture: texture,
+            texture,
             _view: view,
             _sampler: sampler,
             bind_group,
@@ -1417,7 +1521,7 @@ enum VertexBuffer {
 }
 
 struct ExternalTexture {
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
     _view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
@@ -1426,7 +1530,7 @@ struct ExternalTexture {
 struct CachedRasterImage {
     // The pointer is the cache key. Keeping this Arc alive prevents allocator
     // address reuse from associating a new image with this entry's GPU texture.
-    _image: Arc<RasterImage>,
+    image: Arc<RasterImage>,
     texture: ExternalTexture,
     byte_count: usize,
     last_used: u64,
@@ -1439,12 +1543,24 @@ struct OversizedRasterImage {
     texture: ExternalTexture,
 }
 
-#[derive(Default)]
 struct RasterImageCache {
     entries: HashMap<usize, CachedRasterImage>,
     recency: BTreeSet<(u64, usize)>,
     bytes: usize,
+    budget: usize,
     next_access: u64,
+}
+
+impl Default for RasterImageCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: BTreeSet::new(),
+            bytes: 0,
+            budget: RASTER_IMAGE_CACHE_BYTES,
+            next_access: 0,
+        }
+    }
 }
 
 impl RasterImageCache {
@@ -1479,8 +1595,8 @@ impl RasterImageCache {
         self.entries.insert(key, image);
     }
 
-    fn evict_for(&mut self, incoming_bytes: usize) {
-        while self.bytes.saturating_add(incoming_bytes) > RASTER_IMAGE_CACHE_BYTES {
+    fn evict_for(&mut self, incoming_bytes: usize, pool: &mut TexturePool<ExternalTexture>) {
+        while self.bytes.saturating_add(incoming_bytes) > self.budget {
             let Some(&(_, key)) = self.recency.first() else {
                 break;
             };
@@ -1495,12 +1611,91 @@ impl RasterImageCache {
                 .remove(&key)
                 .expect("cache entry selected for eviction");
             self.bytes = self.bytes.saturating_sub(image.byte_count);
+            pool.give(
+                image.image.width(),
+                image.image.height(),
+                image.byte_count,
+                image.texture,
+            );
         }
     }
 
     fn record_access(&mut self) -> u64 {
         self.next_access = self.next_access.wrapping_add(1);
         self.next_access
+    }
+}
+
+/// A bounded recycling pool for GPU image textures.
+///
+/// Dynamic content (3D views, video, procedural animations) produces a new
+/// `Arc<RasterImage>` every frame, so the image LRU evicts continuously.
+/// Destroying and recreating a texture for each of those frames churns GPU
+/// memory; instead, evicted textures wait here and are re-uploaded in place
+/// when a later frame needs the same dimensions.
+///
+/// Items given during a frame stay pending until [`Self::recycle`] runs at
+/// the next frame boundary: an earlier operation in the same frame may still
+/// sample the old pixels, so reuse must never happen mid-frame.
+struct TexturePool<T> {
+    available: Vec<(u32, u32, usize, T)>,
+    pending: Vec<(u32, u32, usize, T)>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl<T> TexturePool<T> {
+    fn new(budget: usize) -> Self {
+        Self {
+            available: Vec::new(),
+            pending: Vec::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    /// Makes last frame's retired textures reusable and enforces the budget.
+    fn recycle(&mut self) {
+        self.available.append(&mut self.pending);
+        self.trim();
+    }
+
+    /// Takes a reusable texture of exactly `width`×`height`, if present.
+    fn take(&mut self, width: u32, height: u32) -> Option<T> {
+        let index = self
+            .available
+            .iter()
+            .position(|&(w, h, _, _)| w == width && h == height)?;
+        let (_, _, byte_count, item) = self.available.remove(index);
+        self.bytes = self.bytes.saturating_sub(byte_count);
+        Some(item)
+    }
+
+    /// Retires a texture until the next frame boundary.
+    fn give(&mut self, width: u32, height: u32, byte_count: usize, item: T) {
+        self.bytes = self.bytes.saturating_add(byte_count);
+        self.pending.push((width, height, byte_count, item));
+        self.trim();
+    }
+
+    /// Total bytes held by reusable and pending textures.
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Drops oldest textures while over budget. Dropping is always safe —
+    /// wgpu keeps submitted work alive — only mid-frame *reuse* is not.
+    fn trim(&mut self) {
+        while self.bytes > self.budget {
+            let entry = if !self.available.is_empty() {
+                self.available.remove(0)
+            } else if !self.pending.is_empty() {
+                self.pending.remove(0)
+            } else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(entry.2);
+        }
     }
 }
 
@@ -1614,8 +1809,6 @@ struct ImageBatch {
     // Image identity for bind-group caching. Two operations that draw the same
     // Arc share a key and therefore share one `set_bind_group` call.
     keys: Vec<usize>,
-    // Keeps uncached large textures alive until the render pass is submitted.
-    transient_textures: Vec<ExternalTexture>,
 }
 
 struct PreparedFrame {
@@ -2635,9 +2828,40 @@ mod tests {
     use super::{
         CachedTextBitmap, DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation,
         PreparedText, Scissor, TEXT_ATLAS_INITIAL_SIZE, TEXT_ATLAS_MAX_SIZE, TEXTURE_SHADER,
-        TextBatch, TextBitmapCache, TextVertex, TextureId, plan_text_placements,
+        TextBatch, TextBitmapCache, TextVertex, TextureId, TexturePool, plan_text_placements,
         raster_image_fits_device, restrict_to_damage, source_over_alpha, vertex_buffer_capacity,
     };
+
+    #[test]
+    fn texture_pool_reuses_retired_textures_only_after_recycle() {
+        let mut pool = TexturePool::new(1024 * 1024);
+        pool.give(64, 64, 16_384, "first");
+        // Same-frame reuse would corrupt draws that still sample the old pixels.
+        assert!(pool.take(64, 64).is_none());
+        pool.recycle();
+        assert_eq!(pool.take(64, 64), Some("first"));
+        assert!(pool.take(64, 64).is_none());
+        assert_eq!(pool.bytes(), 0);
+    }
+
+    #[test]
+    fn texture_pool_matches_dimensions_and_trims_over_budget() {
+        let mut pool = TexturePool::new(32_768);
+        pool.give(64, 64, 16_384, "a");
+        pool.give(32, 32, 4096, "b");
+        pool.recycle();
+        assert!(pool.take(128, 128).is_none());
+        assert_eq!(pool.take(32, 32), Some("b"));
+
+        // Retiring beyond the budget drops the oldest reusable texture first.
+        pool.give(64, 64, 16_384, "c");
+        pool.give(64, 64, 16_384, "d");
+        pool.recycle();
+        assert!(pool.bytes() <= 32_768);
+        assert_eq!(pool.take(64, 64), Some("c"));
+        assert_eq!(pool.take(64, 64), Some("d"));
+        assert_eq!(pool.bytes(), 0);
+    }
 
     fn prepared_text(width: u32, height: u32) -> PreparedText {
         let bytes = usize::try_from(width * height * 4).expect("small test bitmap");

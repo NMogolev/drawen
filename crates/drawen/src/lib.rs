@@ -216,7 +216,9 @@ pub mod gpu {
     /// Applications can use this re-export instead of adding a direct
     /// dependency, which keeps texture and device types compatible.
     pub use drawen_wgpu::wgpu;
-    pub use drawen_wgpu::{GpuError, GpuRenderer, GpuRendererError, RenderStatus};
+    pub use drawen_wgpu::{
+        GpuCacheBudgets, GpuCacheStats, GpuError, GpuRenderer, GpuRendererError, RenderStatus,
+    };
 }
 
 /// The `CubeX` software 3D engine and its Drawen view.
