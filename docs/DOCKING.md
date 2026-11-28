@@ -54,7 +54,10 @@ transactional `move_floating_panel`, `resize_floating_panel`,
 `bring_panel_to_front` operations and the corresponding document variants.
 Every operation validates the tree, normalizes it, and preserves each ID at most
 once. The application requests the next layout and chooses when to persist the
-updated model.
+updated model. Transactions clone the layout, but split branches are shared
+behind `Arc`: unchanged subtrees are never deep-copied, so floating drags and
+z-order changes only copy the records they touch, and a dock mutation copies
+just the path from the root to the edited node.
 
 Normalization is an internal step of every successful transaction. An empty
 `Split` branch is replaced by its surviving branch, and a `Tabs` group with one

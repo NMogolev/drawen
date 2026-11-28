@@ -16,5 +16,5 @@ default = ["serde"]
 serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde = { version = "1.0.229", features = ["derive", "rc"], optional = true }
 serde_json = { version = "1.0.149", optional = true }

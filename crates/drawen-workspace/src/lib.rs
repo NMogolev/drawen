@@ -4,7 +4,7 @@
 //! owns only serializable placement data and validates every mutation before it
 //! replaces the current layout.
 
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, fmt, sync::Arc};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -219,6 +219,10 @@ pub struct FloatingDocument {
 }
 
 /// A node in the docked workspace tree.
+///
+/// Split branches are shared behind [`Arc`]: cloning a layout for a transaction
+/// copies only the top-level node, and a mutation copies just the path it
+/// touches, so floating drags and z-order changes never deep-copy the tree.
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayoutNode {
@@ -228,10 +232,10 @@ pub enum LayoutNode {
         axis: DockAxis,
         /// Normalized first-branch proportion, in the inclusive `0.1..=0.9` range.
         ratio: f32,
-        /// First branch.
-        first: Box<Self>,
-        /// Second branch.
-        second: Box<Self>,
+        /// First branch, shared with unchanged copies of the layout.
+        first: Arc<Self>,
+        /// Second branch, shared with unchanged copies of the layout.
+        second: Arc<Self>,
     },
     /// An ordered group of dock tabs.
     Tabs {
@@ -268,8 +272,8 @@ impl LayoutNode {
         Self::Split {
             axis,
             ratio: normalize_ratio(ratio),
-            first: Box::new(first),
-            second: Box::new(second),
+            first: Arc::new(first),
+            second: Arc::new(second),
         }
     }
 
@@ -826,8 +830,10 @@ impl WorkspaceLayout {
     ///
     /// Returns an error when any workspace invariant is violated.
     pub fn validate(&self) -> Result<(), WorkspaceError> {
-        let mut panels = HashSet::new();
-        let mut documents = HashSet::new();
+        // Borrowed identifiers: validation walks the shared tree without
+        // copying a single ID; only a failing check clones for the error.
+        let mut panels: HashSet<&PanelId> = HashSet::new();
+        let mut documents: HashSet<&DocumentId> = HashSet::new();
         let mut document_areas = 0;
         validate_node(&self.root, &mut panels, &mut documents, &mut document_areas)?;
         if document_areas > 1 {
@@ -854,6 +860,11 @@ impl WorkspaceLayout {
         normalize_z_order(&mut self.freeform_documents);
     }
 
+    /// Runs `operation` on a candidate copy and commits it only when the
+    /// result normalizes and validates; a failure leaves `self` untouched.
+    ///
+    /// The candidate clone is cheap: split branches are shared behind [`Arc`],
+    /// so only the records an operation actually edits are copied.
     fn apply_transaction(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<(), WorkspaceError>,
@@ -1030,6 +1041,34 @@ fn normalize_ratio(ratio: f32) -> f32 {
     }
 }
 
+/// Reports whether [`normalize_node`] would change `node` or any descendant.
+/// Normalized trees answer `false`, so ordinary transactions traverse the
+/// shared tree read-only without copying a single branch.
+fn node_needs_normalize(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            !ratio.is_finite()
+                || !(MIN_SPLIT_RATIO..=MAX_SPLIT_RATIO).contains(ratio)
+                || matches!(first.as_ref(), LayoutNode::Empty)
+                || matches!(second.as_ref(), LayoutNode::Empty)
+                || node_needs_normalize(first)
+                || node_needs_normalize(second)
+        }
+        LayoutNode::Tabs { items, active } => {
+            items.len() <= 1 || active.as_ref().is_none_or(|id| !items.contains(id))
+        }
+        LayoutNode::Documents { items, active, .. } => {
+            active.as_ref().is_none_or(|id| !items.contains(id))
+        }
+        LayoutNode::Panel { .. } | LayoutNode::Empty => false,
+    }
+}
+
 fn normalize_node(node: &mut LayoutNode) {
     let mut current = std::mem::replace(node, LayoutNode::Empty);
     match &mut current {
@@ -1040,14 +1079,22 @@ fn normalize_node(node: &mut LayoutNode) {
             ..
         } => {
             *ratio = normalize_ratio(*ratio);
-            normalize_node(first);
-            normalize_node(second);
+            // Copy-on-write: only branches that actually change are detached
+            // from the shared tree; the rest stay shared with the old layout.
+            if node_needs_normalize(first) {
+                normalize_node(Arc::make_mut(first));
+            }
+            if node_needs_normalize(second) {
+                normalize_node(Arc::make_mut(second));
+            }
             if matches!(first.as_ref(), LayoutNode::Empty) {
-                *node = std::mem::replace(second.as_mut(), LayoutNode::Empty);
+                *node =
+                    Arc::unwrap_or_clone(std::mem::replace(second, Arc::new(LayoutNode::Empty)));
                 return;
             }
             if matches!(second.as_ref(), LayoutNode::Empty) {
-                *node = std::mem::replace(first.as_mut(), LayoutNode::Empty);
+                *node =
+                    Arc::unwrap_or_clone(std::mem::replace(first, Arc::new(LayoutNode::Empty)));
                 return;
             }
         }
@@ -1077,10 +1124,10 @@ fn normalize_node(node: &mut LayoutNode) {
     *node = current;
 }
 
-fn validate_node(
-    node: &LayoutNode,
-    panels: &mut HashSet<PanelId>,
-    documents: &mut HashSet<DocumentId>,
+fn validate_node<'a>(
+    node: &'a LayoutNode,
+    panels: &mut HashSet<&'a PanelId>,
+    documents: &mut HashSet<&'a DocumentId>,
     document_areas: &mut u32,
 ) -> Result<(), WorkspaceError> {
     match node {
@@ -1123,17 +1170,20 @@ fn validate_node(
     Ok(())
 }
 
-fn insert_unique_panel(ids: &mut HashSet<PanelId>, id: &PanelId) -> Result<(), WorkspaceError> {
-    ids.insert(id.clone())
+fn insert_unique_panel<'a>(
+    ids: &mut HashSet<&'a PanelId>,
+    id: &'a PanelId,
+) -> Result<(), WorkspaceError> {
+    ids.insert(id)
         .then_some(())
         .ok_or_else(|| WorkspaceError::DuplicatePanel(id.clone()))
 }
 
-fn insert_unique_document(
-    ids: &mut HashSet<DocumentId>,
-    id: &DocumentId,
+fn insert_unique_document<'a>(
+    ids: &mut HashSet<&'a DocumentId>,
+    id: &'a DocumentId,
 ) -> Result<(), WorkspaceError> {
-    ids.insert(id.clone())
+    ids.insert(id)
         .then_some(())
         .ok_or_else(|| WorkspaceError::DuplicateDocument(id.clone()))
 }
@@ -1148,8 +1198,11 @@ fn split_at_panel(
 ) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            split_at_panel(first, target, panel.clone(), axis, ratio, placement)
-                || split_at_panel(second, target, panel, axis, ratio, placement)
+            if contains_panel(first, target) {
+                split_at_panel(Arc::make_mut(first), target, panel, axis, ratio, placement)
+            } else {
+                split_at_panel(Arc::make_mut(second), target, panel, axis, ratio, placement)
+            }
         }
         LayoutNode::Panel { id } if id == target => {
             let existing = std::mem::replace(node, LayoutNode::Empty);
@@ -1179,7 +1232,11 @@ fn split_at_panel(
 fn tab_with_panel(node: &mut LayoutNode, target: &PanelId, panel: PanelId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            tab_with_panel(first, target, panel.clone()) || tab_with_panel(second, target, panel)
+            if contains_panel(first, target) {
+                tab_with_panel(Arc::make_mut(first), target, panel)
+            } else {
+                tab_with_panel(Arc::make_mut(second), target, panel)
+            }
         }
         LayoutNode::Tabs { items, active } if items.contains(target) => {
             items.push(panel.clone());
@@ -1207,7 +1264,11 @@ fn tab_with_panel(node: &mut LayoutNode, target: &PanelId, panel: PanelId) -> bo
 fn detach_panel_from_node(node: &mut LayoutNode, panel: &PanelId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            detach_panel_from_node(first, panel) || detach_panel_from_node(second, panel)
+            if contains_panel(first, panel) {
+                detach_panel_from_node(Arc::make_mut(first), panel)
+            } else {
+                detach_panel_from_node(Arc::make_mut(second), panel)
+            }
         }
         LayoutNode::Tabs { items, active } => {
             let Some(index) = items.iter().position(|id| id == panel) else {
@@ -1246,7 +1307,11 @@ fn take_panel(items: &mut Vec<FloatingPanel>, target: &PanelId) -> bool {
 fn activate_panel(node: &mut LayoutNode, panel: &PanelId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            activate_panel(first, panel) || activate_panel(second, panel)
+            if contains_panel(first, panel) {
+                activate_panel(Arc::make_mut(first), panel)
+            } else {
+                activate_panel(Arc::make_mut(second), panel)
+            }
         }
         LayoutNode::Tabs { items, active } if items.contains(panel) => {
             *active = Some(panel.clone());
@@ -1268,13 +1333,16 @@ fn resize_split_for_panel(node: &mut LayoutNode, panel: &PanelId, ratio: f32) ->
         return false;
     };
 
-    if contains_panel(first, panel) || contains_panel(second, panel) {
-        if resize_split_for_panel(first, panel, ratio)
-            || resize_split_for_panel(second, panel, ratio)
-        {
-            return true;
+    if contains_panel(first, panel) {
+        if !resize_split_for_panel(Arc::make_mut(first), panel, ratio) {
+            *split_ratio = normalize_ratio(ratio);
         }
-        *split_ratio = normalize_ratio(ratio);
+        return true;
+    }
+    if contains_panel(second, panel) {
+        if !resize_split_for_panel(Arc::make_mut(second), panel, ratio) {
+            *split_ratio = normalize_ratio(ratio);
+        }
         return true;
     }
     false
@@ -1291,10 +1359,34 @@ fn contains_panel(node: &LayoutNode, panel: &PanelId) -> bool {
     }
 }
 
+fn contains_document(node: &LayoutNode, document: &DocumentId) -> bool {
+    match node {
+        LayoutNode::Split { first, second, .. } => {
+            contains_document(first, document) || contains_document(second, document)
+        }
+        LayoutNode::Documents { items, .. } => items.contains(document),
+        LayoutNode::Tabs { .. } | LayoutNode::Panel { .. } | LayoutNode::Empty => false,
+    }
+}
+
+fn contains_document_area(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Split { first, second, .. } => {
+            contains_document_area(first) || contains_document_area(second)
+        }
+        LayoutNode::Documents { .. } => true,
+        LayoutNode::Tabs { .. } | LayoutNode::Panel { .. } | LayoutNode::Empty => false,
+    }
+}
+
 fn detach_document(node: &mut LayoutNode, document: &DocumentId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            detach_document(first, document) || detach_document(second, document)
+            if contains_document(first, document) {
+                detach_document(Arc::make_mut(first), document)
+            } else {
+                detach_document(Arc::make_mut(second), document)
+            }
         }
         LayoutNode::Documents { items, active, .. } => {
             let Some(index) = items.iter().position(|item| item == document) else {
@@ -1321,7 +1413,11 @@ fn take_document(items: &mut Vec<FloatingDocument>, target: &DocumentId) -> bool
 fn insert_document(node: &mut LayoutNode, document: DocumentId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            insert_document(first, document.clone()) || insert_document(second, document)
+            if contains_document_area(first) {
+                insert_document(Arc::make_mut(first), document)
+            } else {
+                insert_document(Arc::make_mut(second), document)
+            }
         }
         LayoutNode::Documents { items, active, .. } => {
             items.push(document.clone());
@@ -1335,7 +1431,11 @@ fn insert_document(node: &mut LayoutNode, document: DocumentId) -> bool {
 fn activate_document(node: &mut LayoutNode, document: &DocumentId) -> bool {
     match node {
         LayoutNode::Split { first, second, .. } => {
-            activate_document(first, document) || activate_document(second, document)
+            if contains_document(first, document) {
+                activate_document(Arc::make_mut(first), document)
+            } else {
+                activate_document(Arc::make_mut(second), document)
+            }
         }
         LayoutNode::Documents { items, active, .. } if items.contains(document) => {
             *active = Some(document.clone());
@@ -1434,6 +1534,8 @@ impl ZOrdered for FloatingDocument {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
         DockAxis, DocumentId, FloatingPanel, LayoutNode, PanelId, SplitPlacement, WorkspaceBounds,
         WorkspaceError, WorkspaceLayout,
@@ -1535,6 +1637,117 @@ mod tests {
             matches!(layout.root(), LayoutNode::Split { ratio, .. } if (*ratio - 0.9).abs() < f32::EPSILON)
         );
         assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn floating_transactions_share_the_unchanged_dock_tree() {
+        let left = panel("left");
+        let middle = panel("middle");
+        let right = panel("right");
+        let floating = panel("floating");
+        let mut layout = WorkspaceLayout::new(LayoutNode::split(
+            DockAxis::Horizontal,
+            0.5,
+            LayoutNode::split(
+                DockAxis::Vertical,
+                0.5,
+                LayoutNode::tabs(vec![left.clone(), middle.clone()]),
+                LayoutNode::Panel { id: right.clone() },
+            ),
+            LayoutNode::Panel {
+                id: floating.clone(),
+            },
+        ))
+        .expect("initial layout is valid");
+        layout
+            .float_panel(&floating, bounds())
+            .expect("can float a panel");
+        // The empty outer branch collapses, leaving the inner split as root.
+        let LayoutNode::Split { first, second, .. } = layout.root() else {
+            panic!("the inner split survives normalization");
+        };
+        let (first, second) = (Arc::clone(first), Arc::clone(second));
+
+        layout
+            .move_floating_panel(&floating, 40.0, 50.0)
+            .expect("can move a floating panel");
+        layout
+            .bring_panel_to_front(&floating)
+            .expect("can raise a floating panel");
+
+        // Dragging and raising touch only the floating records: the dock tree
+        // is shared with the pre-transaction layout, not deep-copied.
+        let LayoutNode::Split {
+            first: new_first,
+            second: new_second,
+            ..
+        } = layout.root()
+        else {
+            panic!("the inner split survives normalization");
+        };
+        assert!(Arc::ptr_eq(&first, new_first));
+        assert!(Arc::ptr_eq(&second, new_second));
+    }
+
+    #[test]
+    fn split_resize_copies_only_the_edited_path() {
+        let first = panel("first");
+        let second = panel("second");
+        let third = panel("third");
+        let mut layout = WorkspaceLayout::new(LayoutNode::split(
+            DockAxis::Horizontal,
+            0.5,
+            LayoutNode::split(
+                DockAxis::Vertical,
+                0.5,
+                LayoutNode::Panel { id: first.clone() },
+                LayoutNode::Panel {
+                    id: second.clone(),
+                },
+            ),
+            LayoutNode::Panel { id: third },
+        ))
+        .expect("initial layout is valid");
+        let LayoutNode::Split {
+            first: first_branch,
+            second: second_branch,
+            ..
+        } = layout.root()
+        else {
+            panic!("root is a split");
+        };
+        let LayoutNode::Split {
+            first: inner_first, ..
+        } = first_branch.as_ref()
+        else {
+            panic!("the first branch is a split");
+        };
+        let (untouched_branch, untouched_leaf) =
+            (Arc::clone(second_branch), Arc::clone(inner_first));
+
+        layout
+            .resize_split_for_panel(&second, 0.7)
+            .expect("the second panel identifies the inner split");
+
+        let LayoutNode::Split {
+            first: first_branch,
+            second: second_branch,
+            ..
+        } = layout.root()
+        else {
+            panic!("root is a split");
+        };
+        assert!(Arc::ptr_eq(&untouched_branch, second_branch));
+        let LayoutNode::Split {
+            first: inner_first,
+            ratio,
+            ..
+        } = first_branch.as_ref()
+        else {
+            panic!("the first branch is a split");
+        };
+        assert!(Arc::ptr_eq(&untouched_leaf, inner_first));
+        assert!((*ratio - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
