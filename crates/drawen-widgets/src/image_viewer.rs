@@ -51,10 +51,13 @@ pub struct ImageViewer {
 
 impl ImageViewer {
     /// Creates a viewer that fits `image` inside its bounds.
+    ///
+    /// Accepts an owned [`RasterImage`] or a shared `Arc<RasterImage>` so the
+    /// same pixel allocation can serve several widgets without copying.
     #[must_use]
-    pub fn new(image: RasterImage) -> Self {
+    pub fn new(image: impl Into<Arc<RasterImage>>) -> Self {
         Self {
-            image: Arc::new(image),
+            image: image.into(),
             zoom: Self::zoom_property(1.0, DEFAULT_MIN_ZOOM, DEFAULT_MAX_ZOOM),
             minimum_zoom: DEFAULT_MIN_ZOOM,
             maximum_zoom: DEFAULT_MAX_ZOOM,
@@ -130,8 +133,10 @@ impl ImageViewer {
     }
 
     /// Replaces the displayed image and resets the pan offset.
-    pub fn set_image(&mut self, image: RasterImage) {
-        self.image = Arc::new(image);
+    ///
+    /// Accepts an owned [`RasterImage`] or a shared `Arc<RasterImage>`.
+    pub fn set_image(&mut self, image: impl Into<Arc<RasterImage>>) {
+        self.image = image.into();
         self.pan = Point::ZERO;
         self.clamp_pan();
     }

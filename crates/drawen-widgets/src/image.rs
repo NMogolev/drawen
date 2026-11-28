@@ -44,10 +44,15 @@ pub struct Image {
 
 impl Image {
     /// Creates an image widget at its intrinsic pixel dimensions.
+    ///
+    /// Accepts an owned [`RasterImage`] or a shared `Arc<RasterImage>`. Passing
+    /// the same `Arc` to several widgets keeps one pixel allocation, and the
+    /// GPU backend recognizes the shared allocation and uploads one texture
+    /// for all of them.
     #[must_use]
-    pub fn new(image: RasterImage) -> Self {
+    pub fn new(image: impl Into<Arc<RasterImage>>) -> Self {
         Self {
-            source: Arc::new(image),
+            source: image.into(),
             display_size: None,
             fit: ImageFit::Fill,
             horizontal: Alignment::Center,
@@ -59,13 +64,16 @@ impl Image {
 
     /// Creates an image widget with an explicit logical display size.
     ///
+    /// Like [`Self::new`], accepts an owned [`RasterImage`] or a shared
+    /// `Arc<RasterImage>`.
+    ///
     /// # Panics
     ///
     /// Panics when either dimension is negative or NaN.
     #[must_use]
-    pub fn with_size(image: RasterImage, width: f32, height: f32) -> Self {
+    pub fn with_size(image: impl Into<Arc<RasterImage>>, width: f32, height: f32) -> Self {
         Self {
-            source: Arc::new(image),
+            source: image.into(),
             display_size: Some(size(width, height)),
             fit: ImageFit::Fill,
             horizontal: Alignment::Center,
@@ -311,6 +319,39 @@ mod tests {
             list.commands(),
             [DisplayCommand::DrawImage { image: recorded, .. }] if recorded.as_ref() == &image
         ));
+    }
+
+    #[test]
+    fn shared_arc_sources_record_the_same_allocation() {
+        // Several widgets displaying one picture must share the pixel buffer
+        // so the GPU backend can reuse a single texture for all of them.
+        let source = Arc::new(solid(4, 4));
+        let first = Image::new(Arc::clone(&source));
+        let second = Image::with_size(Arc::clone(&source), 8.0, 8.0);
+        assert!(Arc::ptr_eq(&first.source, &second.source));
+
+        let mut runtime = UiRuntime::new(drawen_ui::Column::new());
+        let root = runtime.root();
+        runtime.append_child(root, first).expect("root exists");
+        runtime.append_child(root, second).expect("root exists");
+        let mut list = DisplayList::new();
+        runtime
+            .layout(Constraints::UNBOUNDED)
+            .expect("image layout succeeds");
+        runtime
+            .paint(&mut PaintContext::new(&mut list))
+            .expect("image paint succeeds");
+        let draws: Vec<_> = list
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DisplayCommand::DrawImage { image, .. } => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(draws.len(), 2);
+        assert!(Arc::ptr_eq(draws[0], draws[1]));
+        assert!(Arc::ptr_eq(draws[0], &source));
     }
 
     #[test]
