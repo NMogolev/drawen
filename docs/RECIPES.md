@@ -324,6 +324,9 @@ data, and measured heights survive because they are keyed by `row_key`. Use
 `list_handle.scroll_to_bottom()` after appending a new message while the user
 is already at the bottom. Rows are shaped only for the visible window; the
 construction height is the estimate for rows that have not been shaped yet.
+Measured heights and shaped visuals share one retention limit: rows evicted
+far outside the viewport fall back to the estimate on the next height rebuild,
+so a million-row history never grows memory without bound.
 
 ### Autocomplete and mentions
 

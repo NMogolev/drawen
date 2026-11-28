@@ -425,7 +425,9 @@ impl<D: VirtualDataSource> VirtualList<D> {
     /// The height passed to [`Self::new`] becomes the estimate for unmeasured
     /// rows. Visible rows wrap to the viewport width and their shaped height
     /// is retained by stable row key, so scrolling and prepending history keep
-    /// using measured extents instead of re-estimating.
+    /// using measured extents instead of re-estimating. Retention is bounded
+    /// like the visual cache: rows evicted far outside the viewport fall back
+    /// to the estimate when the height index is rebuilt.
     #[must_use]
     pub fn with_variable_heights(mut self, variable: bool) -> Self {
         self.variable = variable;
@@ -499,6 +501,12 @@ impl<D: VirtualDataSource> VirtualList<D> {
     #[must_use]
     pub fn cached_row_count(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Returns the number of measured row heights retained for variable heights.
+    #[must_use]
+    pub fn measured_row_count(&self) -> usize {
+        self.measured.len()
     }
 
     /// Sets the vertical scroll offset, clamped to the content bounds.
@@ -599,6 +607,23 @@ impl<D: VirtualDataSource> VirtualList<D> {
                 .unwrap_or(self.row_height)
         } else {
             self.row_height
+        }
+    }
+
+    /// Drops shaped visuals and measured heights beyond [`CACHE_LIMIT`],
+    /// keeping the rows currently visible. Evicted rows fall back to the
+    /// height estimate when the index is rebuilt, so a huge source never
+    /// grows retention without bound.
+    fn evict_retained_rows(&mut self) {
+        if self.cache.len() <= CACHE_LIMIT && self.measured.len() <= CACHE_LIMIT {
+            return;
+        }
+        let visible: BTreeSet<u64> = self.visible.iter().map(|row| row.key).collect();
+        if self.cache.len() > CACHE_LIMIT {
+            self.cache.retain(|key, _| visible.contains(key));
+        }
+        if self.measured.len() > CACHE_LIMIT {
+            self.measured.retain(|key, _| visible.contains(key));
         }
     }
 
@@ -843,10 +868,7 @@ impl<D: VirtualDataSource> Widget for VirtualList<D> {
         for (row, offset) in self.visible.iter_mut().zip(offsets) {
             row.y = offset - self.offset.get();
         }
-        if self.cache.len() > CACHE_LIMIT {
-            let visible: BTreeSet<u64> = self.visible.iter().map(|row| row.key).collect();
-            self.cache.retain(|key, _| visible.contains(key));
-        }
+        self.evict_retained_rows();
         LayoutResult::new(self.viewport)
     }
 
@@ -1903,6 +1925,39 @@ mod tests {
         assert_eq!(index.row_at(14.9), 0);
         assert_eq!(index.row_at(15.0), 1);
         assert_eq!(index.prefix(1), 15.0);
+    }
+
+    #[test]
+    fn measured_heights_share_the_visual_cache_retention_limit() {
+        let mut list = VirtualList::new(Rows(100_000), 20.0).with_variable_heights(true);
+        let empty = Arc::new(TextLayout::empty("", drawen_core::Color::BLACK));
+        for row in 0..(CACHE_LIMIT + 512) {
+            let key = u64::try_from(row).expect("test rows fit u64");
+            list.measured.insert(key, 24.0);
+            list.cache.insert(
+                key,
+                RowVisual {
+                    text: format!("Row {row}"),
+                    layout: Arc::clone(&empty),
+                },
+            );
+        }
+        list.visible.push(VisibleRow {
+            index: 0,
+            key: 0,
+            layout: Arc::clone(&empty),
+            y: 0.0,
+            height: 24.0,
+        });
+
+        // A million-row source must not grow the height map without bound:
+        // eviction keeps the visible rows and drops the rest, like the cache.
+        assert!(list.measured_row_count() > CACHE_LIMIT);
+        list.evict_retained_rows();
+        assert_eq!(list.measured_row_count(), 1);
+        assert_eq!(list.cached_row_count(), 1);
+        assert!(list.measured.contains_key(&0));
+        assert!(list.cache.contains_key(&0));
     }
 
     #[test]
