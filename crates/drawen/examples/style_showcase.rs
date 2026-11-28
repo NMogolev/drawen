@@ -96,33 +96,20 @@ const SHOWCASE_DSS: &str = r"
 mod idle_probe {
     use super::*;
 
+    /// Regression test for the idle render loop: every page must stop
+    /// scheduling frames once its one-shot animations have played out and no
+    /// input arrives. The media page's procedural loop used to play forever,
+    /// keeping the whole showcase at frame rate while untouched.
     #[test]
-    fn idle_showcase_schedules_no_frames() {
-        let mut app = StyleShowcase::new(0);
-        app.runtime.settle_animations();
-        assert_eq!(app.runtime.next_frame_in(), None);
-    }
-
-    #[test]
-    fn probe_every_page() {
+    fn every_page_goes_idle_without_input() {
         for page in 0..PAGE_COUNT {
             let mut app = StyleShowcase::new(page);
-            // Simulate the native loop: paint advances animations by wall time.
-            for _ in 0..8 {
-                let mut list = DisplayList::new();
-                app.runtime
-                    .paint(&mut PaintContext::new(&mut list))
-                    .expect("paint");
-                let _ = app.runtime.take_redraw_request();
-                if app.runtime.next_frame_in().is_none() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            println!(
-                "page {page}: next_frame_in={:?} damage={:?}",
+            // Advance well past the longest one-shot animation (12 × 90 ms).
+            app.runtime.advance_animations(Duration::from_secs(2));
+            assert_eq!(
                 app.runtime.next_frame_in(),
-                app.runtime.frame_damage()
+                None,
+                "page {page} keeps scheduling frames while idle"
             );
         }
     }
@@ -3599,13 +3586,14 @@ fn append_media_page(
                 anim_row,
                 AnimatedImage::new(animation_frames())
                     .with_size(120.0, 120.0)
-                    .with_label("Procedural 12-frame loop"),
+                    .with_looping(false)
+                    .with_label("Procedural 12-frame loop · plays once"),
             )
             .expect("animated row exists");
         append_label(
             runtime,
             anim_row,
-            "The animation advances through UiRuntime::tick and freezes while the window is hidden or the page is offscreen — no forced frames.",
+            "The animation advances through UiRuntime::tick, plays once, and then stops scheduling frames, so an untouched page goes idle. It also freezes while the window is hidden or the page is offscreen — no forced frames.",
             0.9,
             TextTone::Muted,
         );
