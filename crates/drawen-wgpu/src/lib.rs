@@ -23,7 +23,11 @@ use drawen_render::{DisplayCommand, DisplayList, FrameDamage, RasterImage, TextL
 /// a separate dependency whose version might not match.
 pub use wgpu;
 
-const TEXT_ATLAS_SIZE: u32 = 2048;
+// The glyph atlas starts small and doubles only when a frame's text no longer
+// fits, so a simple window never pays for a full 2048×2048 (16 MiB) allocation.
+// It never shrinks: recreating the texture on every quiet frame would churn.
+const TEXT_ATLAS_INITIAL_SIZE: u32 = 512;
+const TEXT_ATLAS_MAX_SIZE: u32 = 2048;
 const RASTER_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 // Composed text bitmaps are small but numerous; 16 MiB holds a full window of
 // labels several times over while staying far below the raster image budget.
@@ -325,7 +329,7 @@ pub enum GpuRendererError {
     /// A display list referenced a texture that was not registered with this
     /// renderer.
     UnknownTexture,
-    /// Text for a frame does not fit in the fixed-size glyph atlas.
+    /// Text for a frame does not fit in the largest supported glyph atlas.
     TextAtlasFull,
 }
 
@@ -338,7 +342,9 @@ impl fmt::Display for GpuRendererError {
             Self::UnmatchedClipPop => "display list popped an empty clip stack",
             Self::UnmatchedSave => "display list ended with an unbalanced save",
             Self::UnknownTexture => "display list referenced an unregistered GPU texture",
-            Self::TextAtlasFull => "text for this frame exceeds the 2048 by 2048 glyph atlas",
+            Self::TextAtlasFull => {
+                "text for this frame exceeds the maximum 2048 by 2048 glyph atlas"
+            }
         })
     }
 }
@@ -358,6 +364,7 @@ pub struct GpuRenderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     text_atlas: wgpu::Texture,
     text_atlas_bind_group: wgpu::BindGroup,
+    text_atlas_size: u32,
     external_textures: HashMap<TextureId, ExternalTexture>,
     raster_images: RasterImageCache,
     // Larger than the LRU budget but still worth retaining: a 4K video frame
@@ -492,41 +499,8 @@ impl GpuRenderer {
             config.format,
             &texture_bind_group_layout,
         );
-        let text_atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Drawen glyph atlas"),
-            size: wgpu::Extent3d {
-                width: TEXT_ATLAS_SIZE,
-                height: TEXT_ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let text_atlas_view = text_atlas.create_view(&wgpu::TextureViewDescriptor::default());
-        let text_atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Drawen glyph atlas sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        let text_atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Drawen glyph atlas bind group"),
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&text_atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&text_atlas_sampler),
-                },
-            ],
-        });
+        let (text_atlas, text_atlas_bind_group) =
+            create_text_atlas(&device, &texture_bind_group_layout, TEXT_ATLAS_INITIAL_SIZE);
 
         Ok(Self {
             surface,
@@ -540,6 +514,7 @@ impl GpuRenderer {
             texture_bind_group_layout,
             text_atlas,
             text_atlas_bind_group,
+            text_atlas_size: TEXT_ATLAS_INITIAL_SIZE,
             external_textures: HashMap::new(),
             raster_images: RasterImageCache::default(),
             oversized_image: None,
@@ -1203,30 +1178,34 @@ impl GpuRenderer {
         }
     }
 
-    fn create_text_batch(&self, texts: &[PreparedText]) -> Result<TextBatch, GpuRendererError> {
+    fn create_text_batch(&mut self, texts: &[PreparedText]) -> Result<TextBatch, GpuRendererError> {
+        // Find the smallest atlas that fits this frame, doubling from the
+        // current size so quiet frames keep their small allocation.
+        let mut atlas_size = self.text_atlas_size;
+        let placements = loop {
+            if let Some(placements) = plan_text_placements(texts, atlas_size) {
+                break placements;
+            }
+            if atlas_size >= TEXT_ATLAS_MAX_SIZE {
+                return Err(GpuRendererError::TextAtlasFull);
+            }
+            atlas_size *= 2;
+        };
+        if atlas_size > self.text_atlas_size {
+            let (texture, bind_group) =
+                create_text_atlas(&self.device, &self.texture_bind_group_layout, atlas_size);
+            self.text_atlas = texture;
+            self.text_atlas_bind_group = bind_group;
+            self.text_atlas_size = atlas_size;
+        }
         let mut batch = TextBatch::default();
-        let (mut cursor_x, mut cursor_y, mut row_height): (u32, u32, u32) = (0, 0, 0);
-        for text in texts {
-            if text.width > TEXT_ATLAS_SIZE || text.height > TEXT_ATLAS_SIZE {
-                return Err(GpuRendererError::TextAtlasFull);
-            }
-            if cursor_x + text.width > TEXT_ATLAS_SIZE {
-                cursor_x = 0;
-                cursor_y = cursor_y.saturating_add(row_height);
-                row_height = 0;
-            }
-            if cursor_y + text.height > TEXT_ATLAS_SIZE {
-                return Err(GpuRendererError::TextAtlasFull);
-            }
+        let atlas_extent = u32_to_f32(atlas_size);
+        for (text, &(x, y)) in texts.iter().zip(&placements) {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.text_atlas,
                     mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: cursor_x,
-                        y: cursor_y,
-                        z: 0,
-                    },
+                    origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &text.pixels,
@@ -1243,11 +1222,10 @@ impl GpuRenderer {
             );
             let start = u32::try_from(batch.vertices.len())
                 .map_err(|_| GpuRendererError::NonFiniteGeometry)?;
-            let atlas_size = u32_to_f32(TEXT_ATLAS_SIZE);
-            let u0 = u32_to_f32(cursor_x) / atlas_size;
-            let v0 = u32_to_f32(cursor_y) / atlas_size;
-            let u1 = u32_to_f32(cursor_x + text.width) / atlas_size;
-            let v1 = u32_to_f32(cursor_y + text.height) / atlas_size;
+            let u0 = u32_to_f32(x) / atlas_extent;
+            let v0 = u32_to_f32(y) / atlas_extent;
+            let u1 = u32_to_f32(x + text.width) / atlas_extent;
+            let v1 = u32_to_f32(y + text.height) / atlas_extent;
             for (vertex, uv) in text.vertices.iter().zip([
                 [u0, v0],
                 [u1, v0],
@@ -1264,11 +1242,36 @@ impl GpuRenderer {
             let draw_index =
                 batch.push_draw(start..start + 6, text.scissor, text.merge_with_previous);
             batch.text_draws.push(draw_index);
-            cursor_x += text.width;
-            row_height = row_height.max(text.height);
         }
         Ok(batch)
     }
+}
+
+/// Shelf-packs text bitmaps into a square atlas of `atlas_size` pixels.
+///
+/// Returns each bitmap's top-left corner in packing order, or `None` when the
+/// frame does not fit. Pure planning lets the renderer size the atlas before
+/// allocating or uploading anything.
+fn plan_text_placements(texts: &[PreparedText], atlas_size: u32) -> Option<Vec<(u32, u32)>> {
+    let mut placements = Vec::with_capacity(texts.len());
+    let (mut cursor_x, mut cursor_y, mut row_height): (u32, u32, u32) = (0, 0, 0);
+    for text in texts {
+        if text.width > atlas_size || text.height > atlas_size {
+            return None;
+        }
+        if cursor_x + text.width > atlas_size {
+            cursor_x = 0;
+            cursor_y = cursor_y.saturating_add(row_height);
+            row_height = 0;
+        }
+        if cursor_y + text.height > atlas_size {
+            return None;
+        }
+        placements.push((cursor_x, cursor_y));
+        cursor_x += text.width;
+        row_height = row_height.max(text.height);
+    }
+    Some(placements)
 }
 
 /// Result of attempting to present a frame.
@@ -2301,6 +2304,53 @@ fn create_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLay
     })
 }
 
+/// Allocates a square glyph atlas and its sampling bind group at `size`.
+///
+/// The atlas is repacked from scratch every frame, so growing it only requires
+/// a fresh texture and bind group; no glyph content needs to be preserved.
+fn create_text_atlas(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    size: u32,
+) -> (wgpu::Texture, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Drawen glyph atlas"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Drawen glyph atlas sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Drawen glyph atlas bind group"),
+        layout: bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    (texture, bind_group)
+}
+
 fn create_text_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -2584,9 +2634,46 @@ mod tests {
 
     use super::{
         CachedTextBitmap, DisplayList, IMAGE_SHADER, ImageBatch, PreparedFrame, PreparedOperation,
-        Scissor, TEXTURE_SHADER, TextBatch, TextBitmapCache, TextureId, raster_image_fits_device,
-        restrict_to_damage, source_over_alpha, vertex_buffer_capacity,
+        PreparedText, Scissor, TEXT_ATLAS_INITIAL_SIZE, TEXT_ATLAS_MAX_SIZE, TEXTURE_SHADER,
+        TextBatch, TextBitmapCache, TextVertex, TextureId, plan_text_placements,
+        raster_image_fits_device, restrict_to_damage, source_over_alpha, vertex_buffer_capacity,
     };
+
+    fn prepared_text(width: u32, height: u32) -> PreparedText {
+        let bytes = usize::try_from(width * height * 4).expect("small test bitmap");
+        PreparedText {
+            width,
+            height,
+            pixels: Arc::from(vec![0u8; bytes].as_slice()),
+            vertices: [TextVertex {
+                position: [0.0, 0.0],
+                uv: [0.0, 0.0],
+            }; 6],
+            scissor: Scissor::full(width, height),
+            merge_with_previous: false,
+        }
+    }
+
+    #[test]
+    fn text_placements_fit_the_initial_atlas_for_small_frames() {
+        assert!(plan_text_placements(&[], TEXT_ATLAS_INITIAL_SIZE).is_some());
+        let texts: Vec<_> = (0..25).map(|_| prepared_text(100, 100)).collect();
+        let placements =
+            plan_text_placements(&texts, TEXT_ATLAS_INITIAL_SIZE).expect("25 tiles fit 512");
+        assert_eq!(placements.len(), 25);
+        assert_eq!(placements[0], (0, 0));
+        assert_eq!(placements[5], (0, 100));
+    }
+
+    #[test]
+    fn text_placements_report_when_a_larger_atlas_is_needed() {
+        let texts: Vec<_> = (0..26).map(|_| prepared_text(100, 100)).collect();
+        assert!(plan_text_placements(&texts, TEXT_ATLAS_INITIAL_SIZE).is_none());
+        assert!(plan_text_placements(&texts, TEXT_ATLAS_INITIAL_SIZE * 2).is_some());
+        // A single bitmap wider than the maximum atlas can never fit.
+        let huge = [prepared_text(TEXT_ATLAS_MAX_SIZE + 1, 10)];
+        assert!(plan_text_placements(&huge, TEXT_ATLAS_MAX_SIZE).is_none());
+    }
 
     #[test]
     fn vertex_buffer_capacity_grows_with_headroom() {
