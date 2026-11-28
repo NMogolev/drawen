@@ -986,8 +986,9 @@ impl StyleShowcase {
             .environment()
             .text_shaper()
             .system_fallback_stats();
+        let text_cache = stats.last_text_cache();
         let text = format!(
-            "layout passes: {} · paint passes: {}\nlast layout: {} µs{}\nlast paint: {} µs · {} commands{}\nframe damage: {}\nsystem fallback: {} faces indexed · {} loaded ({} KiB) · {} chars memoized",
+            "layout passes: {} · paint passes: {}\nlast layout: {} µs{}\nlast paint: {} µs · {} commands{}\nframe damage: {}\nsystem fallback: {} faces indexed · {} loaded ({} KiB) · {} chars memoized\ntext cache: {} layouts · {} KiB · {} hits / {} misses / {} evictions",
             stats.layout_passes(),
             stats.paint_passes(),
             stats.last_layout_time().as_micros(),
@@ -1008,6 +1009,11 @@ impl StyleShowcase {
             fallback.loaded_faces,
             fallback.loaded_bytes / 1024,
             fallback.coverage_entries,
+            text_cache.entries,
+            text_cache.retained_bytes / 1024,
+            text_cache.hits,
+            text_cache.misses,
+            text_cache.evictions,
         );
         if text != self.diagnostics_cache {
             self.diagnostics_cache.clone_from(&text);
